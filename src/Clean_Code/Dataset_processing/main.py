@@ -39,10 +39,10 @@ class DatasetProcessor:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize components
-        self.graph_generators = self._initialize_graph_generators()
+        self.graph_generators = self._initialize_graph_generators(config['model'])
         self.mixer = GraphMixer()
 
-    def _initialize_graph_generators(self) -> Dict:
+    def _initialize_graph_generators(self, model) -> Dict:
         """Initialize the appropriate graph generators based on config"""
         generators = {}
         
@@ -50,13 +50,13 @@ class DatasetProcessor:
             try:
                 if graph_type == GraphType.SYNTACTIC:
                     from sintactic import SyntacticGraphGenerator
-                    generators[graph_type] = SyntacticGraphGenerator()
+                    generators[graph_type] = SyntacticGraphGenerator(model)
                 elif graph_type == GraphType.SEMANTIC:
                     from semantic import SemanticGraphGenerator
-                    generators[graph_type] = SemanticGraphGenerator()
+                    generators[graph_type] = SemanticGraphGenerator(model)
                 elif graph_type == GraphType.CONSTITUENCY:
                     from constituency import ConstituencyGraphGenerator
-                    generators[graph_type] = ConstituencyGraphGenerator()
+                    generators[graph_type] = ConstituencyGraphGenerator(model)
             except ImportError as e:
                 logger.error(f"Failed to initialize {graph_type.value} generator: {str(e)}")
                 continue
@@ -92,33 +92,34 @@ class DatasetProcessor:
 
     def _process_batch(self, batch: pd.DataFrame, start_idx: int):
         """Process a batch of dataset entries"""
-        for idx, row in batch.iterrows():
+        for i, (idx, row) in enumerate(batch.iterrows()):
             try:
                 # Extract text from the appropriate column (adjust based on your dataset structure)
                 text = row['text'] if 'text' in row else row.iloc[0]
                 
-                logger.info(f"Processing entry {idx+1}")
+                current_idx = start_idx + i
+                logger.info(f"Processing entry {current_idx + 1}")
                 
                 # Generate individual graphs
                 graphs = []
                 for graph_type, generator in self.graph_generators.items():
                     try:
-                        graph = generator.generate(text)
+                        graph = generator.get_graph([text])  # Updated method name
                         if graph is not None:
                             graphs.append(graph)
                     except Exception as e:
-                        logger.error(f"Error generating {graph_type.value} graph for entry {idx}: {str(e)}")
+                        logger.error(f"Error generating {graph_type.value} graph for entry {current_idx}: {str(e)}")
                         continue
                 
                 # Mix graphs if we have any
                 if graphs:
-                    mixed_graph = self.mixer.mix(graphs, self.graph_types)
-                    self._save_graph(mixed_graph, idx)
+                    mixed_graph = self.mixer.mix(graphs, {t.value for t in self.graph_types})  # Convert to strings
+                    self._save_graph(mixed_graph, current_idx)
                 else:
-                    logger.warning(f"No graphs generated for entry {idx}")
+                    logger.warning(f"No graphs generated for entry {current_idx}")
             
             except Exception as e:
-                logger.error(f"Error processing entry {idx}: {str(e)}")
+                logger.error(f"Error processing entry {current_idx}: {str(e)}")
                 continue
 
     def _read_dataset(self) -> Optional[pd.DataFrame]:
