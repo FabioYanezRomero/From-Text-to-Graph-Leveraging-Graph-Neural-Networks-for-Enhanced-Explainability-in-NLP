@@ -10,7 +10,7 @@ SUPAR_SDP_MODELS = [
     'sdp-vi-en',  # Variational inference semantic dependency parser
     'sdp-vi-roberta-en'  # RoBERTa-enhanced variational inference parser
 ]
-class semantic_graph_generator(BaseGraphGenerator):
+class SemanticGraphGenerator(BaseGraphGenerator):
 
     """
     This class is used to create a semantic graph from a sentence using a semantic parser.

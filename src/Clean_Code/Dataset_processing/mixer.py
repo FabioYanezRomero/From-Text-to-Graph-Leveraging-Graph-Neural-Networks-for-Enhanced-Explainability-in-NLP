@@ -8,8 +8,8 @@ class GraphType(Enum):
     SYNTACTIC = "syntactic"
     SEMANTIC = "semantic"
     CONSTITUENCY = "constituency"
-    KNOWLEDGE = "knowledge"
-    
+
+
     @classmethod
     def from_string(cls, type_str: str) -> "GraphType":
         """Convert string to GraphType, case-insensitive"""
@@ -21,8 +21,8 @@ class GraphType(Enum):
 
 class GraphMixer:
     """
-    This class will mix different types of graphs i.e. syntactic, semantic, constituency or
-    knowledge graphs into a single graph based on the user's choice and the individual graphs provided.    
+    This class will mix different types of graphs i.e. syntactic, semantic or constituency 
+    graphs into a single graph based on the user's choice and the individual graphs provided.    
     """
     def __init__(self):
         """Initialize the mixer"""

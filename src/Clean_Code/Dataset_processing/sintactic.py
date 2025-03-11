@@ -10,6 +10,16 @@ import torch
 from supar import Parser
 from .base_generator import BaseGraphGenerator
 
+
+# Available Supar dependency parsing models
+SUPAR_DEP_MODELS = [
+    'dep-biaffine-en',
+    'dep-biaffine-roberta-en',
+    'dep-crf2o-en',
+    'dep-crf2o-roberta-en'
+]
+
+
 class SyntacticGraphGenerator(BaseGraphGenerator):
     """
     Creates syntactic graphs from sentences.
@@ -27,6 +37,8 @@ class SyntacticGraphGenerator(BaseGraphGenerator):
             RuntimeError: If the specified device is not available.
         """
         super().__init__(model, device)
+        if model not in SUPAR_DEP_MODELS:
+            raise ValueError(f"Unknown model: {model}. Available models: {SUPAR_DEP_MODELS}")
         self.property = 'syntactic'  # Corrected spelling from 'sintactic'
         
         # Verify device availability for better error handling

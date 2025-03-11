@@ -1,197 +1,214 @@
-import json
+import argparse
+import logging
 import os
-from tqdm import tqdm
-import pickle as pkl
-import torch
-from supar import Parser
+import json
+import pandas as pd
+from pathlib import Path
+from typing import Dict, List, Optional
 import networkx as nx
-import matplotlib.pyplot as plt
-from nltk.tokenize import word_tokenize
-from dataloader import *
-from torch.utils.data import Dataset, DataLoader
-from sintactic import *
-from semantic import *
-from constituency import *
-import xml.etree.ElementTree as ET
+from mixer import GraphMixer, GraphType
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-def process_SNLI(folder:str,):
-    files = os.listdir(folder)
-    data_list = []
-    filename_list = []
-    for file in files:
-        if file.endswith('.jsonl'):
-            data = []
-            filename = file.split('_')[2].split('.')[0]
-            with open(folder + file, 'r') as f:
-                for line in f:
-                    data.append(json.loads(line))
-            data_list.append(data)
-            filename_list.append(filename)
-    return data_list, filename_list
-
-
-def process_RTE(folder, dataset):
-    data_list = []
-    filename_list = []
-    files = os.listdir(folder)
-    for file in files:
-        if file.endswith("xml"):
-            data = []
-            filename = file.split('.')[0]
-            with open(f"{folder}/{file}", "r") as f:
-                tree = ET.parse(f)
-            root = tree.getroot()
-            data = []
-            for child in root:
-                for child2 in child:
-                    for element in child2.iter('t'):
-                        sentence1 = element.text
-                    for element in child2.iter('h'):
-                        sentence2 = element.text
-                if dataset == 'RTE1':
-                    info = {'sentence1': sentence1, 'sentence2': sentence2, 
-                            'label': child.attrib['value'], 'id': child.attrib['id'],
-                            'task': child.attrib['task']}
-                if dataset == 'RTE2':
-                    info = {'sentence1': sentence1, 'sentence2': sentence2, 
-                            'label': child.attrib['entailment'], 'id': child.attrib['id'],
-                            'task': child.attrib['task']}
-                if dataset == 'RTE3':
-                    info = {'sentence1': sentence1, 'sentence2': sentence2, 
-                            'label': child.attrib['entailment'], 'id': child.attrib['id'],
-                            'task': child.attrib['task'], 'length': child.attrib['length']}
-                data.append(info)
-            data_list.append(data)
-            filename_list.append(filename)
-    return data_list, filename_list
-
-
-def process_SciTail(folder):
-    files = os.listdir(folder)
-    data_list = []
-    filename_list = []
-    for file in files:
-        if file.endswith("txt"):
-            data = []
-            filename = file.split('_')[2].split('.')[0]
-            with open(f"{folder}/{file}", 'r') as f:
-                for line in f:
-                    data.append(json.loads(line))
-            data_list.append(data)
-            filename_list.append(filename)
-    return data_list, filename_list
-
-def get_sentences(folder, dataset):
-    """
-    Get the sentences from the dataset.
-    """
-
-    if dataset == 'SNLI':
-        data_list, filename_list = process_SNLI(folder)
-
-    if dataset == 'RTE1' or dataset == 'RTE2' or dataset == 'RTE3':
-        data_list, filename_list = process_RTE(folder, dataset)
-
-    if dataset == "SciTail":
-        data_list, filename_list = process_SciTail(folder)
-
-    return data_list, filename_list
-
-
-def build_graphs(dataset_name=None, sintactic=False, semantic=False, 
-                 constituency=False, batch_size=8, sintactic_parser=None, 
-                 semantic_parser=None, constituency_parser=None, 
-                 data=None, filename=None):
-    if dataset_name == 'SNLI':
-        dataset = SNLIDataset(data)
-    if dataset_name == 'RTE1' or dataset_name == 'RTE2' or dataset_name == 'RTE3':
-        dataset = RTEDataset(data)
-    if dataset_name == 'SciTail':
-        dataset = SciTailDataset(data)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    iterator = 0
-    for sentences1, sentences2, labels in tqdm(dataloader):
-        processed_data = []
-
-        if sintactic:
-            syntactic_graphs1 = sintactic_parser.get_graph(sentences1)
-            syntactic_graphs2 = sintactic_parser.get_graph(sentences2)
-            for i in range(len(syntactic_graphs1)):
-                processed_data.append((syntactic_graphs1[i], syntactic_graphs2[i], labels[i]))
-            mode = 'sintactic'
-        
-        if semantic:
-            semantic_graphs1 = semantic_parser.get_graph(sentences1)
-            semantic_graphs2 = semantic_parser.get_graph(sentences2)
-            for i in range(len(semantic_graphs1)):
-                processed_data.append((semantic_graphs1[i], semantic_graphs2[i], labels[i]))
-            mode = 'semantic'
-        
-        if constituency:
-            constituency_graphs1 = constituency_parser.get_graph(sentences1)
-            constituency_graphs2 = constituency_parser.get_graph(sentences2)
-            for i in range(len(constituency_graphs1)):
-                processed_data.append((constituency_graphs1[i], constituency_graphs2[i], labels[i]))
-            mode = 'constituency'
-
-        
-        output_path = f"/usrvol/processed_data/{dataset_name}/{filename}" 
-        if not os.path.exists(output_path):
-            os.makedirs(output_path)
-        with open(f"{output_path}/{mode}{iterator}.pkl", 'wb') as f:
-            pkl.dump(processed_data, f)
-        iterator += 1
-
-
-def get_graphs(data, filename, dataset, 
-               sintactic=False, semantic=False, 
-               constituency=False, knowledge=False, 
-               batch_size=8):
-
-    if sintactic:
-        sintactic_parser = sintactic_graph_generator(model='dep-biaffine-roberta-en')
-    else:
-        sintactic_parser = None
+class DatasetProcessor:
+    """Main class for processing datasets and generating graphs"""
     
-    if semantic:
-        semantic_parser = semantic_graph_generator(model='sdp-vi-en')
-    else:
-        semantic_parser = None
+    def __init__(self, config: Dict):
+        """
+        Initialize the dataset processor
+        
+        Args:
+            config: Dictionary containing configuration parameters
+        """
+        self.config = config
+        self.output_dir = Path(config['output_dir'])
+        self.dataset_path = Path(config['dataset_path'])
+        self.graph_types = {GraphType.from_string(t) for t in config['graph_types']}
+        self.batch_size = config.get('batch_size', 100)
+        
+        # Set log level from config if provided
+        if 'log_level' in config:
+            logging.getLogger().setLevel(config['log_level'])
+        
+        # Create output directory if it doesn't exist
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize components
+        self.graph_generators = self._initialize_graph_generators()
+        self.mixer = GraphMixer()
 
-    if constituency:
-        constituency_parser = constituency_graph_generator(model='con-crf-roberta-en')
-    else:
-        constituency_parser = None
+    def _initialize_graph_generators(self) -> Dict:
+        """Initialize the appropriate graph generators based on config"""
+        generators = {}
+        
+        for graph_type in self.graph_types:
+            try:
+                if graph_type == GraphType.SYNTACTIC:
+                    from sintactic import SyntacticGraphGenerator
+                    generators[graph_type] = SyntacticGraphGenerator()
+                elif graph_type == GraphType.SEMANTIC:
+                    from semantic import SemanticGraphGenerator
+                    generators[graph_type] = SemanticGraphGenerator()
+                elif graph_type == GraphType.CONSTITUENCY:
+                    from constituency import ConstituencyGraphGenerator
+                    generators[graph_type] = ConstituencyGraphGenerator()
+            except ImportError as e:
+                logger.error(f"Failed to initialize {graph_type.value} generator: {str(e)}")
+                continue
+        
+        if not generators:
+            raise ValueError("No graph generators could be initialized")
+        
+        return generators
 
-    if knowledge:
-        pass #Not Implemented
+    def process_dataset(self):
+        """Process the dataset and generate graphs"""
+        try:
+            # Read and validate dataset
+            dataset = self._read_dataset()
+            if dataset is None or dataset.empty:
+                logger.error("Failed to read dataset or dataset is empty")
+                return
 
-    build_graphs(dataset_name=dataset, sintactic=sintactic, semantic=semantic, constituency=constituency, 
-                batch_size=batch_size, sintactic_parser=sintactic_parser, 
-                semantic_parser=semantic_parser, constituency_parser=constituency_parser, 
-                data=data, filename=filename)
+            total_entries = len(dataset)
+            logger.info(f"Processing {total_entries} entries")
 
+            # Process in batches
+            for start_idx in range(0, total_entries, self.batch_size):
+                end_idx = min(start_idx + self.batch_size, total_entries)
+                batch = dataset.iloc[start_idx:end_idx]
+                
+                logger.info(f"Processing batch {start_idx//self.batch_size + 1}, entries {start_idx+1} to {end_idx}")
+                self._process_batch(batch, start_idx)
 
-if __name__ == '__main__':
-    datasets = ['SNLI', 'RTE1', 'RTE2', 'RTE3','SciTail']
-    for dataset in datasets:
-        torch.cuda.empty_cache()
-        folder = f"/usrvol/data/{dataset}/"            
-        print(f"Processing {dataset} dataset...")
-        data_list, filename_list = get_sentences(folder, dataset)
+        except Exception as e:
+            logger.error(f"Fatal error during dataset processing: {str(e)}")
+            raise
 
-        for data, filename in zip(data_list, filename_list):
-            print(f"Processing {filename}...")
+    def _process_batch(self, batch: pd.DataFrame, start_idx: int):
+        """Process a batch of dataset entries"""
+        for idx, row in batch.iterrows():
+            try:
+                # Extract text from the appropriate column (adjust based on your dataset structure)
+                text = row['text'] if 'text' in row else row.iloc[0]
+                
+                logger.info(f"Processing entry {idx+1}")
+                
+                # Generate individual graphs
+                graphs = []
+                for graph_type, generator in self.graph_generators.items():
+                    try:
+                        graph = generator.generate(text)
+                        if graph is not None:
+                            graphs.append(graph)
+                    except Exception as e:
+                        logger.error(f"Error generating {graph_type.value} graph for entry {idx}: {str(e)}")
+                        continue
+                
+                # Mix graphs if we have any
+                if graphs:
+                    mixed_graph = self.mixer.mix(graphs, self.graph_types)
+                    self._save_graph(mixed_graph, idx)
+                else:
+                    logger.warning(f"No graphs generated for entry {idx}")
             
-            """ print("Generating sintactic graphs...")
-            get_graphs(data, filename, dataset, sintactic=True, semantic=False, constituency=False, knowledge=False, batch_size=512)
-            torch.cuda.empty_cache()
+            except Exception as e:
+                logger.error(f"Error processing entry {idx}: {str(e)}")
+                continue
 
-            print("Generating semantic graphs...")
-            get_graphs(data, filename, dataset, sintactic=False, semantic=True, constituency=False, knowledge=False, batch_size=512)
-            torch.cuda.empty_cache() """
+    def _read_dataset(self) -> Optional[pd.DataFrame]:
+        """Read and validate the dataset"""
+        try:
+            if not self.dataset_path.exists():
+                raise FileNotFoundError(f"Dataset not found at {self.dataset_path}")
+            
+            # Read dataset based on file extension
+            file_extension = self.dataset_path.suffix.lower()
+            if file_extension == '.csv':
+                df = pd.read_csv(self.dataset_path)
+            elif file_extension == '.tsv':
+                df = pd.read_csv(self.dataset_path, sep='\t')
+            elif file_extension == '.json':
+                df = pd.read_json(self.dataset_path)
+            elif file_extension == '.jsonl':
+                df = pd.read_json(self.dataset_path, lines=True)
+            else:
+                raise ValueError(f"Unsupported file format: {file_extension}")
+            
+            return df
+        
+        except Exception as e:
+            logger.error(f"Error reading dataset: {str(e)}")
+            return None
 
-            print("Generating constituency graphs...")
-            get_graphs(data, filename, dataset, sintactic=False, semantic=False, constituency=True, knowledge=False, batch_size=512)    
-            torch.cuda.empty_cache()
+    def _save_graph(self, graph: nx.MultiDiGraph, idx: int):
+        """Save the generated graph"""
+        try:
+            output_path = self.output_dir / f"graph_{idx}.pkl"
+            nx.write_gpickle(graph, output_path)
+            logger.debug(f"Saved graph to {output_path}")
+        
+        except Exception as e:
+            logger.error(f"Error saving graph {idx}: {str(e)}")
+
+
+def load_config(config_path: str) -> Dict:
+    """Load configuration from JSON file"""
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Validate required fields
+        required_fields = ['dataset_path', 'output_dir', 'graph_types']
+        missing_fields = [field for field in required_fields if field not in config]
+        
+        if missing_fields:
+            raise ValueError(f"Missing required config fields: {missing_fields}")
+        
+        # Validate graph types
+        valid_types = {t.value for t in GraphType}
+        invalid_types = [t for t in config['graph_types'] if t not in valid_types]
+        if invalid_types:
+            raise ValueError(f"Invalid graph types in config: {invalid_types}. Valid types are: {valid_types}")
+            
+        return config
+    
+    except Exception as e:
+        logger.error(f"Error loading config: {str(e)}")
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Process dataset and generate graphs')
+    parser.add_argument('--config', type=str, required=True,
+                      help='Path to configuration JSON file')
+    parser.add_argument('--debug', action='store_true',
+                      help='Enable debug logging')
+    args = parser.parse_args()
+
+    try:
+        # Set debug logging if requested
+        if args.debug:
+            logging.getLogger().setLevel(logging.DEBUG)
+        
+        # Load configuration
+        config = load_config(args.config)
+        
+        # Initialize and run processor
+        processor = DatasetProcessor(config)
+        processor.process_dataset()
+        
+        logger.info("Dataset processing completed successfully")
+    
+    except Exception as e:
+        logger.error(f"Processing failed: {str(e)}")
+        raise
+
+
+if __name__ == "__main__":
+    main()
