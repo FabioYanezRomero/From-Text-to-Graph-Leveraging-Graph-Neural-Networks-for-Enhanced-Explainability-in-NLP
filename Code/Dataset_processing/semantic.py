@@ -3,13 +3,18 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import pickle as pkl
 import torch
+from base_generator import BaseGraphGenerator
 
-class semantic_graph_generator():
+SUPAR_SDP_MODELS = [
+    'sdp-biaffine-en',  # Basic biaffine semantic dependency parser
+    'sdp-vi-en',  # Variational inference semantic dependency parser
+    'sdp-vi-roberta-en'  # RoBERTa-enhanced variational inference parser
+]
+class semantic_graph_generator(BaseGraphGenerator):
 
     """
     This class is used to create a semantic graph from a sentence using a semantic parser.
     """
-
 
     def __init__(self, model: str, device: str = 'cuda:0'):
         
@@ -20,7 +25,10 @@ class semantic_graph_generator():
         model (str): The model to be loaded into the semantic parser.
         device (str): The device to be used for computations ('cpu' or 'gpu'). Default is 'cpu'.
         """
-        self.model = model
+        super().__init__(model, device)
+        
+        if model not in SUPAR_SDP_MODELS:
+            raise ValueError(f"Unknown model: {model}. Available models: {SUPAR_SDP_MODELS}")
         self.property = 'semantic'
         self.sem = Parser.load(model)
         self.device = device
@@ -85,23 +93,3 @@ class semantic_graph_generator():
         semantic_tree = self._parse(sentence)
         graph = self._build_graph(semantic_tree)
         return graph
-    
-    def draw_graph(self, graph):
-        
-        """
-        Draw the syntactic graph.
-        """
-
-        labels = nx.get_node_attributes(graph, 'label')
-        nx.draw_kamada_kawai(graph, with_labels=True, font_weight='bold')
-        plt.show()
-
-    def save_graph(self, graph, folder, filename):
-        
-        """
-        Save the syntactic graph to a file.
-        """
-
-        with open(f'{folder}/{filename}.pkl', 'wb') as f:
-            pkl.dump(graph, f)
-    

@@ -112,6 +112,6 @@ class BaseGraphGenerator(ABC):
         try:
             with open(f'{folder}/{filename}.pkl', 'wb') as f:
                 pkl.dump(graph, f)
-            print(f"Graph(s) successfully saved to {folder}/{filename}.pkl")
+            print(f"Graph(s) successfully saved to {folder}/{self.property}/{filename}.pkl")
         except IOError as e:
-            raise IOError(f"Failed to save graph to {folder}/{filename}.pkl: {e}")
+            raise IOError(f"Failed to save graph to {folder}/{self.property}/{filename}.pkl: {e}")

@@ -1,0 +1,7 @@
+supar>=1.2.0  # For parsing models
+torch>=1.8.0  # Required by supar
+networkx>=2.5  # For graph operations
+transformers>=4.30.0  # For additional models (optional)
+pandas  # For data handling
+matplotlib  # For visualization
+tqdm  # For progress bars

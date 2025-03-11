@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import pickle as pkl
 import torch
 from supar import Parser
-
+from base_generator import BaseGraphGenerator
 # Dictionary mapping constituency labels to more descriptive phrases
 PHRASE_MAPPER = {
     'S': '«SENTENCE»',
@@ -44,8 +44,15 @@ PHRASE_MAPPER = {
     'X': '«UNKNOWN»'
 }
 
+SUPAR_CON_MODELS = [
+    'con-crf-en',  # CRF-based constituency parser
+    'con-crf-roberta-en',  # RoBERTa-enhanced CRF constituency parser
+    'con-biaffine-en',  # Biaffine constituency parser
+    'con-biaffine-roberta-en'  # RoBERTa-enhanced biaffine constituency parser
+]
 
-class ConstituencyGraphGenerator:
+
+class ConstituencyGraphGenerator(BaseGraphGenerator):
     """
     Creates constituency graphs from sentences.
 
@@ -71,7 +78,9 @@ class ConstituencyGraphGenerator:
         Raises:
             RuntimeError: If the specified device is not available.
         """
-        self.model = model
+        super().__init__(model, device)
+        if model not in SUPAR_CON_MODELS:
+            raise ValueError(f"Unknown model: {model}. Available models: {SUPAR_CON_MODELS}")
         self.property = 'constituency'
         
         # Verify device availability for better error handling
@@ -225,40 +234,3 @@ class ConstituencyGraphGenerator:
                 graph_list.append(graph)
                 
         return graph_list
-
-    def draw_graph(self, graph: nx.DiGraph, figsize: tuple = (12, 8)) -> None:
-        """
-        Draw the constituency graph.
-
-        Args:
-            graph (nx.DiGraph): The constituency graph to draw.
-            figsize (tuple, optional): Size of the figure. Defaults to (12, 8).
-        """
-        plt.figure(figsize=figsize)
-        labels = nx.get_node_attributes(graph, 'label')
-        pos = nx.kamada_kawai_layout(graph)
-        nx.draw(graph, pos, with_labels=True, labels=labels, 
-                node_color='lightblue', node_size=1500, 
-                font_weight='bold', font_size=8, 
-                edge_color='gray')
-        plt.title("Constituency Graph")
-        plt.show()
-
-    def save_graph(self, graph: Union[nx.DiGraph, List[nx.DiGraph]], folder: str, filename: str) -> None:
-        """
-        Save the constituency graph(s) to a file in pickle format.
-
-        Args:
-            graph (Union[nx.DiGraph, List[nx.DiGraph]]): The graph or list of graphs to save.
-            folder (str): Destination folder path.
-            filename (str): Name of the file without extension.
-            
-        Raises:
-            IOError: If there's an error saving the file.
-        """
-        try:
-            with open(f'{folder}/{filename}.pkl', 'wb') as f:
-                pkl.dump(graph, f)
-            print(f"Graph(s) successfully saved to {folder}/{filename}.pkl")
-        except IOError as e:
-            raise IOError(f"Failed to save graph to {folder}/{filename}.pkl: {e}")
