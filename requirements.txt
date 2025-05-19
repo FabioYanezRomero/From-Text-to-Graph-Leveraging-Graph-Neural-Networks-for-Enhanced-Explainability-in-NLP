@@ -1,7 +1,25 @@
+# Core dependencies
 supar>=1.2.0  # For parsing models
-torch>=1.8.0  # Required by supar
+torch>=1.8.0  # Required by supar and for deep learning
 networkx>=2.5  # For graph operations
-transformers>=4.30.0  # For additional models (optional)
-pandas  # For data handling
-matplotlib  # For visualization
-tqdm  # For progress bars
+transformers>=4.30.0  # For transformer models
+pandas>=1.3.0  # For data handling
+matplotlib>=3.4.0  # For visualization
+numpy>=1.20.0  # For numerical operations
+scikit-learn>=1.0.0  # For machine learning utilities
+tqdm>=4.60.0  # For progress bars
+
+# AutoGOAL and its dependencies
+autogoal[contrib]>=1.0.3  # Core AutoGOAL with all optional dependencies
+
+# Additional dependencies for AutoGOAL
+scipy>=1.7.0  # Required by some AutoGOAL features
+joblib>=1.0.0  # For model persistence
+pyyaml>=5.4.1  # For configuration
+
+# Development dependencies (optional)
+pytest>=6.2.5  # For testing
+black>=21.12b0  # For code formatting
+flake8>=4.0.1  # For linting
+mypy>=0.910  # For type checking
+jupyter>=1.0.0  # For interactive development
