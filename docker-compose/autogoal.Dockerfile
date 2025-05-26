@@ -1,16 +1,13 @@
-# Use the official AutoGOAL image as base
-FROM autogoal/autogoal:latest
+# Use Python 3.9 slim as base image
+FROM python:3.9-slim
 
 # Set environment variables
 ARG BUILD_ENVIRONMENT=development
-ARG EXTRAS=all
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     BUILD_ENV=${BUILD_ENVIRONMENT} \
-    POETRY_VIRTUALENVS_CREATE=false
-
-# Set working directory
-WORKDIR /autogoal_repo
+    POETRY_VIRTUALENVS_CREATE=false \
+    PYTHONPATH=/home/coder/autogoal:/app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -18,26 +15,43 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# Create coder user and set up directories
+RUN useradd -m coder && \
+    mkdir -p /home/coder/autogoal && \
+    chown -R coder:coder /home/coder
+
+# Set working directory
+WORKDIR /home/coder/autogoal
+
+# Copy the AutoGOAL repository
+COPY --chown=coder:coder ./autogoal_repo .
+
+# Switch to coder user
+USER coder
+
+# Initialize and update git submodules
+RUN git submodule update --init --recursive
+
 # Install Python dependencies
 RUN pip install --upgrade pip && \
     pip install poetry && \
     poetry config virtualenvs.create false
 
-# Copy only the necessary files for dependency installation
-COPY pyproject.toml poetry.lock* ./
+# Install AutoGOAL core
+RUN cd /home/coder/autogoal/autogoal && \
+    pip install -e .
 
-# Install project dependencies
-RUN if [ -f pyproject.toml ]; then \
-        poetry install --no-interaction --no-ansi $(test "$BUILD_ENV" = "production" && echo "--no-dev"); \
+# Install autogoal-contrib if it exists
+RUN if [ -d "/home/coder/autogoal/autogoal-contrib" ]; then \
+        cd /home/coder/autogoal/autogoal-contrib && \
+        pip install -e .; \
     fi
 
-# Install AutoGOAL with specified extras
-RUN if [ "$EXTRAS" != "none" ]; then \
-        pip install autogoal[$EXTRAS]; \
+# Install autogoal-remote if it exists
+RUN if [ -d "/home/coder/autogoal/autogoal-remote" ]; then \
+        cd /home/coder/autogoal/autogoal-remote && \
+        pip install -e .; \
     fi
-
-# Copy the rest of the application
-COPY . .
 
 # Set the default command
 CMD ["/bin/bash"]
