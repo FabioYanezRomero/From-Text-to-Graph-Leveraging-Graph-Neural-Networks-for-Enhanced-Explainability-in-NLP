@@ -43,30 +43,35 @@ services:
           cpus: '2'
           memory: 4G
 
-  # AutoGOAL optimization service using the development image from the local repository
+  # AutoGOAL optimization service built from source
   autogoal:
     build:
-      context: ./autogoal_repo
-      dockerfile: dockerfiles/development/dockerfile
+      context: ./autogoal_repo  # Build from the autogoal_repo
+      dockerfile: dockerfiles/development/dockerfile  # Use the original development Dockerfile
       args:
         - extras=all  # Install all extras
+      cache_from:
+        - autogoal/autogoal:core
     volumes:
       # Mount the main application code
       - type: bind
         source: .
         target: /app
-      # Mount the autogoal_repo
+      # Mount the autogoal_repo (mounted as /home/coder/autogoal by the base image)
       - type: bind
         source: ./autogoal_repo
-        target: /autogoal_repo
+        target: /home/coder/autogoal
       # Shared data volumes
       - app-data:/app/data
-      - autogoal-data:/autogoal_data
-    working_dir: /autogoal_repo
+      - autogoal-data:/home/coder/autogoal-data
+      # Cache for pip and build
+      - ${HOME}/.cache/pip:/home/coder/.cache/pip
+      - ${HOME}/.local:/home/coder/.local
+    working_dir: /home/coder/autogoal
     tty: true
     stdin_open: true
     environment:
-      - PYTHONPATH=/autogoal_repo:/app
+      - PYTHONPATH=/home/coder/autogoal:/app
       - BUILD_ENVIRONMENT=development
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
