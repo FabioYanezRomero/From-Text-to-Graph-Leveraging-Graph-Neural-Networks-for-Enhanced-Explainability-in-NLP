@@ -15,6 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     rsync \
     curl \
+    procps \
+    lsof \
+    net-tools \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create coder user and set up directories

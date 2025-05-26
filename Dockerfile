@@ -11,6 +11,10 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
+    procps \
+    lsof \
+    net-tools \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
