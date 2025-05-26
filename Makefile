@@ -20,11 +20,17 @@ display_help:
 	@echo ''
 	${YELLOW}Text-to-Graph Project${RESET}
 	----------------------
+	${GREEN}Build:${RESET}
+	  ${YELLOW}make build${RESET}		Build all services
+	  ${YELLOW}make build-<service>${RESET}	Build a specific service
+
 	${GREEN}Development:${RESET}
-	  ${YELLOW}make up${RESET}			Build and start all services
+	  ${YELLOW}make up${RESET}			Build (if needed) and start all services
+	  ${YELLOW}make start${RESET}		Start existing containers without building
+	  ${YELLOW}make rebuild${RESET}		Force rebuild and restart all services
 	  ${YELLOW}make down${RESET}		Stop and remove all containers
 	  ${YELLOW}make logs${RESET}		View logs from all services
-	  ${YELLOW}make logs app${RESET}	View logs from a specific service
+	  ${YELLOW}make logs <service>${RESET}	View logs from a specific service
 
 	${GREEN}Testing:${RESET}
 	  ${YELLOW}make test${RESET}		Run tests
@@ -51,11 +57,30 @@ display_help help:
 	/^## /{gsub(/## /, "");print "\n"$$1":\n"} \
 	/^[\t ].*## /{gsub(/^[\t ]*[^:]*:[\t ]*## /, "");print "  "$$0}' $(MAKEFILE_LIST)
 
+# Build
+## Build all services
+build:
+	@echo "${GREEN}🔨 Building all services...${RESET}"
+	${DOCKER_COMPOSE} build --no-cache --pull
+
+## Build a specific service
+build-%:
+	@echo "${GREEN}🔨 Building $* service...${RESET}"
+	${DOCKER_COMPOSE} build --no-cache --pull $*
+
 # Development
-## Start all services
-up:
+## Start all services (build if needed)
+up: build
 	@echo "${GREEN}🚀 Starting all services...${RESET}"
-	${DOCKER_COMPOSE} up -d --build
+	${DOCKER_COMPOSE} up -d
+
+## Start services without building
+start:
+	@echo "${GREEN}🚀 Starting existing containers...${RESET}"
+	${DOCKER_COMPOSE} up -d
+
+## Rebuild and restart services
+rebuild: build up
 
 ## Stop all services
 down:
