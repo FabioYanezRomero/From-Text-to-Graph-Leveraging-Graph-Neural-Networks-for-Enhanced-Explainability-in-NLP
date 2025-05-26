@@ -15,7 +15,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: development
     volumes:
       # Mount the main application code
       - type: bind
