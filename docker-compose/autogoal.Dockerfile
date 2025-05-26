@@ -82,10 +82,12 @@ RUN if [ -f "/home/coder/autogoal/autogoal-contrib/setup.py" ] || [ -f "/home/co
         echo "autogoal-contrib found but not installed (not a Python package)"; \
     fi
 
-# Skip autogoal-remote installation as it's not required for basic functionality
-# and is causing build issues due to missing README.md
-RUN if [ -d "/home/coder/autogoal/autogoal-remote" ]; then \
-        echo "Skipping autogoal-remote installation - not required for basic functionality"; \
+# Install autogoal-remote if it exists and has a setup.py or pyproject.toml
+RUN if [ -f "/home/coder/autogoal/autogoal-remote/setup.py" ] || [ -f "/home/coder/autogoal/autogoal-remote/pyproject.toml" ]; then \
+        cd /home/coder/autogoal/autogoal-remote && \
+        pip install -e .; \
+    elif [ -d "/home/coder/autogoal/autogoal-remote" ]; then \
+        echo "autogoal-remote found but not installed (not a Python package)"; \
     fi
 
 # Set the default command

@@ -61,6 +61,11 @@ display_help help:
 ## Build all services
 build:
 	@echo "${GREEN}🔨 Building all services...${RESET}"
+	${DOCKER_COMPOSE} build --pull
+
+
+build-no-cache:
+	@echo "${GREEN}🔨 Building all services...${RESET}"
 	${DOCKER_COMPOSE} build --no-cache --pull
 
 ## Build a specific service
