@@ -1,0 +1,94 @@
+# Using Docker Compose V2 syntax (no version field needed)
+
+# Define volumes for data persistence
+volumes:
+  autogoal-data:
+  app-data:
+
+services:
+  # Main application service
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    volumes:
+      # Mount the main application code
+      - type: bind
+        source: .
+        target: /app
+      # Mount the autogoal_repo
+      - type: bind
+        source: ./autogoal_repo
+        target: /autogoal_repo
+      # Shared data volume
+      - app-data:/app/data
+      - autogoal-data:/autogoal_data
+    working_dir: /app/src
+    tty: true
+    stdin_open: true
+    environment:
+      - PYTHONPATH=/app:/autogoal_repo
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - BUILD_ENVIRONMENT=development
+    networks:
+      - app-network
+    depends_on:
+      - autogoal
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  # AutoGOAL optimization service using the development image from the local repository
+  autogoal:
+    build:
+      context: ./autogoal_repo
+      dockerfile: dockerfiles/development/dockerfile
+      args:
+        - extras=all  # Install all extras
+    volumes:
+      # Mount the main application code
+      - type: bind
+        source: .
+        target: /app
+      # Mount the autogoal_repo
+      - type: bind
+        source: ./autogoal_repo
+        target: /autogoal_repo
+      # Shared data volumes
+      - app-data:/app/data
+      - autogoal-data:/autogoal_data
+    working_dir: /autogoal_repo
+    tty: true
+    stdin_open: true
+    environment:
+      - PYTHONPATH=/autogoal_repo:/app
+      - BUILD_ENVIRONMENT=development
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    user: coder
+    networks:
+      - app-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+
+# Network configuration
+networks:
+  app-network:
+    name: text-to-graph-network
+    driver: bridge
+    driver_opts:
+      encrypted: ''
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+          gateway: 172.28.0.1
