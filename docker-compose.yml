@@ -6,6 +6,8 @@ volumes:
     driver: local
   app-data:
     driver: local
+  pip-cache:
+    driver: local
 
 services:
   # Main application service
@@ -63,10 +65,6 @@ services:
       - type: bind
         source: .
         target: /app
-      # Mount the autogoal_repo
-      - type: bind
-        source: ./autogoal_repo
-        target: /home/coder/autogoal
       # Shared data volumes
       - type: volume
         source: app-data
@@ -74,13 +72,10 @@ services:
       - type: volume
         source: autogoal-data
         target: /home/coder/autogoal-data
-      # Cache for pip and build
-      - type: bind
-        source: ${HOME}/.cache/pip
+      # Cache for pip
+      - type: volume
+        source: pip-cache
         target: /home/coder/.cache/pip
-      - type: bind
-        source: ${HOME}/.local
-        target: /home/coder/.local
     working_dir: /home/coder/autogoal
     tty: true
     stdin_open: true
