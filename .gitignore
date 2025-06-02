@@ -67,3 +67,5 @@ explainability_results/
 GraphXAI/
 labels/
 Code/
+data
+models
