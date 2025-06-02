@@ -36,7 +36,7 @@ def build_graphs(dataset, subset, parser, batch_size=8):
         constituency_graphs = parser.get_graph(sentences)
         processed_data.append((constituency_graphs, labels))
 
-        output_path = f"/usrvol/processed_data/{dataset}/{subset}/constituency" 
+        output_path = f"/app/processed_data/{dataset}/{subset}/constituency" 
         if not os.path.exists(output_path):
             os.makedirs(output_path)
         with open(f"{output_path}/{iterator}.pkl", 'wb') as f:
@@ -58,6 +58,8 @@ if __name__ == '__main__':
         for subset in subsets:
             print(f"Processing {subset} subset...")
             torch.cuda.empty_cache()
-            folder = f"/usrvol/data/{dataset}/"            
+            folder = f"/app/data/text_graphs/{dataset}/"
+            if not os.path.exists(folder):
+                os.makedirs(folder)            
             get_graphs(dataset=dataset, subset=subset, batch_size=256)    
             torch.cuda.empty_cache()

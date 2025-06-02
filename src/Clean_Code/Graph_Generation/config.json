@@ -1,0 +1,10 @@
+{
+    "datasets": ["stanfordnlp/sst2", "SetFit/ag_news"],
+    "subsets": ["train", "test", "validation"],
+    "graph_types": ["syntactic", "semantic", "constituency"],
+    "syntactic_model": "dep-biaffine-roberta-en",
+    "semantic_model": "sdp-vi-roberta-en",
+    "constituency_model": "con-crf-roberta-en",
+    "batch_size": 256,
+    "device": "cuda:0"
+}
