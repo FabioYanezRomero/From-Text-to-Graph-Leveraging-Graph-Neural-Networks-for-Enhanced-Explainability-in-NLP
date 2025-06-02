@@ -142,6 +142,17 @@ def process_datasets(datasets=None, subsets=None, graph_types=None,
         
         # Process each subset
         for subset in subsets:
+
+            if dataset == "SetFit/ag_news":
+                if subset == "validation":
+                    print("Skipping validation subset for SetFit/ag_news")
+                    continue
+            
+            if dataset == "stanfordnlp/sst2":
+                if subset == "test":
+                    print("Skipping test subset for stanfordnlp/sst2")
+                    continue
+
             print(f"Processing subset: {subset}")
             
             # Process each graph type
