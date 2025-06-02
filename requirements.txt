@@ -12,6 +12,9 @@ seaborn==0.13.2  # For statistical visualizations
 scikit-learn==1.6.1  # For machine learning utilities
 tqdm==4.66.4  # For progress bars
 stanza==1.10.1  # For NLP tasks
+supar==1.1.4  # For constituency parsing
+datasets==3.6.0  # For dataset loading
+
 
 # PyTorch Geometric and dependencies
 torch-scatter

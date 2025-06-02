@@ -1,19 +1,29 @@
+#!/usr/bin/env python3
 """
-Main module for Graph Generation
+Graph Generation Script
 
-This module provides a command-line interface for generating different types of graphs
-from text datasets.
+This script is the main entry point for generating graphs from text datasets.
+It can be run directly to generate syntactic, semantic, and constituency graphs
+for specified datasets.
 """
 
+import sys
+import os
 import argparse
 import json
-import os
-from Graph_Generation.graph_generator import process_datasets
-from Graph_Generation.config import (
+
+# Add the src directory to the path to allow importing modules
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Import the necessary modules directly
+from Clean_Code.Graph_Generation.config import (
     GRAPH_TYPES, DEFAULT_MODELS, AVAILABLE_MODELS,
     DEFAULT_DATASETS, DEFAULT_SUBSETS, DEFAULT_BATCH_SIZE,
     DEFAULT_DEVICE
 )
+
+# Import the process_datasets function
+from Clean_Code.Graph_Generation.graph_generator import process_datasets
 
 def parse_args():
     """Parse command line arguments"""

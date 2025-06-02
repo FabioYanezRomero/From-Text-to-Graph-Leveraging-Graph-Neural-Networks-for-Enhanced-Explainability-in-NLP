@@ -47,8 +47,6 @@ DEFAULT_BATCH_SIZE = 256
 # Default device
 DEFAULT_DEVICE = "cuda:0"
 
-# Default output directory
-DEFAULT_OUTPUT_DIR = "/app/processed_data"
-
-# Default data directory
-DEFAULT_DATA_DIR = "/app/data/text_graphs"
+# Default directories
+DEFAULT_OUTPUT_DIR = "/app/src/Clean_Code/output/text_graphs"
+DEFAULT_DATA_DIR = "/app/src/Clean_Code/output/text_graphs"

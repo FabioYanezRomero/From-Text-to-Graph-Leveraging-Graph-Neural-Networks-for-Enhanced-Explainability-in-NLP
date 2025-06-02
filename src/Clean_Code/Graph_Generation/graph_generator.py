@@ -14,7 +14,7 @@ from datasets import load_dataset
 from torch.utils.data import DataLoader
 
 # Import configuration
-from config import (
+from .config import (
     GRAPH_TYPES, DEFAULT_MODELS, AVAILABLE_MODELS,
     DEFAULT_DATASETS, DEFAULT_SUBSETS, DEFAULT_BATCH_SIZE,
     DEFAULT_DEVICE, DEFAULT_OUTPUT_DIR, DEFAULT_DATA_DIR
