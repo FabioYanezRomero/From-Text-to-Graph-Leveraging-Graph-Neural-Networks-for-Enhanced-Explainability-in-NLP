@@ -4,34 +4,19 @@ Configuration module for Graph Generation
 This module contains configuration settings for the graph generation process.
 """
 
-# Available graph types
-GRAPH_TYPES = ["syntactic", "semantic", "constituency"]
+# Only constituency graphs will be generated
+GRAPH_TYPES = ["constituency"]
 
-# Default models for each graph type
+# Default model for constituency parsing
 DEFAULT_MODELS = {
-    "syntactic": "dep-biaffine-roberta-en",
-    "semantic": "sdp-vi-roberta-en",
-    "constituency": "con-crf-roberta-en"
+    "constituency": "crf-con-en"  # Standard LSTM-based constituency parser
 }
 
-# Available models for each graph type
+# Available models (only constituency)
 AVAILABLE_MODELS = {
-    "syntactic": [
-        "dep-biaffine-en",
-        "dep-biaffine-roberta-en",
-        "dep-crf2o-en",
-        "dep-crf2o-roberta-en"
-    ],
-    "semantic": [
-        "sdp-biaffine-en",
-        "sdp-vi-en",
-        "sdp-vi-roberta-en"
-    ],
     "constituency": [
-        "con-crf-en",
-        "con-crf-roberta-en",
-        "con-biaffine-en",
-        "con-biaffine-roberta-en"
+        "crf-con-roberta-en",  # RoBERTa-based constituency parser
+        "crf-con-en"           # Standard LSTM-based constituency parser
     ]
 }
 

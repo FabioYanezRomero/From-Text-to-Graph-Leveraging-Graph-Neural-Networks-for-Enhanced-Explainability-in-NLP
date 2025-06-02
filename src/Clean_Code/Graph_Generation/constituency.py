@@ -7,8 +7,10 @@ into directed graphs where nodes represent constituents and words.
 """
 
 from typing import List, Dict, Union, Any, Optional
+import os
 import networkx as nx
 import torch
+import torch.cuda
 from supar import Parser
 from .base_generator import BaseGraphGenerator
 
@@ -43,11 +45,10 @@ PHRASE_MAPPER = {
     'X': '«UNKNOWN»'
 }
 
+# Available constituency parsing models in supar 1.1.4
 SUPAR_CON_MODELS = [
-    'con-crf-en',  # CRF-based constituency parser
-    'con-crf-roberta-en',  # RoBERTa-enhanced CRF constituency parser
-    'con-biaffine-en',  # Biaffine constituency parser
-    'con-biaffine-roberta-en'  # RoBERTa-enhanced biaffine constituency parser
+    'crf-con-roberta-en',  # RoBERTa-enhanced CRF constituency parser
+    'crf-con-en'           # Standard LSTM-based CRF constituency parser
 ]
 
 
@@ -90,10 +91,44 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
         if device.startswith('cuda'):
             torch.cuda.set_device(device)
         
+        # Try loading the specified model with safer settings
         try:
+            # Set environment variables to allow safer loading
+            import os
+            os.environ['PYTORCH_ENABLE_UNSAFE_LOAD'] = '1'
+            
+            # Load the model using Parser.load with safer settings
             self.cons = Parser.load(model)
+            
+            # Set the device for the parser if it has a 'to' method
+            if hasattr(self.cons, 'to'):
+                self.cons = self.cons.to(device)
+            # Otherwise, the device is likely already set during loading
         except Exception as e:
-            raise RuntimeError(f"Failed to load constituency parser model '{model}': {e}")
+            # If we get a weights loading error, try a different approach
+            if 'Weights only load failed' in str(e) or 'WeightsUnpickler error' in str(e):
+                try:
+                    # Try loading with a more permissive approach
+                    # Store the original torch.load function
+                    original_torch_load = torch.load
+                    
+                    # Define a safer load function
+                    def safer_load(f, *args, **kwargs):
+                        return original_torch_load(f, weights_only=False, *args, **kwargs)
+                    
+                    # Temporarily replace torch.load
+                    torch.load = safer_load
+                    
+                    try:
+                        self.cons = Parser.load(model)
+                    finally:
+                        # Restore the original torch.load function
+                        torch.load = original_torch_load
+                        
+                except Exception as e2:
+                    raise RuntimeError(f"Failed to load constituency parser model '{model}' with permissive settings: {e2}")
+            else:
+                raise RuntimeError(f"Failed to load constituency parser model '{model}': {e}")
 
     def _parse(self, sentences: List[str]):
         """

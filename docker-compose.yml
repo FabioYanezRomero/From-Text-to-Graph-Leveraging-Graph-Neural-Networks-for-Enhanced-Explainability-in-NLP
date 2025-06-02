@@ -39,6 +39,8 @@ services:
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
       - BUILD_ENVIRONMENT=development
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
     networks:
       - app-network
     depends_on:
@@ -49,6 +51,11 @@ services:
         limits:
           cpus: '2'
           memory: 4G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   # AutoGOAL optimization service built from source
   autogoal:

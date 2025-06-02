@@ -13,10 +13,10 @@ from .base_generator import BaseGraphGenerator
 
 # Available Supar dependency parsing models
 SUPAR_DEP_MODELS = [
-    'dep-biaffine-en',
-    'dep-biaffine-roberta-en',
-    'dep-crf2o-en',
-    'dep-crf2o-roberta-en'
+    'biaffine-dep-en',
+    'biaffine-dep-roberta-en',
+    'crf2o-dep-en',
+    'crf2o-dep-roberta-en'
 ]
 
 

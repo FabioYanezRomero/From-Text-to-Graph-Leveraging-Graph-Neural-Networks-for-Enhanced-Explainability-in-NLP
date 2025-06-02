@@ -53,21 +53,7 @@ def parse_args():
         help="Types of graphs to generate"
     )
     
-    # Model arguments
-    parser.add_argument(
-        "--syntactic_model", 
-        choices=AVAILABLE_MODELS["syntactic"],
-        default=DEFAULT_MODELS["syntactic"],
-        help="Model for syntactic graph generation"
-    )
-    
-    parser.add_argument(
-        "--semantic_model", 
-        choices=AVAILABLE_MODELS["semantic"],
-        default=DEFAULT_MODELS["semantic"],
-        help="Model for semantic graph generation"
-    )
-    
+    # Model arguments    
     parser.add_argument(
         "--constituency_model", 
         choices=AVAILABLE_MODELS["constituency"],
@@ -115,8 +101,6 @@ def main():
     
     # Create models dictionary
     models = {
-        "syntactic": args.syntactic_model,
-        "semantic": args.semantic_model,
         "constituency": args.constituency_model
     }
     

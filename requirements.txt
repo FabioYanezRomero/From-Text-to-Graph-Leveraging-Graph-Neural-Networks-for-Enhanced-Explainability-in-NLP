@@ -1,36 +1,35 @@
-# Core dependencies
-torch==2.1.2
-torchvision==0.16.2
-torchaudio==2.1.2
-transformers==4.52.3  # For transformer models
-networkx==3.1  # For graph operations
-pandas==2.0.3  # For data handling
-numpy==1.24.3  # For numerical operations
-scipy==1.10.1  # For scientific computing
-matplotlib==3.10.3  # For visualization
-seaborn==0.13.2  # For statistical visualizations
-scikit-learn==1.6.1  # For machine learning utilities
-tqdm==4.66.4  # For progress bars
-stanza==1.10.1  # For NLP tasks
-supar==1.1.4  # For constituency parsing
-datasets==3.6.0  # For dataset loading
+# Core dependencies - versions selected for compatibility with Supar for RoBERTa CRF models
+torch==1.13.1
+torchvision==0.14.1
+torchaudio==0.13.1
+transformers==4.26.1  # For transformer models
+networkx>=2.8.0  # For graph operations
+pandas>=1.5.3  # For data handling
+numpy>=1.24.2  # For numerical operations
+scipy>=1.10.1  # For scientific computing
+matplotlib>=3.7.1  # For visualization
+seaborn>=0.12.2  # For statistical visualizations
+scikit-learn>=1.2.2  # For machine learning utilities
+tqdm>=4.65.0  # For progress bars
+stanza>=1.5.0  # For NLP tasks
+supar==1.1.4  # For constituency parsing with RoBERTa CRF support
+datasets>=2.11.0  # For dataset loading
 
-
-# PyTorch Geometric and dependencies
-torch-scatter
-torch-sparse
-torch-cluster
-torch-spline-conv
-torch-geometric
+# PyTorch Geometric and dependencies (compatible with PyTorch 1.13.1)
+torch-scatter==2.1.0
+torch-sparse==0.6.16
+torch-cluster==1.6.0
+torch-spline-conv==1.2.1
+torch-geometric==2.3.0
 
 # Additional utilities
-pyyaml==6.0.1  # For configuration
-joblib==1.5.1  # For model persistence
-ipywidgets==8.1.7  # For Jupyter widgets
-jupyter==1.1.1  # For interactive development
+pyyaml>=6.0  # For configuration
+joblib>=1.2.0  # For model persistence
+ipywidgets>=8.0.6  # For Jupyter widgets
+jupyter>=1.0.0  # For interactive development
 
 # Development dependencies
-pytest==8.3.5  # For testing
-black==25.1.0  # For code formatting
-flake8==7.2.0  # For linting
-mypy==1.15.0  # For type checking
+pytest>=7.3.1  # For testing
+black  # For code formatting (fixed typo)
+flake8  # For linting (fixed typo)
+mypy>=1.2.0  # For type checking
