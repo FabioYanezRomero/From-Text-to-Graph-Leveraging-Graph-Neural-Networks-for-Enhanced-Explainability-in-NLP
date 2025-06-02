@@ -9,7 +9,7 @@ GRAPH_TYPES = ["constituency"]
 
 # Default model for constituency parsing
 DEFAULT_MODELS = {
-    "constituency": "crf-con-en"  # Standard LSTM-based constituency parser
+    "constituency": "crf-con-roberta-en"  # Standard LSTM-based constituency parser
 }
 
 # Available models (only constituency)
