@@ -1,5 +1,5 @@
 # Use NVIDIA CUDA 11.6 with Ubuntu 20.04 as base image to ensure glibc 2.28+ and GPU support
-FROM nvidia/cuda:11.6.2-cudnn8-devel-ubuntu20.04
+FROM ubuntu:20.04
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -36,9 +36,8 @@ WORKDIR /app
 # Copy requirements file
 COPY requirements.txt .
 
-# Install PyTorch 1.13.1 with CUDA 11.6 support
 RUN pip install --upgrade pip && \
-    pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==0.13.1 --extra-index-url https://download.pytorch.org/whl/cu116 && \
+    pip install torch torchvision torchaudio && \
     # Install other dependencies from requirements.txt (excluding PyTorch)
     grep -v -E '^torch|^torchvision|^torchaudio' requirements.txt > /tmp/requirements.txt && \
     pip install -r /tmp/requirements.txt && \
