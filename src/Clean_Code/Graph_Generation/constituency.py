@@ -136,8 +136,8 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
                     download_method=None,
                     tokenize_pretokenized=False,
                     tokenize_no_ssplit=False,
-                    pos_batch_size=500,
-                    constituency_batch_size=500
+                    pos_batch_size=1000,
+                    constituency_batch_size=1000
                 )
                 print("Default Stanza pipeline initialized successfully.")
             except Exception as e2:
@@ -147,24 +147,56 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
     def _parse(self, sentences: List[str]):
         """
         Parse sentences using the Stanza constituency parser.
+        If a sentence is split into multiple sentences, they are concatenated into one.
 
         Args:
             sentences (List[str]): List of sentences to parse.
 
         Returns:
-            The parsed constituency trees.
+            List: List of parsed constituency trees, one per input sentence.
         """
-        # Process all sentences as a batch
-        doc = self.nlp('\n\n'.join(sentences))
-        
-        # Extract constituency trees from each sentence
         trees = []
-        for sent in doc.sentences:
-            if hasattr(sent, 'constituency') and sent.constituency:
-                trees.append(sent.constituency)
-            else:
-                raise RuntimeError(f"Constituency parsing failed for sentence: {sent.text}")
-        
+        for i, sentence in enumerate(sentences):
+            try:
+            # Process the current sentence
+                doc = self.nlp(sentence)
+                
+                if not doc.sentences:
+                    raise ValueError("No sentences returned by parser")
+                    
+                # If we get multiple sentences, concatenate their parses
+                if len(doc.sentences) > 1:
+                    # Create a new root node for the combined parse
+                    combined_parse = "(ROOT (S"
+                    for sent in doc.sentences:
+                        if hasattr(sent, 'constituency') and sent.constituency:
+                            # Convert to string and remove the outer ROOT and S nodes
+                            parse_str = str(sent.constituency)
+                            parse_str = parse_str.replace("(ROOT", "").replace("(S", "").rstrip(")")
+                            combined_parse += " " + parse_str.strip()
+                    combined_parse += "))"
+                    trees.append(combined_parse)
+                    print(f"Combined {len(doc.sentences)} sentences for input {i}")
+                else:
+                    # Single sentence case
+                    sent = doc.sentences[0]
+                    if hasattr(sent, 'constituency') and sent.constituency:
+                        trees.append(sent.constituency)
+                    else:
+                        raise ValueError("No constituency parse available")
+                        
+            except Exception as e:
+                print(f"Error processing sentence {i}: {e}")
+                print(f"Sentence content: {sentence}")
+                # Fallback: create a simple flat parse
+                words = sentence.split()[:100]  # Limit to 100 words
+                flat_tree = f"(ROOT (S {' '.join(f'(WORD {word})' for word in words)}))"
+                trees.append(flat_tree)
+                continue
+            
+        if len(trees) != len(sentences):
+            raise RuntimeError(f"Parse count mismatch: expected {len(sentences)}, got {len(trees)}")
+            
         return trees
 
     def _tree_to_list(self, tree) -> Union[str, List]:
@@ -172,12 +204,70 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
         Convert the parsed constituency tree into a nested list structure.
 
         Args:
-            tree: A Stanza constituency tree or subtree.
+            tree: A Stanza constituency tree, subtree, or string representation.
 
         Returns:
             Union[str, List]: A string for leaf nodes or a list for non-leaf nodes.
         """
-        # Handle leaf nodes (words)
+        # If tree is a string (from combined parse), parse it into a structure
+        if isinstance(tree, str):
+            try:
+                # Use a stack-based iterative parser
+                stack = []
+                current = []
+                i = 0
+                n = len(tree)
+                
+                while i < n:
+                    if tree[i] == ' ':
+                        i += 1
+                        continue
+                        
+                    if tree[i] == '(':
+                        # Push current context to stack and start new one
+                        stack.append(current)
+                        current = []
+                        i += 1
+                    elif tree[i] == ')':
+                        # Pop the last item from stack as parent
+                        if current:
+                            if stack:
+                                parent = stack.pop()
+                                parent.append(current)
+                                current = parent
+                            else:
+                                # This is the root
+                                if len(current) == 1:
+                                    return current[0]
+                                return current
+                        i += 1
+                    else:
+                        # Read token
+                        j = i
+                        while j < n and tree[j] not in '() ':
+                            j += 1
+                        token = tree[i:j].strip()
+                        if token:
+                            current.append(token)
+                        i = j
+                        
+                # Handle any remaining context
+                if stack:
+                    while stack:
+                        parent = stack.pop()
+                        if current:
+                            parent.append(current)
+                        current = parent
+                        
+                return current[0] if len(current) == 1 else current
+                
+            except Exception as e:
+                print(f"Error parsing tree string: {e}")
+                # Fall back to a simple flat structure
+                words = [w for w in tree.split() if w not in '()']
+                return ['ROOT', ['S'] + [['WORD', word] for word in words]]
+
+        # Original logic for Stanza Tree objects
         if tree.is_leaf():
             return tree.label
         
@@ -305,4 +395,5 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
             return graphs
             
         except Exception as e:
+
             raise RuntimeError(f"Error generating constituency graphs: {e}")
