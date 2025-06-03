@@ -1,6 +1,4 @@
-# Core dependencies - versions selected for compatibility with Supar for RoBERTa CRF models
-git+https://github.com/yzhangcs/parser.git
-torch==2.2.0
+torch
 torchvision
 torchaudio
 transformers

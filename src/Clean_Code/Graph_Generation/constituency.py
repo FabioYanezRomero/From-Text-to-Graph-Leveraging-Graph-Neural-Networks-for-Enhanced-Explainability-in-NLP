@@ -2,7 +2,7 @@
 Constituency Graph Generator Module
 
 This module provides functionality to create constituency graphs from sentences.
-It leverages the supar Parser to generate constituency trees and converts them
+It leverages the Stanza NLP library to generate constituency trees and converts them
 into directed graphs where nodes represent constituents and words.
 """
 
@@ -11,7 +11,7 @@ import os
 import networkx as nx
 import torch
 import torch.cuda
-from supar import Parser
+import stanza
 from .base_generator import BaseGraphGenerator
 
 # Dictionary mapping constituency labels to more descriptive phrases
@@ -45,42 +45,34 @@ PHRASE_MAPPER = {
     'X': '«UNKNOWN»'
 }
 
-# Available constituency parsing models in supar 1.1.4
-SUPAR_CON_MODELS = [
-    'crf-con-roberta-en',  # RoBERTa-enhanced CRF constituency parser
-    'crf-con-en'           # Standard LSTM-based CRF constituency parser
-]
-
 
 class ConstituencyGraphGenerator(BaseGraphGenerator):
     """
     Creates constituency graphs from sentences.
 
-    This class processes sentences using a constituency parser and converts
+    This class processes sentences using a Stanza constituency parser and converts
     the parsed trees into directed graphs. Each node in the graph represents
     either a constituent phrase or a word from the sentence.
 
     Attributes:
-        model (str): Name of the constituency parser model.
+        model (str): Name or configuration of the constituency parser model.
         property (str): Property type, always set to 'constituency'.
-        cons: The loaded constituency parser.
+        nlp: The loaded Stanza pipeline.
         device (str): The device to run the parser on (CPU or CUDA).
     """
 
-    def __init__(self, model: str, device: str = 'cuda:0'):
+    def __init__(self, model: str = 'default_accurate', device: str = 'cuda:0'):
         """
-        Initialize the constituency parser with a given model.
+        Initialize the constituency parser with Stanza.
 
         Args:
-            model (str): Name of the constituency parser model to load.
+            model (str, optional): Package name for Stanza. Defaults to 'default_accurate'.
             device (str, optional): Device to run the parser on. Defaults to 'cuda:0'.
 
         Raises:
             RuntimeError: If the specified device is not available.
         """
         super().__init__(model, device)
-        if model not in SUPAR_CON_MODELS:
-            raise ValueError(f"Unknown model: {model}. Available models: {SUPAR_CON_MODELS}")
         self.property = 'constituency'
         
         # Verify device availability for better error handling
@@ -91,48 +83,30 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
         if device.startswith('cuda'):
             torch.cuda.set_device(device)
         
-        # Try loading the specified model with safer settings
+        # Set up Stanza configuration
+        stanza_device = 'gpu' if device.startswith('cuda') else 'cpu'
+        
+        # Download the model if it doesn't exist
         try:
-            # Set environment variables to allow safer loading
-            import os
-            os.environ['PYTORCH_ENABLE_UNSAFE_LOAD'] = '1'
-            
-            # Load the model using Parser.load with safer settings
-            self.cons = Parser.load(model)
-            
-            # Set the device for the parser if it has a 'to' method
-            if hasattr(self.cons, 'to'):
-                self.cons = self.cons.to(device)
-            # Otherwise, the device is likely already set during loading
+            stanza.download('en')
         except Exception as e:
-            # If we get a weights loading error, try a different approach
-            if 'Weights only load failed' in str(e) or 'WeightsUnpickler error' in str(e):
-                try:
-                    # Try loading with a more permissive approach
-                    # Store the original torch.load function
-                    original_torch_load = torch.load
-                    
-                    # Define a safer load function
-                    def safer_load(f, *args, **kwargs):
-                        return original_torch_load(f, weights_only=False, *args, **kwargs)
-                    
-                    # Temporarily replace torch.load
-                    torch.load = safer_load
-                    
-                    try:
-                        self.cons = Parser.load(model)
-                    finally:
-                        # Restore the original torch.load function
-                        torch.load = original_torch_load
-                        
-                except Exception as e2:
-                    raise RuntimeError(f"Failed to load constituency parser model '{model}' with permissive settings: {e2}")
-            else:
-                raise RuntimeError(f"Failed to load constituency parser model '{model}': {e}")
+            print(f"Warning: Could not download Stanza model: {e}")
+            print("If the model is already downloaded, you can ignore this warning.")
+        
+        # Initialize the Stanza pipeline with transformer-enhanced parsing
+        try:
+            self.nlp = stanza.Pipeline(
+                lang='en',
+                processors='tokenize,pos,constituency',
+                package=model,  # default_accurate uses transformer backbone
+                use_gpu=(stanza_device == 'gpu')
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize Stanza pipeline: {e}")
 
     def _parse(self, sentences: List[str]):
         """
-        Parse sentences using the constituency parser.
+        Parse sentences using the Stanza constituency parser.
 
         Args:
             sentences (List[str]): List of sentences to parse.
@@ -140,21 +114,35 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
         Returns:
             The parsed constituency trees.
         """
-        return self.cons.predict(sentences, verbose=False, lang='en')
+        # Process all sentences as a batch
+        doc = self.nlp('\n\n'.join(sentences))
+        
+        # Extract constituency trees from each sentence
+        trees = []
+        for sent in doc.sentences:
+            if hasattr(sent, 'constituency') and sent.constituency:
+                trees.append(sent.constituency)
+            else:
+                raise RuntimeError(f"Constituency parsing failed for sentence: {sent.text}")
+        
+        return trees
 
     def _tree_to_list(self, tree) -> Union[str, List]:
         """
         Convert the parsed constituency tree into a nested list structure.
 
         Args:
-            tree: A constituency tree or subtree.
+            tree: A Stanza constituency tree or subtree.
 
         Returns:
             Union[str, List]: A string for leaf nodes or a list for non-leaf nodes.
         """
-        if isinstance(tree, str):  # base case: leaf node
-            return tree
-        return [tree.label()] + [self._tree_to_list(child) for child in tree]
+        # Handle leaf nodes (words)
+        if tree.is_leaf():
+            return tree.label
+        
+        # Handle non-leaf nodes (constituents)
+        return [tree.label] + [self._tree_to_list(child) for child in tree.children]
 
     def _build_graph(self, graph: nx.DiGraph, node_list: List, sentence: str, parent_id: str = '', graph_id: Optional[str] = None) -> nx.DiGraph:
         """
