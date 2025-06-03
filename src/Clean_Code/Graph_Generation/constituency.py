@@ -147,7 +147,7 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
     def _parse(self, sentences: List[str]):
         """
         Parse sentences using the Stanza constituency parser.
-        If a sentence is split into multiple sentences, they are concatenated into one.
+        If a sentence is split into multiple sentences, they are combined into a single parse.
 
         Args:
             sentences (List[str]): List of sentences to parse.
@@ -158,23 +158,32 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
         trees = []
         for i, sentence in enumerate(sentences):
             try:
-            # Process the current sentence
+                # Process the current sentence
                 doc = self.nlp(sentence)
                 
                 if not doc.sentences:
                     raise ValueError("No sentences returned by parser")
                     
-                # If we get multiple sentences, concatenate their parses
+                # If we get multiple sentences, create a combined parse
                 if len(doc.sentences) > 1:
                     # Create a new root node for the combined parse
-                    combined_parse = "(ROOT (S"
+                    combined_parse = ['ROOT', ['S']]  # Start with ROOT -> S structure
+                    
                     for sent in doc.sentences:
                         if hasattr(sent, 'constituency') and sent.constituency:
-                            # Convert to string and remove the outer ROOT and S nodes
+                            # Get the parse tree as a string
                             parse_str = str(sent.constituency)
-                            parse_str = parse_str.replace("(ROOT", "").replace("(S", "").rstrip(")")
-                            combined_parse += " " + parse_str.strip()
-                    combined_parse += "))"
+                            # Parse it into a nested list structure
+                            sent_parse = self._tree_to_list(parse_str)
+                            # If the parse starts with ['ROOT', ...], take the children of ROOT
+                            if (isinstance(sent_parse, list) and len(sent_parse) > 1 and 
+                                isinstance(sent_parse[0], str) and sent_parse[0] == 'ROOT'):
+                                # Add all children of ROOT (skipping ROOT itself)
+                                combined_parse[1].extend(sent_parse[1:])
+                            else:
+                                # Otherwise add the entire parse
+                                combined_parse[1].append(sent_parse)
+                                
                     trees.append(combined_parse)
                     print(f"Combined {len(doc.sentences)} sentences for input {i}")
                 else:
@@ -188,12 +197,12 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
             except Exception as e:
                 print(f"Error processing sentence {i}: {e}")
                 print(f"Sentence content: {sentence}")
-                # Fallback: create a simple flat parse
+                # Fallback: create a simple flat structure
                 words = sentence.split()[:100]  # Limit to 100 words
-                flat_tree = f"(ROOT (S {' '.join(f'(WORD {word})' for word in words)}))"
+                flat_tree = ['ROOT', ['S'] + [['WORD', word] for word in words]]
                 trees.append(flat_tree)
                 continue
-            
+                
         if len(trees) != len(sentences):
             raise RuntimeError(f"Parse count mismatch: expected {len(sentences)}, got {len(trees)}")
             
@@ -204,12 +213,16 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
         Convert the parsed constituency tree into a nested list structure.
 
         Args:
-            tree: A Stanza constituency tree, subtree, or string representation.
+            tree: A Stanza constituency tree, subtree, or list.
 
         Returns:
             Union[str, List]: A string for leaf nodes or a list for non-leaf nodes.
         """
-        # If tree is a string (from combined parse), parse it into a structure
+        # If tree is already a list, return it as is
+        if isinstance(tree, list):
+            return tree
+            
+        # If tree is a string, it's already in string format
         if isinstance(tree, str):
             try:
                 # Use a stack-based iterative parser
@@ -273,6 +286,9 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
         
         # Handle non-leaf nodes (constituents)
         return [tree.label] + [self._tree_to_list(child) for child in tree.children]
+
+        # Fallback for unknown types
+        return str(tree)
 
     def _build_graph(self, graph: nx.DiGraph, node_list: List, sentence: str, parent_id: str = '', graph_id: Optional[str] = None) -> nx.DiGraph:
         """
