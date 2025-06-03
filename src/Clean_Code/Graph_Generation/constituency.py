@@ -185,7 +185,7 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
                                 combined_parse[1].append(sent_parse)
                                 
                     trees.append(combined_parse)
-                    print(f"Combined {len(doc.sentences)} sentences for input {i}")
+                    #print(f"Combined {len(doc.sentences)} sentences for input {i}")
                 else:
                     # Single sentence case
                     sent = doc.sentences[0]

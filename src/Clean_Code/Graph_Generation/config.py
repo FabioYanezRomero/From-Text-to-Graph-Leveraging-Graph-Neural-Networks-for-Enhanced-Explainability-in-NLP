@@ -21,7 +21,7 @@ AVAILABLE_MODELS = {
 }
 
 # Default datasets
-DEFAULT_DATASETS = ["stanfordnlp/sst2", "SetFit/ag_news"]
+DEFAULT_DATASETS = ["SetFit/ag_news"]    # "stanfordnlp/sst2", "SetFit/ag_news"
 
 # Default subsets
 DEFAULT_SUBSETS = ["train", "test", "validation"]
