@@ -1,5 +1,5 @@
 # Use NVIDIA CUDA 11.6 with Ubuntu 20.04 as base image to ensure glibc 2.28+ and GPU support
-FROM ubuntu:20.04
+FROM ubuntu:22.04
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -35,18 +35,6 @@ WORKDIR /app
 
 # Copy requirements file
 COPY requirements.txt .
-
-RUN pip install --upgrade pip && \
-    pip install torch torchvision torchaudio && \
-    # Install other dependencies from requirements.txt (excluding PyTorch)
-    grep -v -E '^torch|^torchvision|^torchaudio' requirements.txt > /tmp/requirements.txt && \
-    pip install -r /tmp/requirements.txt && \
-    # Install PyTorch Geometric dependencies with CUDA support
-    pip install torch-scatter==2.1.0 -f https://data.pyg.org/whl/torch-1.13.1+cu116.html && \
-    pip install torch-sparse==0.6.16 -f https://data.pyg.org/whl/torch-1.13.1+cu116.html && \
-    pip install torch-cluster==1.6.0 -f https://data.pyg.org/whl/torch-1.13.1+cu116.html && \
-    pip install torch-spline-conv==1.2.1 -f https://data.pyg.org/whl/torch-1.13.1+cu116.html && \
-    pip install torch-geometric==2.3.0
 
 # Copy application code
 COPY . .

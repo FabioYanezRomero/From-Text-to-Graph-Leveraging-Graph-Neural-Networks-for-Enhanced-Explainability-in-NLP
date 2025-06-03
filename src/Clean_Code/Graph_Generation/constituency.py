@@ -86,23 +86,63 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
         # Set up Stanza configuration
         stanza_device = 'gpu' if device.startswith('cuda') else 'cpu'
         
-        # Download the model if it doesn't exist
+        # Download the transformer-based models explicitly
         try:
-            stanza.download('en')
+            print("Downloading transformer-based Stanza English models...")
+            # Download with transformer-based constituency parser
+            # Using 'default_accurate' which uses BERT for best accuracy
+            stanza.download('en', package='default_accurate', processors={
+                'tokenize': 'default',
+                'pos': 'default',
+                'constituency': 'default_accurate'  # Uses BERT for best accuracy
+            })
+            print("Transformer-based Stanza models downloaded successfully.")
         except Exception as e:
-            print(f"Warning: Could not download Stanza model: {e}")
-            print("If the model is already downloaded, you can ignore this warning.")
+            print(f"Warning: Could not download transformer-based Stanza model: {e}")
+            print("Falling back to default models...")
+            try:
+                stanza.download('en', package='default')
+            except Exception as e2:
+                print(f"Error downloading default models: {e2}")
         
-        # Initialize the Stanza pipeline with transformer-enhanced parsing
+        # Initialize the Stanza pipeline with BERT-based constituency parser
         try:
+            print("Initializing Stanza pipeline with BERT-based constituency parser...")
             self.nlp = stanza.Pipeline(
                 lang='en',
-                processors='tokenize,pos,constituency',
-                package=model,  # default_accurate uses transformer backbone
-                use_gpu=(stanza_device == 'gpu')
+                processors={
+                    'tokenize': 'default',
+                    'pos': 'default',
+                    'constituency': 'default_accurate'  # Uses BERT for best accuracy
+                },
+                package='default_accurate',  # Specify the package for BERT-based model
+                use_gpu=(stanza_device == 'gpu'),
+                download_method=None,  # We already downloaded the models
+                tokenize_pretokenized=False,
+                tokenize_no_ssplit=False,
+                pos_batch_size=1000,
+                constituency_batch_size=1000,
+                constituency_pretagged=True  # Use POS tags from the POS tagger
             )
+            print("Stanza pipeline with BERT-based constituency parser initialized successfully.")
         except Exception as e:
-            raise RuntimeError(f"Failed to initialize Stanza pipeline: {e}")
+            print(f"Error details: {str(e)}")
+            print("Falling back to default constituency parser...")
+            try:
+                self.nlp = stanza.Pipeline(
+                    lang='en',
+                    processors='tokenize,pos,constituency',
+                    use_gpu=(stanza_device == 'gpu'),
+                    download_method=None,
+                    tokenize_pretokenized=False,
+                    tokenize_no_ssplit=False,
+                    pos_batch_size=500,
+                    constituency_batch_size=500
+                )
+                print("Default Stanza pipeline initialized successfully.")
+            except Exception as e2:
+                print(f"Error initializing default pipeline: {str(e2)}")
+                raise RuntimeError(f"Failed to initialize Stanza pipeline: {e2}")
 
     def _parse(self, sentences: List[str]):
         """
