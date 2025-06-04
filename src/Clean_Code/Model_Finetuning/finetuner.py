@@ -20,10 +20,10 @@ from torch.nn import CrossEntropyLoss
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
-    AdamW,
     get_linear_schedule_with_warmup,
     get_constant_schedule
 )
+from torch.optim import AdamW
 from datasets import load_dataset
 from sklearn.metrics import classification_report
 

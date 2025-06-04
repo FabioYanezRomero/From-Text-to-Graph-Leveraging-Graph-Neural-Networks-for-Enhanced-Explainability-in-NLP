@@ -7,12 +7,12 @@
 export PYTHONPATH=$PYTHONPATH:$(dirname $(dirname $(realpath $0)))
 
 # Parse command line arguments
-dataset_name=""
-model_name=""
+dataset_name="setfit/ag_news"
+model_name="google-bert/bert-base-uncased"
 num_epochs=5
 batch_size=16
 learning_rate=1e-6
-output_dir="/app/src/Clean_Code/output/finetuned_models"
+output_dir="/app/src/Clean_Code/output/finetuned_llms"
 fp16=true
 
 # Help message
