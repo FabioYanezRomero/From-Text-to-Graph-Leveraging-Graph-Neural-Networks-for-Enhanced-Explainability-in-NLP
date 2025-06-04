@@ -1,0 +1,438 @@
+"""
+Graph Processor
+
+This module handles the creation of PyTorch Geometric graphs from word embeddings
+and special constituency embeddings.
+"""
+
+import os
+import torch
+import pickle as pkl
+import logging
+import numpy as np
+from tqdm import tqdm
+from torch_geometric.data import Data
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+def create_word_graphs(word_embeddings, sentence_embeddings, texts, labels, special_embeddings=None, window_size=3, edge_type='window'):
+    """Create graph structures from word embeddings
+    
+    Args:
+        word_embeddings: List of word embeddings for each text
+        sentence_embeddings: List of sentence embeddings for each text
+        texts: List of texts
+        labels: List of labels
+        special_embeddings: Dictionary of special embeddings for constituency trees
+        window_size: Window size for creating edges
+        edge_type: Type of edges to create (window, fully_connected)
+        
+    Returns:
+        graphs: List of graph structures
+    """
+    graphs = []
+    
+    logger.info(f"Creating graphs with edge_type={edge_type}, window_size={window_size}")
+    logger.info(f"Input sizes: {len(word_embeddings)} word embeddings, {len(sentence_embeddings)} sentence embeddings, {len(texts)} texts, {len(labels)} labels")
+    
+    for i in range(len(word_embeddings)):
+        try:
+            if i % 5 == 0:
+                logger.info(f"Processing sample {i}/{len(word_embeddings)}")
+                
+            # Get data for this sample
+            word_embedding = word_embeddings[i]
+            sentence_embedding = sentence_embeddings[i]
+            text = texts[i]
+            label = labels[i]
+            
+            # Handle label tensor
+            if isinstance(label, torch.Tensor):
+                if label.numel() > 1:
+                    # If label is a tensor with multiple elements, use the first one
+                    label = label[0].item()
+                else:
+                    label = label.item()
+            
+            # Process embeddings - replace special tokens with special embeddings
+            processed_embeddings = []
+            
+            for j, token in enumerate(text):
+                if special_embeddings and token in special_embeddings:
+                    # Use special embedding for this token
+                    processed_embeddings.append(special_embeddings[token])
+                else:
+                    # Use word embedding for this token
+                    if j < len(word_embedding):
+                        processed_embeddings.append(word_embedding[j])
+                    else:
+                        # Handle case where token index exceeds word embedding length
+                        logger.warning(f"Token index {j} exceeds word embedding length {len(word_embedding)} for sample {i}")
+                        # Use a zero vector as fallback
+                        if len(processed_embeddings) > 0:
+                            processed_embeddings.append(torch.zeros_like(processed_embeddings[0]))
+                        else:
+                            # If no embeddings processed yet, use sentence embedding dimension
+                            processed_embeddings.append(torch.zeros_like(sentence_embedding))
+            
+            # Convert to tensor
+            if len(processed_embeddings) > 0:
+                try:
+                    tensor_embeddings = []
+                    for emb in processed_embeddings:
+                        if isinstance(emb, torch.Tensor):
+                            tensor_embeddings.append(emb.float())
+                        else:
+                            tensor_embeddings.append(torch.tensor(emb, dtype=torch.float))
+                    x = torch.stack(tensor_embeddings)
+                except Exception as e:
+                    logger.error(f"Error converting embeddings to tensor for sample {i}: {str(e)}")
+                    continue
+            else:
+                logger.warning(f"No processed embeddings for sample {i}")
+                continue
+            
+            # Create edges based on edge_type
+            if edge_type == 'window':
+                # Create window-based edges
+                edge_index = []
+                for j in range(len(text)):
+                    for k in range(max(0, j - window_size), min(len(text), j + window_size + 1)):
+                        if j != k:  # Don't connect word to itself
+                            edge_index.append([j, k])
+                
+                if not edge_index:  # Check if edge_index is empty
+                    logger.warning(f"No edges created for sample {i} with {len(text)} words")
+                    continue
+                
+                edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+            
+            elif edge_type == 'fully_connected':
+                # Create fully connected edges
+                edge_index = []
+                for j in range(len(text)):
+                    for k in range(len(text)):
+                        if j != k:  # Don't connect word to itself
+                            edge_index.append([j, k])
+                
+                if not edge_index:  # Check if edge_index is empty
+                    logger.warning(f"No edges created for sample {i} with {len(text)} words")
+                    continue
+                
+                edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+            
+            else:
+                raise ValueError(f"Unsupported edge type: {edge_type}")
+                
+            # Create graph data object
+            graph_data = Data(
+                x=x,
+                edge_index=edge_index,
+                y=torch.tensor([label], dtype=torch.long),
+                text=text,
+                sentence_embedding=torch.tensor(sentence_embedding, dtype=torch.float)
+            )
+            
+            graphs.append(graph_data)
+            
+        except Exception as e:
+            logger.error(f"Error creating graph for sample {i}: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
+    logger.info(f"Created {len(graphs)} graphs successfully")
+    return graphs
+
+def process_embeddings_batch(batch_word_embeddings, batch_sentence_embeddings, batch_texts, batch_labels, config, split_output_dir, batch_idx, special_embeddings=None):
+    """Process a single batch of embeddings"""
+    # Create graph structures for this batch
+    batch_graphs = create_word_graphs(
+        batch_word_embeddings,
+        batch_sentence_embeddings,
+        batch_texts,
+        batch_labels,
+        special_embeddings=special_embeddings,
+        window_size=config['window_size'],
+        edge_type=config['edge_type']
+    )
+    
+    # Save batch graphs with consistent numerical naming to preserve original order
+    # Format with leading zeros to ensure correct sorting
+    batch_graphs_path = os.path.join(split_output_dir, f"graphs_{config['edge_type']}_batch_{batch_idx:04d}.pkl")
+    
+    with open(batch_graphs_path, 'wb') as f:
+        pkl.dump(batch_graphs, f)
+    
+    logger.info(f"Saved {len(batch_graphs)} graphs to {batch_graphs_path}")
+    
+    return len(batch_graphs)
+
+def get_dataset_info(embeddings_dir):
+    """Get dataset information from embeddings directory
+    
+    Args:
+        embeddings_dir: Directory containing embeddings
+        
+    Returns:
+        dataset_info: Dictionary containing dataset information
+        is_chunked: Whether embeddings are stored in chunks
+    """
+    # Check if embeddings are stored in chunks
+    chunks_dir = os.path.join(embeddings_dir, 'chunks')
+    is_chunked = os.path.exists(chunks_dir)
+    
+    if is_chunked:
+        # Get metadata from first chunk
+        chunk_dirs = sorted([d for d in os.listdir(chunks_dir) if os.path.isdir(os.path.join(chunks_dir, d))])
+        if not chunk_dirs:
+            raise ValueError(f"No chunk directories found in {chunks_dir}")
+        
+        first_chunk_dir = os.path.join(chunks_dir, chunk_dirs[0])
+        metadata_path = os.path.join(first_chunk_dir, 'metadata.pkl')
+        
+        if not os.path.exists(metadata_path):
+            raise ValueError(f"Metadata file not found in {first_chunk_dir}")
+        
+        with open(metadata_path, 'rb') as f:
+            metadata = pkl.load(f)
+        
+        # Count total samples across all chunks
+        total_samples = 0
+        for chunk_dir in chunk_dirs:
+            chunk_metadata_path = os.path.join(chunks_dir, chunk_dir, 'metadata.pkl')
+            with open(chunk_metadata_path, 'rb') as f:
+                chunk_metadata = pkl.load(f)
+            total_samples += len(chunk_metadata['texts'])
+        
+        dataset_info = {
+            'total_samples': total_samples,
+            'num_chunks': len(chunk_dirs),
+            'chunk_dirs': chunk_dirs
+        }
+    else:
+        # Get metadata from main directory
+        metadata_path = os.path.join(embeddings_dir, 'metadata.pkl')
+        
+        if not os.path.exists(metadata_path):
+            raise ValueError(f"Metadata file not found in {embeddings_dir}")
+        
+        with open(metadata_path, 'rb') as f:
+            metadata = pkl.load(f)
+        
+        dataset_info = {
+            'total_samples': metadata['total_samples']
+        }
+    
+    return dataset_info, is_chunked
+
+def load_chunk_from_disk(chunk_dir):
+    """Load a chunk of embeddings from disk
+    
+    Args:
+        chunk_dir: Directory containing chunk data
+        
+    Returns:
+        word_embeddings: List of word embeddings
+        sentence_embeddings: List of sentence embeddings
+        texts: List of texts
+        labels: List of labels
+    """
+    # Load metadata
+    metadata_path = os.path.join(chunk_dir, 'metadata.pkl')
+    with open(metadata_path, 'rb') as f:
+        metadata = pkl.load(f)
+    
+    # Load word embeddings
+    word_embeddings_path = os.path.join(chunk_dir, 'word_embeddings.pkl')
+    with open(word_embeddings_path, 'rb') as f:
+        word_embeddings = pkl.load(f)
+    
+    # Load sentence embeddings
+    sentence_embeddings_path = os.path.join(chunk_dir, 'sentence_embeddings.pkl')
+    with open(sentence_embeddings_path, 'rb') as f:
+        sentence_embeddings = pkl.load(f)
+    
+    return word_embeddings, sentence_embeddings, metadata['texts'], metadata['labels']
+
+def load_special_embeddings(embeddings_dir):
+    """Load special embeddings for constituency tokens
+    
+    Args:
+        embeddings_dir: Directory containing embeddings
+        
+    Returns:
+        special_embeddings: Dictionary of special embeddings
+    """
+    # Check if special embeddings exist in main directory
+    special_embeddings_path = os.path.join(embeddings_dir, 'special_embeddings.pkl')
+    
+    if os.path.exists(special_embeddings_path):
+        with open(special_embeddings_path, 'rb') as f:
+            special_embeddings = pkl.load(f)
+        return special_embeddings
+    
+    # Check if special embeddings exist in special directory
+    special_dir = os.path.join(os.path.dirname(embeddings_dir), 'special')
+    special_embeddings_path = os.path.join(special_dir, 'special_embeddings.pkl')
+    
+    if os.path.exists(special_embeddings_path):
+        with open(special_embeddings_path, 'rb') as f:
+            special_embeddings = pkl.load(f)
+        return special_embeddings
+    
+    logger.warning(f"No special embeddings found in {embeddings_dir} or {special_dir}")
+    return None
+
+def process_embeddings(dataset_name, embeddings_dir, batch_size=10, window_size=3, edge_type='window'):
+    """Process embeddings to create graph structures
+    
+    Args:
+        dataset_name: Name of the dataset
+        embeddings_dir: Directory containing embeddings
+        batch_size: Batch size for processing
+        window_size: Window size for creating edges
+        edge_type: Type of edges to create (window, fully_connected)
+        
+    Returns:
+        output_dir: Directory containing the processed graphs
+    """
+    # Create output directory
+    output_dir = os.path.join(os.path.dirname(embeddings_dir), 'graphs', dataset_name)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Load special embeddings
+    special_embeddings = load_special_embeddings(embeddings_dir)
+    
+    # Process each split
+    for split in ['train', 'validation', 'test']:
+        split_dir = os.path.join(embeddings_dir, split)
+        
+        if not os.path.exists(split_dir):
+            logger.warning(f"Split directory {split_dir} does not exist, skipping")
+            continue
+        
+        # Create output directory for this split
+        split_output_dir = os.path.join(output_dir, split)
+        os.makedirs(split_output_dir, exist_ok=True)
+        
+        # Get dataset information
+        try:
+            dataset_info, is_chunked = get_dataset_info(split_dir)
+            logger.info(f"Processing {dataset_info['total_samples']} samples for {split} split")
+        except Exception as e:
+            logger.error(f"Error getting dataset information for {split_dir}: {str(e)}")
+            continue
+        
+        # Save configuration
+        config = {
+            'window_size': window_size,
+            'edge_type': edge_type,
+            'batch_size': batch_size,
+            'total_samples': dataset_info['total_samples']
+        }
+        
+        config_path = os.path.join(split_output_dir, 'config.json')
+        with open(config_path, 'w') as f:
+            import json
+            json.dump(config, f)
+        
+        # Process embeddings
+        if is_chunked:
+            # Process each chunk
+            chunks_dir = os.path.join(split_dir, 'chunks')
+            total_graphs = 0
+            
+            for i, chunk_dir_name in enumerate(dataset_info['chunk_dirs']):
+                chunk_dir = os.path.join(chunks_dir, chunk_dir_name)
+                
+                try:
+                    # Load chunk data
+                    word_embeddings, sentence_embeddings, texts, labels = load_chunk_from_disk(chunk_dir)
+                    
+                    # Process chunk
+                    num_graphs = process_embeddings_batch(
+                        word_embeddings, sentence_embeddings, texts, labels,
+                        config, split_output_dir, i, special_embeddings
+                    )
+                    
+                    total_graphs += num_graphs
+                    
+                except Exception as e:
+                    logger.error(f"Error processing chunk {chunk_dir}: {str(e)}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+            
+            logger.info(f"Processed {total_graphs} graphs for {split} split")
+        
+        else:
+            # Load all embeddings
+            try:
+                # Load metadata
+                metadata_path = os.path.join(split_dir, 'metadata.pkl')
+                with open(metadata_path, 'rb') as f:
+                    metadata = pkl.load(f)
+                
+                # Load word embeddings
+                word_embeddings_path = os.path.join(split_dir, 'word_embeddings.pkl')
+                with open(word_embeddings_path, 'rb') as f:
+                    word_embeddings = pkl.load(f)
+                
+                # Load sentence embeddings
+                sentence_embeddings_path = os.path.join(split_dir, 'sentence_embeddings.pkl')
+                with open(sentence_embeddings_path, 'rb') as f:
+                    sentence_embeddings = pkl.load(f)
+                
+                # Process in batches
+                total_samples = len(word_embeddings)
+                total_graphs = 0
+                
+                for i in range(0, total_samples, batch_size):
+                    batch_end = min(i + batch_size, total_samples)
+                    
+                    # Get batch data
+                    batch_word_embeddings = word_embeddings[i:batch_end]
+                    batch_sentence_embeddings = sentence_embeddings[i:batch_end]
+                    batch_texts = metadata['texts'][i:batch_end]
+                    batch_labels = metadata['labels'][i:batch_end]
+                    
+                    # Process batch
+                    num_graphs = process_embeddings_batch(
+                        batch_word_embeddings, batch_sentence_embeddings, batch_texts, batch_labels,
+                        config, split_output_dir, i // batch_size, special_embeddings
+                    )
+                    
+                    total_graphs += num_graphs
+                
+                logger.info(f"Processed {total_graphs} graphs for {split} split")
+                
+            except Exception as e:
+                logger.error(f"Error processing embeddings for {split_dir}: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+    
+    return output_dir
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Process embeddings to create graph structures")
+    parser.add_argument("--dataset_name", type=str, required=True, help="Name of the dataset")
+    parser.add_argument("--embeddings_dir", type=str, required=True, help="Directory containing embeddings")
+    parser.add_argument("--batch_size", type=int, default=10, help="Batch size for processing")
+    parser.add_argument("--window_size", type=int, default=3, help="Window size for creating edges")
+    parser.add_argument("--edge_type", type=str, default="window", choices=["window", "fully_connected"], help="Type of edges to create")
+    
+    args = parser.parse_args()
+    
+    process_embeddings(
+        dataset_name=args.dataset_name,
+        embeddings_dir=args.embeddings_dir,
+        batch_size=args.batch_size,
+        window_size=args.window_size,
+        edge_type=args.edge_type
+    )
