@@ -1,8 +1,0 @@
-{
-    "datasets": ["SetFit/ag_news"],
-    "subsets": ["train", "test", "validation"],
-    "graph_types": ["constituency"],
-    "constituency_model": "con-crf-roberta-en",
-    "batch_size": 256,
-    "device": "cuda:0"
-}

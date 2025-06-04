@@ -1,18 +1,18 @@
 """
-Configuration module for Graph Generation
+Configuration module for Tree Generation
 
-This module contains configuration settings for the graph generation process.
+This module contains configuration settings for the constituency tree generation process.
 """
 
-# Only constituency graphs will be generated
+# Only constituency trees will be generated
 GRAPH_TYPES = ["constituency"]
 
 # Default model for constituency parsing
 DEFAULT_MODELS = {
-    "constituency": "crf-con-roberta-en"  # Standard LSTM-based constituency parser
+    "constituency": "crf-con-roberta-en"  # RoBERTa-based constituency parser
 }
 
-# Available models (only constituency)
+# Available models for constituency parsing
 AVAILABLE_MODELS = {
     "constituency": [
         "crf-con-roberta-en",  # RoBERTa-based constituency parser
@@ -33,5 +33,5 @@ DEFAULT_BATCH_SIZE = 256
 DEFAULT_DEVICE = "cuda:0"
 
 # Default directories
-DEFAULT_OUTPUT_DIR = "/app/src/Clean_Code/output/text_graphs"
-DEFAULT_DATA_DIR = "/app/src/Clean_Code/output/text_graphs"
+DEFAULT_OUTPUT_DIR = "/app/src/Clean_Code/output/text_trees"
+DEFAULT_DATA_DIR = "/app/src/Clean_Code/output/text_trees"

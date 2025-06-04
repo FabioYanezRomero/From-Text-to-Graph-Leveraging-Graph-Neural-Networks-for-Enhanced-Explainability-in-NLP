@@ -1,7 +1,7 @@
 """
-Constituency Graph Generator Module
+Constituency Tree Generator Module
 
-This module provides functionality to create constituency graphs from sentences.
+This module provides functionality to create constituency trees from sentences.
 It leverages the Stanza NLP library to generate constituency trees and converts them
 into directed graphs where nodes represent constituents and words.
 """
@@ -12,7 +12,7 @@ import networkx as nx
 import torch
 import torch.cuda
 import stanza
-from .base_generator import BaseGraphGenerator
+from .base_generator import BaseTreeGenerator
 
 # Dictionary mapping constituency labels to more descriptive phrases
 PHRASE_MAPPER = {
@@ -46,9 +46,9 @@ PHRASE_MAPPER = {
 }
 
 
-class ConstituencyGraphGenerator(BaseGraphGenerator):
+class ConstituencyTreeGenerator(BaseTreeGenerator):
     """
-    Creates constituency graphs from sentences.
+    Creates constituency trees from sentences.
 
     This class processes sentences using a Stanza constituency parser and converts
     the parsed trees into directed graphs. Each node in the graph represents
@@ -185,7 +185,6 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
                                 combined_parse[1].append(sent_parse)
                                 
                     trees.append(combined_parse)
-                    #print(f"Combined {len(doc.sentences)} sentences for input {i}")
                 else:
                     # Single sentence case
                     sent = doc.sentences[0]
@@ -367,14 +366,14 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
 
     def get_graph(self, sentences: List[str], ids: List[str] = None) -> List[nx.DiGraph]:
         """
-        Generate constituency graphs for a list of sentences.
+        Generate constituency trees for a list of sentences.
 
         Args:
             sentences (List[str]): List of sentences to process.
             ids (List[str], optional): List of IDs to assign to each graph. Defaults to None.
 
         Returns:
-            List[nx.DiGraph]: List of constituency graphs.
+            List[nx.DiGraph]: List of constituency trees.
             
         Raises:
             ValueError: If ids are provided but don't match the number of sentences.
@@ -411,5 +410,4 @@ class ConstituencyGraphGenerator(BaseGraphGenerator):
             return graphs
             
         except Exception as e:
-
-            raise RuntimeError(f"Error generating constituency graphs: {e}")
+            raise RuntimeError(f"Error generating constituency trees: {e}")

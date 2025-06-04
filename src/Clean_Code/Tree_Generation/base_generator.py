@@ -1,6 +1,6 @@
 """
-Base Graph Generator Module
-This module provides a base class for all graph generators to implement.
+Base Tree Generator Module
+This module provides a base class for tree generators to implement.
 """
 from abc import ABC, abstractmethod
 from typing import List, Optional, Union, Any
@@ -8,21 +8,21 @@ import networkx as nx
 import pickle as pkl
 import matplotlib.pyplot as plt
 
-class BaseGraphGenerator(ABC):
+class BaseTreeGenerator(ABC):
     """
-    Abstract base class for all graph generators.
+    Abstract base class for all tree generators.
     
-    This class defines the common interface that all graph generators must implement,
-    ensuring consistency across different graph generation approaches.
+    This class defines the common interface that all tree generators must implement,
+    ensuring consistency across different tree generation approaches.
     
     Attributes:
-        model (str): Name of the model used for graph generation.
-        property (str): Type of graph property (e.g., 'syntactic', 'semantic').
+        model (str): Name of the model used for tree generation.
+        property (str): Type of tree property (e.g., 'constituency').
         device (str): Device to run computation on ('cpu', 'cuda:0', etc.)
     """
     def __init__(self, model: str, property: str = None, device: str = 'cuda:0'): # type: ignore
         """
-        Initialize the graph generator with a model and device.
+        Initialize the tree generator with a model and device.
         
         Args:
             model (str): Name of the model to use.
@@ -94,7 +94,7 @@ class BaseGraphGenerator(ABC):
         if edge_labels:
             nx.draw_networkx_edge_labels(graph, pos, edge_labels=edge_labels)
             
-        plt.title(f"{self.property.capitalize()} Graph")
+        plt.title(f"{self.property.capitalize()} Tree")
         plt.show()
     
     def save_graph(self, graph: Union[nx.DiGraph, List[nx.DiGraph]], folder: str, filename: str) -> None:
@@ -112,6 +112,6 @@ class BaseGraphGenerator(ABC):
         try:
             with open(f'{folder}/{filename}.pkl', 'wb') as f:
                 pkl.dump(graph, f)
-            print(f"Graph(s) successfully saved to {folder}/{self.property}/{filename}.pkl")
+            print(f"Tree(s) successfully saved to {folder}/{self.property}/{filename}.pkl")
         except IOError as e:
-            raise IOError(f"Failed to save graph to {folder}/{self.property}/{filename}.pkl: {e}")
+            raise IOError(f"Failed to save tree to {folder}/{self.property}/{filename}.pkl: {e}")
