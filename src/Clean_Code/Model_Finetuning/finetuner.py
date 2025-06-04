@@ -94,10 +94,36 @@ def load_and_process_dataset(dataset_name, tokenizer, max_length):
                 truncation=True,
                 max_length=max_length
             )
-        # For other datasets, adjust accordingly
-        else:
+        # For SST2 dataset
+        elif dataset_name == 'stanfordnlp/sst2':
+            return tokenizer(
+                examples['sentence'],
+                padding='max_length',
+                truncation=True,
+                max_length=max_length
+            )
+        # For AG News dataset
+        elif dataset_name == 'setfit/ag_news':
             return tokenizer(
                 examples['text'],
+                padding='max_length',
+                truncation=True,
+                max_length=max_length
+            )
+        # For other datasets, try common column names
+        else:
+            # Try to find the text column
+            text_column = None
+            for column in ['text', 'sentence', 'content']:
+                if column in examples:
+                    text_column = column
+                    break
+            
+            if text_column is None:
+                raise ValueError(f"Could not find text column in dataset. Available columns: {list(examples.keys())}")
+                
+            return tokenizer(
+                examples[text_column],
                 padding='max_length',
                 truncation=True,
                 max_length=max_length
@@ -118,11 +144,22 @@ def load_and_process_dataset(dataset_name, tokenizer, max_length):
             batched=True
         )
         
+        # Determine columns to remove
+        if dataset_name == 'snli':
+            columns_to_remove = ['premise', 'hypothesis']
+        elif dataset_name == 'stanfordnlp/sst2':
+            columns_to_remove = ['sentence', 'idx']
+        elif dataset_name == 'setfit/ag_news':
+            columns_to_remove = ['text']
+        else:
+            # Get all columns except label and index
+            columns_to_remove = [col for col in dataset[split].column_names if col not in ['label', 'index']]
+        
         # Tokenize
         tokenized_datasets[split] = dataset[split].map(
             tokenize_function,
             batched=True,
-            remove_columns=['premise', 'hypothesis'] if dataset_name == 'snli' else ['text']
+            remove_columns=columns_to_remove
         )
         
         # Format for PyTorch
@@ -196,9 +233,15 @@ def fine_tune(config):
     # Load tokenizer and model
     logger.info(f"Loading model: {config['model_name']}")
     tokenizer = AutoTokenizer.from_pretrained(config['model_name'])
+    # Set the number of labels based on the dataset
+    if config['dataset_name'] == 'setfit/ag_news':
+        num_labels = 4  # AG News has 4 classes
+    else:
+        num_labels = 2
+    
     model = AutoModelForSequenceClassification.from_pretrained(
         config['model_name'],
-        num_labels=3 if config['dataset_name'] == 'snli' else 2
+        num_labels=num_labels
     )
     model.to(device)
     
@@ -313,7 +356,7 @@ def fine_tune(config):
                     
                     # Forward pass with FP16
                     if config['fp16']:
-                        with autocast():
+                        with autocast(device_type='cuda', dtype=torch.bfloat16):
                             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                             loss = outputs.loss
                     else:
@@ -358,7 +401,7 @@ def fine_tune(config):
                     
                     # Forward pass with FP16
                     if config['fp16']:
-                        with autocast():
+                        with autocast(device_type='cuda', dtype=torch.bfloat16):
                             outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
                             loss = outputs.loss
                     else:

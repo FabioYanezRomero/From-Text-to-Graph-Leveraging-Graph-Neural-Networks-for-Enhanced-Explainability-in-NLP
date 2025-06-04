@@ -1,15 +1,5 @@
 # Core dependencies
-torch==2.5.1+cu121
-torchvision==0.20.1+cu121
-torchaudio==2.5.1+cu121
---index-url https://download.pytorch.org/whl/cu121
-
-# PyTorch Geometric and dependencies
-torch-scatter==2.1.2
-torch-sparse==0.6.18
-torch-cluster==1.6.3
-torch-spline-conv==1.2.2
-torch-geometric==2.6.1
+# Note: PyTorch and PyTorch Geometric are installed separately in the Dockerfile
 
 # Machine learning and data processing
 transformers>=4.30.0

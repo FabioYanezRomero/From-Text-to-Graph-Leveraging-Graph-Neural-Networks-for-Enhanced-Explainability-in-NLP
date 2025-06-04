@@ -7,7 +7,7 @@
 export PYTHONPATH=$PYTHONPATH:$(dirname $(dirname $(realpath $0)))
 
 # Parse command line arguments
-dataset_name="setfit/ag_news"
+dataset_name="stanfordnlp/sst2"
 model_name="google-bert/bert-base-uncased"
 num_epochs=5
 batch_size=16
