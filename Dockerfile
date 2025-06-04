@@ -33,10 +33,13 @@ RUN ln -sf /usr/bin/python3 /usr/bin/python && \
 # Set working directory
 WORKDIR /app
 
-# Copy requirements file
+# Copy requirements file first to leverage Docker cache
 COPY requirements.txt .
 
-# Copy application code
+# Install Python dependencies
+RUN pip install -r requirements.txt
+
+# Copy the rest of the application code
 COPY . .
 
 # Set the working directory to src where the main code is located
