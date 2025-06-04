@@ -83,6 +83,10 @@ def load_and_process_dataset(dataset_name, tokenizer, max_length):
     # Load dataset from Hugging Face datasets
     dataset = load_dataset(dataset_name)
     
+    # For SST2, use validation set for testing since test set has no labels
+    if dataset_name == 'stanfordnlp/sst2':
+        dataset['test'] = dataset['validation']
+    
     # Define tokenization function
     def tokenize_function(examples):
         # For SNLI dataset
