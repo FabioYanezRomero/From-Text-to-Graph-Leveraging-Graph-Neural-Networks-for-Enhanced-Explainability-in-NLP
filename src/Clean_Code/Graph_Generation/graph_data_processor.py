@@ -164,50 +164,43 @@ def get_dataset_info(embeddings_dir):
         dataset_info: Dictionary containing dataset information
         is_chunked: Whether embeddings are stored in chunks
     """
+    # First, check if we need to look in a nested directory structure
+    metadata_path = os.path.join(embeddings_dir, 'metadata.json')
+    
+    # If metadata.json is not found directly, look for subdirectories that might contain it
+    if not os.path.exists(metadata_path):
+        subdirs = [d for d in os.listdir(embeddings_dir) if os.path.isdir(os.path.join(embeddings_dir, d))]
+        
+        for subdir in subdirs:
+            nested_path = os.path.join(embeddings_dir, subdir, 'metadata.json')
+            if os.path.exists(nested_path):
+                logger.info(f"Found metadata in nested directory: {nested_path}")
+                metadata_path = nested_path
+                embeddings_dir = os.path.join(embeddings_dir, subdir)
+                break
+    
     # Check if embeddings are stored in chunks
-    chunks_dir = os.path.join(embeddings_dir, 'chunks')
-    is_chunked = os.path.exists(chunks_dir)
+    embedding_chunks_dir = os.path.join(embeddings_dir, 'embedding_chunks')
+    is_chunked = os.path.exists(embedding_chunks_dir)
+    
+    if not os.path.exists(metadata_path):
+        raise FileNotFoundError(f"Metadata file not found in {embeddings_dir} or its subdirectories")
+    
+    with open(metadata_path, 'r') as f:
+        metadata = json.load(f)
     
     if is_chunked:
-        # Get metadata from first chunk
-        chunk_dirs = sorted([d for d in os.listdir(chunks_dir) if os.path.isdir(os.path.join(chunks_dir, d))])
-        if not chunk_dirs:
-            raise ValueError(f"No chunk directories found in {chunks_dir}")
-        
-        first_chunk_dir = os.path.join(chunks_dir, chunk_dirs[0])
-        metadata_path = os.path.join(first_chunk_dir, 'metadata.pkl')
-        
-        if not os.path.exists(metadata_path):
-            raise ValueError(f"Metadata file not found in {first_chunk_dir}")
-        
-        with open(metadata_path, 'rb') as f:
-            metadata = pkl.load(f)
-        
-        # Count total samples across all chunks
-        total_samples = 0
-        for chunk_dir in chunk_dirs:
-            chunk_metadata_path = os.path.join(chunks_dir, chunk_dir, 'metadata.pkl')
-            with open(chunk_metadata_path, 'rb') as f:
-                chunk_metadata = pkl.load(f)
-            total_samples += len(chunk_metadata['texts'])
+        # Get list of chunk files
+        chunk_files = sorted([f for f in os.listdir(embedding_chunks_dir) if f.endswith('.pkl')])
         
         dataset_info = {
-            'total_samples': total_samples,
-            'num_chunks': len(chunk_dirs),
-            'chunk_dirs': chunk_dirs
+            'total_samples': metadata.get('num_samples', 0),
+            'chunk_dirs': [embedding_chunks_dir],
+            'num_chunks': len(chunk_files)
         }
     else:
-        # Get metadata from main directory
-        metadata_path = os.path.join(embeddings_dir, 'metadata.pkl')
-        
-        if not os.path.exists(metadata_path):
-            raise ValueError(f"Metadata file not found in {embeddings_dir}")
-        
-        with open(metadata_path, 'rb') as f:
-            metadata = pkl.load(f)
-        
         dataset_info = {
-            'total_samples': len(metadata['texts'])
+            'total_samples': metadata.get('num_samples', 0)
         }
     
     return dataset_info, is_chunked
@@ -224,22 +217,84 @@ def load_chunk_from_disk(chunk_dir):
         texts: List of texts
         labels: List of labels
     """
-    # Load metadata
-    metadata_path = os.path.join(chunk_dir, 'metadata.pkl')
-    with open(metadata_path, 'rb') as f:
-        metadata = pkl.load(f)
+    # Get all chunk files in the directory
+    # Look for both old format (.pkl files with chunk_ prefix) and new format (.npz files with embeddings_chunk_ prefix)
+    chunk_files = [f for f in os.listdir(chunk_dir) if 
+                 (f.endswith('.pkl') and f.startswith('chunk_')) or 
+                 (f.endswith('.npz') and f.startswith('embeddings_chunk_'))]
     
-    # Load word embeddings
-    word_embeddings_path = os.path.join(chunk_dir, 'word_embeddings.pkl')
-    with open(word_embeddings_path, 'rb') as f:
-        word_embeddings = pkl.load(f)
+    # Sort files numerically by their index to maintain original order
+    def extract_chunk_number(filename):
+        if filename.startswith('chunk_'):
+            # Extract number from old format: chunk_X.pkl
+            return int(filename.replace('chunk_', '').replace('.pkl', ''))
+        elif filename.startswith('embeddings_chunk_'):
+            # Extract number from new format: embeddings_chunk_X.npz
+            return int(filename.replace('embeddings_chunk_', '').replace('.npz', ''))
+        return 0
     
-    # Load sentence embeddings
-    sentence_embeddings_path = os.path.join(chunk_dir, 'sentence_embeddings.pkl')
-    with open(sentence_embeddings_path, 'rb') as f:
-        sentence_embeddings = pkl.load(f)
+    chunk_files = sorted(chunk_files, key=extract_chunk_number)
     
-    return word_embeddings, sentence_embeddings, metadata['texts'], metadata['labels']
+    if not chunk_files:
+        raise FileNotFoundError(f"No chunk files found in {chunk_dir}")
+    
+    # Initialize lists to store all data
+    word_embeddings = []
+    sentence_embeddings = []
+    texts = []
+    labels = []
+    
+    # Process all chunks
+    for chunk_file in chunk_files:
+        chunk_path = os.path.join(chunk_dir, chunk_file)
+        
+        # Handle different file formats
+        if chunk_file.endswith('.pkl'):
+            # Old format with pickle files
+            with open(chunk_path, 'rb') as f:
+                chunk_data = pkl.load(f)
+                
+            # Extract data based on the structure of the chunk
+            if isinstance(chunk_data, dict):
+                # New format with dictionary structure
+                word_embeddings.extend(chunk_data.get('word_embeddings', []))
+                sentence_embeddings.extend(chunk_data.get('sentence_embeddings', []))
+                texts.extend(chunk_data.get('texts', []))
+                labels.extend(chunk_data.get('labels', []))
+            elif isinstance(chunk_data, tuple) and len(chunk_data) >= 2:
+                # Old format with tuple structure
+                word_embeddings.extend(chunk_data[0])
+                sentence_embeddings.extend(chunk_data[1])
+                if len(chunk_data) > 2:
+                    texts.extend(chunk_data[2])
+                if len(chunk_data) > 3:
+                    labels.extend(chunk_data[3])
+        elif chunk_file.endswith('.npz'):
+            # New format with numpy compressed files
+            try:
+                chunk_data = np.load(chunk_path, allow_pickle=True)
+                
+                # Extract arrays from the npz file
+                if 'word_embeddings' in chunk_data:
+                    word_embeddings.extend(chunk_data['word_embeddings'])
+                if 'sentence_embeddings' in chunk_data:
+                    sentence_embeddings.extend(chunk_data['sentence_embeddings'])
+                if 'texts' in chunk_data:
+                    texts.extend(chunk_data['texts'])
+                if 'labels' in chunk_data:
+                    labels.extend(chunk_data['labels'])
+                    
+                logger.info(f"Loaded {len(chunk_data['word_embeddings']) if 'word_embeddings' in chunk_data else 0} samples from {chunk_file}")
+            except Exception as e:
+                logger.error(f"Error loading .npz file {chunk_path}: {e}")
+                continue
+    
+    # If labels are missing, create dummy labels
+    if not labels and word_embeddings:
+        logger.warning(f"No labels found in chunks, creating dummy labels")
+        labels = [0] * len(word_embeddings)
+    
+    return word_embeddings, sentence_embeddings, texts, labels
 
 def load_special_embeddings(embeddings_dir):
     """Load special embeddings for constituency tokens
@@ -267,7 +322,17 @@ def load_special_embeddings(embeddings_dir):
             special_embeddings = pkl.load(f)
         return special_embeddings
     
-    logger.warning(f"No special embeddings found in {embeddings_dir} or {special_dir}")
+    # Check if we need to look in subdirectories
+    subdirs = [d for d in os.listdir(embeddings_dir) if os.path.isdir(os.path.join(embeddings_dir, d))]
+    for subdir in subdirs:
+        nested_path = os.path.join(embeddings_dir, subdir, 'special_embeddings.pkl')
+        if os.path.exists(nested_path):
+            logger.info(f"Found special embeddings in nested directory: {nested_path}")
+            with open(nested_path, 'rb') as f:
+                special_embeddings = pkl.load(f)
+            return special_embeddings
+    
+    logger.warning(f"No special embeddings found in {embeddings_dir} or its subdirectories")
     return None
 
 def load_constituency_tree(tree_path):
@@ -347,30 +412,52 @@ def create_word_graphs(word_embeddings, sentence_embeddings, texts, labels, data
     from tqdm import tqdm
     
     # Base directory for constituency trees
-    base_dir = os.path.join('/app/src/Clean_Code/output/text_graphs', 'stanfordnlp', dataset_name, split, 'constituency')
+    logger.info(f"Dataset name received in create_word_graphs: {dataset_name}")
     
-    graphs = []
+    # Extract dataset provider and name
+    if '/' in dataset_name:
+        provider, name = dataset_name.split('/', 1)
+    else:
+        # If no provider is specified, try to determine from the dataset name
+        if dataset_name == 'stanfordnlp':
+            provider, name = 'stanfordnlp', 'sst2'  # Default to sst2 if only stanfordnlp is provided
+        else:
+            provider, name = 'stanfordnlp', dataset_name
+    
+    logger.info(f"Provider: {provider}, Name: {name}")
+    base_dir = os.path.join('/app/src/Clean_Code/output/text_graphs', provider, name, split, 'constituency')
+    logger.info(f"Looking for constituency trees in: {base_dir}")
+    if not os.path.exists(base_dir):
+        logger.warning(f"Constituency tree directory not found: {base_dir}. No graphs will be created.")
+        return []
     
     logger.info(f"Creating graphs from pre-generated constituency trees in {base_dir}")
     logger.info(f"Input sizes: {len(word_embeddings)} word embeddings, {len(sentence_embeddings)} sentence embeddings, {len(texts)} texts, {len(labels)} labels")
     
-    # Ensure the directory exists
-    if not os.path.exists(base_dir):
-        raise FileNotFoundError(f"Constituency tree directory not found: {base_dir}")
+    graphs = []
     
     # Get list of all tree files
     tree_files = sorted([f for f in os.listdir(base_dir) if f.endswith('.pkl')], 
                         key=lambda x: int(x.split('.')[0]) if x.split('.')[0].isdigit() else float('inf'))
     
     # Process each sample
+    graphs = []
     for i in tqdm(range(len(word_embeddings)), desc="Processing graphs"):
         try:
-            if i >= len(tree_files):
+            # Try different tree file naming patterns
+            tree_file = os.path.join(base_dir, f"tree_{i}.pkl")
+            simple_tree_file = os.path.join(base_dir, f"{i}.pkl")
+            
+            # Check if any tree file pattern exists
+            if os.path.exists(tree_file):
+                tree_path = tree_file
+            elif os.path.exists(simple_tree_file):
+                tree_path = simple_tree_file
+            else:
                 logger.warning(f"No tree file found for sample {i}")
                 continue
-                
-            # Load the pre-generated tree
-            tree_path = os.path.join(base_dir, tree_files[i])
+            
+            # Load the tree
             tree = load_constituency_tree(tree_path)
             
             # Get the corresponding embeddings and label
@@ -393,46 +480,14 @@ def create_word_graphs(word_embeddings, sentence_embeddings, texts, labels, data
                 logger.warning(f"No edges extracted from tree for sample {i}")
                 continue
             
-            # Convert edge indices to tensor
-            edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
-            
-            # Process node features (embeddings)
-            num_nodes = len(node_features)
-            
-            # Initialize node features tensor
-            if word_embedding is not None and len(word_embedding) > 0:
-                # Use the first embedding to determine feature dimension
-                feature_dim = word_embedding[0].shape[0] if hasattr(word_embedding[0], 'shape') else len(word_embedding[0])
-            else:
-                # Fallback to sentence embedding dimension
-                feature_dim = sentence_embedding.shape[0] if sentence_embedding is not None else 768
-            
-            x = torch.zeros((num_nodes, feature_dim), dtype=torch.float)
-            
-            # Assign word embeddings to leaf nodes
-            leaf_count = 0
-            for node_id, node_feature in node_features.items():
-                # Check if this is a leaf node (no outgoing edges where this is the parent)
-                is_leaf = not any(p == node_id for p, _ in edge_indices)
-                if is_leaf and word_embedding is not None and leaf_count < len(word_embedding):
-                    x[node_id] = word_embedding[leaf_count]
-                    leaf_count += 1
-            
-            # For non-leaf nodes, use the mean of their children's embeddings
-            # Process nodes in reverse order (leaves to root)
-            for node_id in reversed(range(num_nodes)):
-                children = [c for p, c in edge_indices if p == node_id]
-                if children:
-                    child_embeddings = x[children]
-                    x[node_id] = child_embeddings.mean(dim=0)
-            
-            # Create graph data object
-            graph_data = Data(
-                x=x,
-                edge_index=edge_index,
-                y=torch.tensor([label], dtype=torch.long) if label is not None else None,
-                text=text,
-                sentence_embedding=torch.tensor(sentence_embedding, dtype=torch.float) if sentence_embedding is not None else None
+            # Create the graph
+            graph_data = create_graph_from_tree(
+                node_features, 
+                edge_indices, 
+                word_embedding, 
+                sentence_embedding, 
+                text, 
+                label
             )
             
             graphs.append(graph_data)
@@ -441,26 +496,88 @@ def create_word_graphs(word_embeddings, sentence_embeddings, texts, labels, data
             logger.error(f"Error processing sample {i}: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
-            
-        except Exception as e:
-            logger.error(f"Error creating graph for sample {i}: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
     
     logger.info(f"Created {len(graphs)} graphs successfully")
     return graphs
 
+def create_graph_from_tree(node_features, edge_indices, word_embeddings, sentence_embedding, text, label):
+    import torch
+    from torch_geometric.data import Data
+    
+    # Convert edge indices to tensor
+    edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
+    
+    # Process node features (embeddings)
+    num_nodes = len(node_features)
+    
+    # Initialize node features tensor
+    if word_embeddings and len(word_embeddings) > 0:
+        # Use the first embedding to determine feature dimension
+        feature_dim = word_embeddings[0].shape[0] if hasattr(word_embeddings[0], 'shape') else len(word_embeddings[0])
+    else:
+        # Fallback to sentence embedding dimension
+        feature_dim = sentence_embedding.shape[0] if sentence_embedding is not None else 768
+    
+    x = torch.zeros((num_nodes, feature_dim), dtype=torch.float)
+    
+    # Assign word embeddings to leaf nodes
+    leaf_count = 0
+    for node_id, node_feature in node_features.items():
+        # Check if this is a leaf node (no outgoing edges where this is the parent)
+        is_leaf = not any(p == node_id for p, _ in edge_indices)
+        if is_leaf and word_embeddings and leaf_count < len(word_embeddings):
+            x[node_id] = word_embeddings[leaf_count]
+            leaf_count += 1
+    
+    # For non-leaf nodes, use the mean of their children's embeddings
+    # Process nodes in reverse order (leaves to root)
+    for node_id in reversed(range(num_nodes)):
+        children = [c for p, c in edge_indices if p == node_id]
+        if children:
+            child_embeddings = x[children]
+            x[node_id] = child_embeddings.mean(dim=0)
+    
+    # Create graph data object
+    graph_data = Data(
+        x=x,
+        edge_index=edge_index,
+        y=torch.tensor([label], dtype=torch.long) if label is not None else None,
+        text=text,
+        sentence_embedding=torch.tensor(sentence_embedding, dtype=torch.float) if sentence_embedding is not None else None
+    )
+    
+    return graph_data
+
 def process_embeddings_batch(batch_word_embeddings, batch_sentence_embeddings, batch_texts, batch_labels, config, split_output_dir, batch_idx, special_embeddings=None):
     """Process a single batch of embeddings"""
-    # Create graph structures for this batch
+    # Log label source
+    label_source = config.get('label_source', 'original')
+    if label_source == 'llm':
+        logger.info(f"Using LLM predictions as labels for batch {batch_idx}")
+    
+    # Extract dataset name from the path
+    # We need to use the original dataset_name passed from process_embeddings
+    # Instead of trying to extract it from the split_output_dir which might be incorrect
+    
+    # Get the dataset name from the config
+    dataset_name = config.get('dataset_name', 'stanfordnlp/sst2')
+    
+    # Log the dataset name we're using
+    logger.info(f"Using dataset name: {dataset_name} for graph creation")
+
+    
+    # Extract split from the path
+    split = os.path.basename(split_output_dir).replace('_llm_labels', '')
+    
+    # Create graphs
     batch_graphs = create_word_graphs(
         batch_word_embeddings,
         batch_sentence_embeddings,
         batch_texts,
         batch_labels,
-        special_embeddings=special_embeddings,
-        window_size=config['window_size'],
-        edge_type=config['edge_type']
+        dataset_name,
+        split,
+        config['edge_type']
     )
     
     # Save batch graphs with consistent numerical naming to preserve original order
@@ -474,15 +591,137 @@ def process_embeddings_batch(batch_word_embeddings, batch_sentence_embeddings, b
     
     return len(batch_graphs)
 
-def process_embeddings(dataset_name, embeddings_dir, batch_size=10, window_size=3, edge_type='window'):
+def load_llm_predictions(predictions_file, split='test'):
+    """Load LLM predictions from a JSON file using the best epoch
+    
+    Args:
+        predictions_file: Path to the JSON file containing LLM predictions
+        split: Data split to load predictions for ('train', 'validation', 'test')
+        
+    Returns:
+        Dictionary mapping data index to predicted label
+    """
+    import json
+    import os
+    import sys
+    
+    # Map split names to match those in the predictions file
+    split_map = {
+        'train': 'train',
+        'validation': 'validation',
+        'test': 'test'
+    }
+    
+    split_name = split_map.get(split, split)
+    
+    try:
+        # Get the model directory from the predictions file path
+        model_dir = os.path.dirname(predictions_file)
+        
+        # Find the best epoch by analyzing the classification reports
+        best_epoch = find_best_epoch(model_dir)
+        
+        if best_epoch is None:
+            logger.warning(f"Could not determine best epoch, using latest epoch from predictions")
+            # Fallback to the latest epoch if best epoch cannot be determined
+            with open(predictions_file, 'r') as f:
+                predictions_data = json.load(f)
+            
+            max_epoch = 0
+            for item in predictions_data:
+                if item.get('dataset') == split_name and item.get('epoch', 0) > max_epoch:
+                    max_epoch = item.get('epoch', 0)
+            best_epoch = max_epoch
+        
+        # Load predictions
+        with open(predictions_file, 'r') as f:
+            predictions_data = json.load(f)
+        
+        # Create a dictionary mapping data index to predicted label for the best epoch
+        predictions = {}
+        for item in predictions_data:
+            if item.get('dataset') == split_name and item.get('epoch') == best_epoch:
+                predictions[item.get('data_index')] = item.get('predicted_label')
+        
+        logger.info(f"Loaded {len(predictions)} LLM predictions for {split_name} split from best epoch {best_epoch}")
+        return predictions
+    
+    except Exception as e:
+        logger.error(f"Error loading LLM predictions: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {}
+
+def find_best_epoch(model_dir, metric='f1-score', split='validation'):
+    """Find the best epoch based on validation F1 score
+    
+    Args:
+        model_dir: Directory containing model checkpoints and classification reports
+        metric: Metric to use for selecting the best epoch (default: 'f1-score')
+        split: Data split to use for evaluation (default: 'validation')
+        
+    Returns:
+        Best epoch number or None if it cannot be determined
+    """
+    import glob
+    import json
+    import os
+    
+    # Find all classification reports for the specified split
+    report_files = glob.glob(os.path.join(model_dir, f"classification_report_{split}_epoch*.json"))
+    
+    if not report_files:
+        logger.warning(f"No classification reports found in {model_dir} for split {split}")
+        return None
+    
+    best_score = -1
+    best_epoch = None
+    
+    # Iterate through all epochs
+    for report_file in report_files:
+        try:
+            with open(report_file, 'r') as f:
+                report = json.load(f)
+            
+            # Extract epoch number from filename
+            epoch = int(os.path.basename(report_file).split('_')[-1].split('.')[0].replace('epoch', ''))
+            
+            # For multi-class classification, use macro avg F1-score
+            # For binary classification, use weighted avg F1-score
+            if 'macro avg' in report and metric in report['macro avg']:
+                score = report['macro avg'][metric]
+            elif 'weighted avg' in report and metric in report['weighted avg']:
+                score = report['weighted avg'][metric]
+            else:
+                logger.warning(f"Metric {metric} not found in report {report_file}")
+                continue
+            
+            logger.info(f"Epoch {epoch}: {metric} = {score:.4f}")
+            
+            # Check if this is the best score so far
+            if score > best_score:
+                best_score = score
+                best_epoch = epoch
+        
+        except Exception as e:
+            logger.error(f"Error processing report file {report_file}: {e}")
+            continue
+    
+    if best_epoch is not None:
+        logger.info(f"Best {metric}: {best_score:.4f} (Epoch {best_epoch})")
+    
+    return best_epoch
+
+def process_embeddings(dataset_name, embeddings_dir, batch_size=10, edge_type='constituency', label_source='original', llm_predictions=None):
     """Process embeddings to create graph structures
     
     Args:
         dataset_name: Name of the dataset
         embeddings_dir: Directory containing embeddings
         batch_size: Batch size for processing
-        window_size: Window size for creating edges
-        edge_type: Type of edges to create (window, fully_connected)
+        edge_type: Type of edges to create (constituency)
+        label_source: Source of labels ('original' or 'llm')
+        llm_predictions: Path to LLM predictions JSON file (required if label_source is 'llm')
         
     Returns:
         output_dir: Directory containing the processed graphs
@@ -503,8 +742,19 @@ def process_embeddings(dataset_name, embeddings_dir, batch_size=10, window_size=
             continue
         
         # Create output directory for this split
-        split_output_dir = os.path.join(output_dir, split)
+        # If using LLM predictions, create a separate directory
+        if label_source == 'llm':
+            split_output_dir = os.path.join(output_dir, f"{split}_llm_labels")
+        else:
+            split_output_dir = os.path.join(output_dir, split)
+            
         os.makedirs(split_output_dir, exist_ok=True)
+        
+        # Load LLM predictions if needed
+        llm_pred_dict = None
+        if label_source == 'llm' and llm_predictions:
+            logger.info(f"Loading LLM predictions for {split} split from {llm_predictions}")
+            llm_pred_dict = load_llm_predictions(llm_predictions, split)
         
         # Get dataset information
         try:
@@ -516,10 +766,11 @@ def process_embeddings(dataset_name, embeddings_dir, batch_size=10, window_size=
         
         # Save configuration
         config = {
-            'window_size': window_size,
             'edge_type': edge_type,
             'batch_size': batch_size,
-            'total_samples': dataset_info['total_samples']
+            'total_samples': dataset_info['total_samples'],
+            'label_source': label_source,
+            'dataset_name': dataset_name
         }
         
         config_path = os.path.join(split_output_dir, 'config.json')
@@ -539,11 +790,30 @@ def process_embeddings(dataset_name, embeddings_dir, batch_size=10, window_size=
                     # Load chunk data
                     word_embeddings, sentence_embeddings, texts, labels = load_chunk_from_disk(chunk_dir)
                     
-                    # Process chunk
-                    num_graphs = process_embeddings_batch(
-                        word_embeddings, sentence_embeddings, texts, labels,
-                        config, split_output_dir, i, special_embeddings
-                    )
+                    # Apply LLM predictions if needed
+                    if label_source == 'llm' and llm_pred_dict:
+                        # Try to match data indices to LLM predictions
+                        modified_labels = []
+                        for idx, label in enumerate(labels):
+                            # Use data index if available, otherwise use position in chunk
+                            data_idx = i * batch_size + idx
+                            if data_idx in llm_pred_dict:
+                                modified_labels.append(llm_pred_dict[data_idx])
+                            else:
+                                modified_labels.append(label)
+                                logger.warning(f"No LLM prediction found for data index {data_idx}, using original label")
+                        
+                        # Process chunk with modified labels
+                        num_graphs = process_embeddings_batch(
+                            word_embeddings, sentence_embeddings, texts, modified_labels,
+                            config, split_output_dir, i, special_embeddings
+                        )
+                    else:
+                        # Process chunk with original labels
+                        num_graphs = process_embeddings_batch(
+                            word_embeddings, sentence_embeddings, texts, labels,
+                            config, split_output_dir, i, special_embeddings
+                        )
                     
                     total_graphs += num_graphs
                     
@@ -585,11 +855,30 @@ def process_embeddings(dataset_name, embeddings_dir, batch_size=10, window_size=
                     batch_texts = metadata['texts'][i:batch_end]
                     batch_labels = metadata['labels'][i:batch_end]
                     
-                    # Process batch
-                    num_graphs = process_embeddings_batch(
-                        batch_word_embeddings, batch_sentence_embeddings, batch_texts, batch_labels,
-                        config, split_output_dir, i // batch_size, special_embeddings
-                    )
+                    # Apply LLM predictions if needed
+                    if label_source == 'llm' and llm_pred_dict:
+                        # Try to match data indices to LLM predictions
+                        modified_labels = []
+                        for idx, label in enumerate(batch_labels):
+                            # Use data index if available, otherwise use position in batch
+                            data_idx = i + idx
+                            if data_idx in llm_pred_dict:
+                                modified_labels.append(llm_pred_dict[data_idx])
+                            else:
+                                modified_labels.append(label)
+                                logger.warning(f"No LLM prediction found for data index {data_idx}, using original label")
+                        
+                        # Process batch with modified labels
+                        num_graphs = process_embeddings_batch(
+                            batch_word_embeddings, batch_sentence_embeddings, batch_texts, modified_labels,
+                            config, split_output_dir, i // batch_size, special_embeddings
+                        )
+                    else:
+                        # Process batch with original labels
+                        num_graphs = process_embeddings_batch(
+                            batch_word_embeddings, batch_sentence_embeddings, batch_texts, batch_labels,
+                            config, split_output_dir, i // batch_size, special_embeddings
+                        )
                     
                     total_graphs += num_graphs
                 
@@ -608,10 +897,18 @@ def parse_args():
     parser.add_argument("--dataset_name", type=str, required=True, help="Name of the dataset")
     parser.add_argument("--embeddings_dir", type=str, required=True, help="Directory containing embeddings")
     parser.add_argument("--batch_size", type=int, default=10, help="Batch size for processing")
-    parser.add_argument("--window_size", type=int, default=3, help="Window size for creating edges")
-    parser.add_argument("--edge_type", type=str, default="window", choices=["window", "fully_connected"], help="Type of edges to create")
+    parser.add_argument("--edge_type", type=str, default="constituency", choices=["constituency"], help="Type of edges to create")
+    parser.add_argument("--label_source", type=str, default="original", choices=["original", "llm"], 
+                        help="Source of labels: 'original' (use original dataset labels) or 'llm' (use LLM predictions)")
+    parser.add_argument("--llm_predictions", type=str, help="Path to LLM predictions JSON file (required if label_source is 'llm')")
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    
+    # Validate arguments
+    if args.label_source == "llm" and not args.llm_predictions:
+        parser.error("--llm_predictions is required when --label_source is 'llm'")
+    
+    return args
 
 def main():
     """Main entry point"""
@@ -622,8 +919,9 @@ def main():
         dataset_name=args.dataset_name,
         embeddings_dir=args.embeddings_dir,
         batch_size=args.batch_size,
-        window_size=args.window_size,
-        edge_type=args.edge_type
+        edge_type=args.edge_type,
+        label_source=args.label_source,
+        llm_predictions=args.llm_predictions if args.label_source == 'llm' else None
     )
     
     if output_dir:

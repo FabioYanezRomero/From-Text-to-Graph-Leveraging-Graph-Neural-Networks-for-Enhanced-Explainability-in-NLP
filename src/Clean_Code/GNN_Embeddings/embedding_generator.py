@@ -7,10 +7,15 @@ It extracts embeddings from the fine-tuned models and prepares them for use in G
 """
 
 import os
+import sys
+import json
 import torch
 import pickle as pkl
 import logging
 import argparse
+import traceback
+import numpy as np
+import gc
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModel
 from torch.utils.data import Dataset, DataLoader
@@ -157,62 +162,154 @@ def save_embeddings(word_embeddings, sentence_embeddings, special_embeddings, te
     logger.info(f"Saved embeddings to {output_dir}")
     return output_dir
 
-def extract_embeddings(texts, model, tokenizer, batch_size=16, max_length=128, device='cuda'):
-    """Extract embeddings from the model for each word in the texts"""
-    dataset = TextDataset(texts)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+def extract_embeddings(texts, model, tokenizer, batch_size=1, chunk_size=1000, device='cuda', output_dir=None):
+    """Extract embeddings from the model for each word in the texts with memory optimizations.
+    Processes full sequence length without truncation and saves to disk in chunks.
     
-    all_word_embeddings = []
-    all_sentence_embeddings = []
+    Args:
+        texts: List or dictionary of texts
+        model: Pre-trained model
+        tokenizer: Tokenizer
+        batch_size: Number of samples to process at once (default: 1)
+        chunk_size: Number of samples to process before saving to disk
+        device: Device to use for inference
+        output_dir: Directory to save embedding chunks (default: None, will create 'embedding_chunks' in current directory)
+        
+    Returns:
+        output_dir: Directory containing the saved embedding chunks
+    """
+    # Create output directory for chunks if not provided
+    if output_dir is None:
+        output_dir = os.path.join(os.getcwd(), 'embedding_chunks')
     
-    model.eval()
-    model.to(device)
+    # Create a specific directory for chunks within the output directory
+    chunks_dir = os.path.join(output_dir, 'embedding_chunks')
+    os.makedirs(chunks_dir, exist_ok=True)
     
-    with torch.no_grad():
-        for batch_texts, _ in tqdm(dataloader, desc="Extracting embeddings"):
-            # Tokenize texts
+    logger.info(f"Saving embedding chunks to: {chunks_dir}")
+    
+    chunk_num = 0
+    current_chunk_word = []
+    current_chunk_sent = []
+    
+    # Convert texts to a list if it's a dictionary
+    if isinstance(texts, dict):
+        logger.info("Converting dictionary of texts to list")
+        text_list = list(texts)
+    else:
+        text_list = texts
+    
+    # Process texts in batches
+    num_texts = len(text_list)
+    logger.info(f"Processing {num_texts} texts in batches of {batch_size}")
+    
+    for i in tqdm(range(0, num_texts, batch_size), desc="Processing batches"):
+        try:
+            # Get batch of texts
+            batch_end = min(i + batch_size, num_texts)
+            
+            # Extract batch texts
+            batch_texts = text_list[i:batch_end]
+            
+            # Clear CUDA cache before processing each batch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # Tokenize batch
             inputs = tokenizer(
-                batch_texts, 
-                return_tensors="pt", 
-                padding='max_length', 
-                truncation=True, 
-                max_length=max_length
+                batch_texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True  # Will use model's max length if needed
             ).to(device)
             
-            # Get token mappings
+            # Get token mappings for the batch
             mappings = token_mapper(tokenizer, inputs['input_ids'])
             
-            # Get model outputs
-            outputs = model(**inputs)
-            last_hidden_states = outputs.last_hidden_state
-            
-            # Extract word embeddings using token mappings
-            batch_word_embeddings = []
-            
-            for i, mapping in enumerate(mappings):
-                sentence_word_embeddings = []
+            # Get model outputs with autocast for mixed precision
+            with torch.no_grad():
+                with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+                    outputs = model(**inputs)
                 
-                for word_idx in mapping:
-                    token_indices = mapping[word_idx]
-                    word_token_embeddings = [last_hidden_states[i, token_idx, :] for token_idx in token_indices]
-                    
-                    # Average the embeddings if a word is split into multiple tokens
-                    if len(word_token_embeddings) > 1:
-                        word_embedding = torch.mean(torch.stack(word_token_embeddings), dim=0)
-                    else:
-                        word_embedding = word_token_embeddings[0]
-                    
-                    sentence_word_embeddings.append(word_embedding.cpu())
+                # Get the last hidden state
+                last_hidden_state = outputs.last_hidden_state
                 
-                batch_word_embeddings.append(sentence_word_embeddings)
-            
-            # Get sentence embeddings (CLS token)
-            sentence_embeddings = last_hidden_states[:, 0, :].cpu()
-            
-            all_word_embeddings.extend(batch_word_embeddings)
-            all_sentence_embeddings.extend(sentence_embeddings)
+                # Process each sample in the batch
+                for j in range(len(batch_texts)):
+                    # Get the sentence embedding (CLS token)
+                    sentence_embedding = last_hidden_state[j, 0, :].cpu().numpy()
+                    
+                    # Get word embeddings by averaging token embeddings
+                    word_embeddings = []
+                    mapping = mappings[j]
+                    for word, token_indices in mapping.items():
+                        if token_indices:  # Skip empty token indices
+                            # Get embeddings for all tokens of this word
+                            token_embeddings = [last_hidden_state[j, idx, :].cpu().numpy() for idx in token_indices]
+                            # Average the embeddings
+                            word_embedding = np.mean(token_embeddings, axis=0)
+                            word_embeddings.append((word, word_embedding))
+                    
+                    # Add to current chunk
+                    current_chunk_word.append(word_embeddings)
+                    current_chunk_sent.append(sentence_embedding)
+                
+                # Save chunk if it reaches the chunk size
+                if len(current_chunk_word) >= chunk_size:
+                    save_chunk(current_chunk_word, current_chunk_sent, chunks_dir, chunk_num)
+                    chunk_num += 1
+                    current_chunk_word = []
+                    current_chunk_sent = []
+                    
+                    # Force garbage collection
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                
+        except Exception as e:
+            logger.error(f"Error processing batch starting at index {i}: {str(e)}")
+            if 'batch_texts' in locals() and batch_texts:
+                logger.error(f"Batch size: {len(batch_texts)}")
+                logger.error(f"First text in batch: {batch_texts[0][:100] if batch_texts[0] else 'Empty'}...")
+            logger.error(traceback.format_exc())
+            raise
     
-    return all_word_embeddings, all_sentence_embeddings
+    # Save any remaining samples
+    if current_chunk_word:
+        save_chunk(current_chunk_word, current_chunk_sent, chunks_dir, chunk_num)
+    
+    # Return paths to the saved chunks
+    return chunks_dir
+
+def save_chunk(word_embeddings, sent_embeddings, output_dir, chunk_num):
+    """Save a chunk of embeddings to disk.
+    
+    Args:
+        word_embeddings: List of word embeddings for each text
+        sent_embeddings: List of sentence embeddings for each text
+        output_dir: Output directory
+        chunk_num: Chunk number
+    """
+    chunk_path = os.path.join(output_dir, f'embeddings_chunk_{chunk_num}.npz')
+    
+    # Convert to numpy arrays
+    word_embeddings_np = np.array(word_embeddings, dtype=object)
+    sent_embeddings_np = np.array(sent_embeddings)
+    
+    # Save compressed
+    np.savez_compressed(
+        chunk_path, 
+        word_embeddings=word_embeddings_np, 
+        sent_embeddings=sent_embeddings_np
+    )
+    
+    logger.info(f"Saved chunk {chunk_num} with {len(word_embeddings)} samples to {chunk_path}")
+    
+    # Log memory usage
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / (1024 ** 3)
+        reserved = torch.cuda.memory_reserved() / (1024 ** 3)
+        logger.info(f"GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
 
 def generate_special_embeddings(model, tokenizer, device='cuda'):
     """Generate special embeddings for constituency tokens
@@ -285,8 +382,17 @@ def generate_special_embeddings(model, tokenizer, device='cuda'):
 def generate_embeddings(config):
     """Main function to generate embeddings"""
     # Set device
-    device = torch.device('cuda' if torch.cuda.is_available() and config['cuda'] else 'cpu')
-    logger.info(f"Using device: {device}")
+    if config.get('cuda', False) and torch.cuda.is_available():
+        device = torch.device('cuda')
+        logger.info(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+        logger.info(f"CUDA memory allocated: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
+        logger.info(f"CUDA memory reserved: {torch.cuda.memory_reserved(0) / 1e9:.2f} GB")
+    else:
+        device = torch.device('cpu')
+        if config.get('cuda', False) and not torch.cuda.is_available():
+            logger.warning("CUDA requested but not available, using CPU instead")
+        else:
+            logger.info("Using CPU device")
     
     # Load dataset
     texts, labels = load_dataset(config['dataset_name'])
@@ -303,7 +409,7 @@ def generate_embeddings(config):
     if os.path.exists(config['model_path']):
         # Load the fine-tuned model
         model = AutoModel.from_pretrained(config['model_name'])
-        model_state_dict = torch.load(config['model_path'])
+        model_state_dict = torch.load(config['model_path'], map_location=device)
         
         # Remove classifier weights if present (we only need the encoder)
         keys_to_remove = [k for k in model_state_dict.keys() if k.startswith('classifier')]
@@ -318,75 +424,110 @@ def generate_embeddings(config):
         model = AutoModel.from_pretrained(config['model_name'])
         logger.warning(f"Fine-tuned model not found at {config['model_path']}, using pre-trained model")
     
+    # Move model to device
+    model = model.to(device)
+    logger.info(f"Model moved to {device}")
+    
+    # Enable evaluation mode
+    model.eval()
+    
+    # Log memory usage if using CUDA
+    if device.type == 'cuda':
+        logger.info(f"CUDA memory after model loading: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
+    
     # Generate special embeddings for constituency tokens
     logger.info("Generating special embeddings for constituency tokens")
     special_embeddings = generate_special_embeddings(model, tokenizer, device=device)
     logger.info(f"Generated {len(special_embeddings)} special embeddings")
     
-    # Process each split
-    for split, split_texts in texts.items():
-        logger.info(f"Processing {split} split")
-        split_labels = labels[split]
-        
-        # Extract embeddings
-        word_embeddings, sentence_embeddings = extract_embeddings(
-            split_texts, 
-            model, 
-            tokenizer, 
-            batch_size=config['batch_size'],
-            max_length=config['max_length'],
-            device=device
-        )
-        
-        # Save embeddings
-        split_dir = os.path.join(output_dir, split)
-        os.makedirs(split_dir, exist_ok=True)
-        
-        # Save embeddings to single files
-        save_embeddings(word_embeddings, sentence_embeddings, special_embeddings, split_texts, split_labels, split_dir)
-        
-        logger.info(f"Saved embeddings to {split_dir}")
+    # Generate embeddings for the dataset and save in chunks
+    split = config['split']
+    logger.info(f"Processing {split} split")
     
-    logger.info(f"Embedding generation completed for {config['dataset_name']}")
+    # Get texts for the current split
+    if isinstance(texts, dict) and split in texts:
+        split_texts = texts[split]
+        logger.info(f"Found {len(split_texts)} texts for split {split}")
+    else:
+        logger.info(f"Using all texts as split {split} was not found in the dictionary")
+        split_texts = texts
+    
+    chunk_dir = extract_embeddings(
+        split_texts,
+        model,
+        tokenizer,
+        batch_size=config.get('batch_size', 1),
+        chunk_size=config.get('chunk_size', 1000),
+        device=device,
+        output_dir=output_dir
+    )
+    
+    # Save special embeddings
+    special_embeddings_path = os.path.join(output_dir, 'special_embeddings.pkl')
+    with open(special_embeddings_path, 'wb') as f:
+        pkl.dump(special_embeddings, f)
+    
+    # Save metadata
+    metadata = {
+        'dataset_name': config['dataset_name'],
+        'model_name': config['model_name'],
+        'num_samples': len(texts),
+        'chunk_dir': chunk_dir,
+        'special_embeddings_path': special_embeddings_path
+    }
+    metadata_path = os.path.join(output_dir, 'metadata.json')
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f)
+    
+    logger.info(f"Embeddings saved in chunks to {chunk_dir}")
+    logger.info(f"Special embeddings saved to {special_embeddings_path}")
+    logger.info(f"Metadata saved to {metadata_path}")
+    
     return output_dir
 
 def parse_args():
     """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description='Generate embeddings for text datasets using fine-tuned models')
-    
-    # Required arguments
-    parser.add_argument('--dataset_name', type=str, required=True, help='Dataset name (e.g., stanfordnlp/sst2, setfit/ag_news)')
-    parser.add_argument('--model_name', type=str, required=True, help='Base model name (e.g., google-bert/bert-base-uncased)')
+    parser = argparse.ArgumentParser(description='Generate GNN embeddings from fine-tuned models')
+    parser.add_argument('--dataset_name', type=str, required=True, help='Name of the dataset')
+    parser.add_argument('--model_name', type=str, required=True, help='Name of the pre-trained model')
     parser.add_argument('--model_path', type=str, required=True, help='Path to the fine-tuned model')
-    
-    # Optional arguments
-    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for processing')
-    parser.add_argument('--max_length', type=int, default=128, help='Maximum sequence length')
-    parser.add_argument('--chunk_size', type=int, default=50, help='Size of chunks when saving embeddings to disk')
-    parser.add_argument('--output_dir', type=str, default='/app/src/Clean_Code/output/gnn_embeddings', help='Output directory')
-    parser.add_argument('--no_cuda', action='store_true', help='Disable CUDA even if available')
-    
-    return parser.parse_args()
+    parser.add_argument('--batch_size', type=int, default=1, help='Batch size for processing (default: 1)')
+    parser.add_argument('--chunk_size', type=int, default=1000, help='Number of samples per chunk file')
+    parser.add_argument('--output_dir', type=str, default='output', help='Output directory')
+    parser.add_argument('--cuda', action='store_true', help='Use CUDA if available')
+    parser.add_argument('--split', type=str, default='train', help='Dataset split to process')
+    return vars(parser.parse_args())
 
 def main():
     """Main entry point"""
-    # Parse arguments
-    args = parse_args()
+    import json
     
-    # Create config from arguments
-    config = {
-        'dataset_name': args.dataset_name,
-        'model_name': args.model_name,
-        'model_path': args.model_path,
-        'batch_size': args.batch_size,
-        'max_length': args.max_length,
-        'chunk_size': args.chunk_size,
-        'output_dir': args.output_dir,
-        'cuda': not args.no_cuda and torch.cuda.is_available()
-    }
+    # Parse command line arguments
+    config = parse_args()
     
-    # Generate embeddings
-    generate_embeddings(config)
+    # Set up logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(os.path.join(config['output_dir'], 'embedding_generation.log'))
+        ]
+    )
+    
+    # Log configuration
+    logger.info("Starting embedding generation with configuration:")
+    for key, value in config.items():
+        logger.info(f"  {key}: {value}")
+    
+    try:
+        # Generate embeddings
+        output_dir = generate_embeddings(config)
+        logger.info(f"Successfully completed embedding generation. Results saved to: {output_dir}")
+    except Exception as e:
+        logger.error(f"Error during embedding generation: {str(e)}")
+        logger.error(traceback.format_exc())
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
