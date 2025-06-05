@@ -26,6 +26,134 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def load_embeddings(input_dir, dataset, embedding_model, split):
+    """Load word and sentence embeddings from disk, handling chunked data structure.
+    
+    Args:
+        input_dir: Base directory containing the input embeddings
+        dataset: Name of the dataset
+        embedding_model: Name of the embedding model used
+        split: Data split ('train', 'val', 'test')
+        
+    Returns:
+        tuple: (texts, labels, word_embeddings, sentence_embeddings)
+    """
+    import os
+    import pickle
+    import numpy as np
+    from glob import glob
+    
+    # Construct base path
+    base_path = os.path.join(input_dir, dataset, split)
+    
+    # Find all chunk directories
+    chunk_dirs = sorted([d for d in glob(os.path.join(base_path, 'chunk_*')) if os.path.isdir(d)])
+    
+    if not chunk_dirs:
+        logger.error(f"No chunk directories found in {base_path}")
+        return None
+    
+    all_word_embeddings = []
+    all_sentence_embeddings = []
+    all_texts = []
+    all_labels = []
+    
+    logger.info(f"Found {len(chunk_dirs)} chunks in {base_path}")
+    
+    try:
+        # Process each chunk
+        for chunk_dir in chunk_dirs:
+            try:
+                # Load data from chunk
+                word_embeddings_path = os.path.join(chunk_dir, 'word_embeddings.pkl')
+                sentence_embeddings_path = os.path.join(chunk_dir, 'sentence_embeddings.pkl')
+                metadata_path = os.path.join(chunk_dir, 'metadata.pkl')
+                
+                # Check if required files exist
+                if not all(os.path.exists(p) for p in [word_embeddings_path, sentence_embeddings_path, metadata_path]):
+                    logger.warning(f"Skipping incomplete chunk: {chunk_dir}")
+                    continue
+                
+                # Load metadata which contains texts and labels
+                with open(metadata_path, 'rb') as f:
+                    metadata = pickle.load(f)
+                
+                # Load word and sentence embeddings
+                with open(word_embeddings_path, 'rb') as f:
+                    word_embeddings = pickle.load(f)
+                with open(sentence_embeddings_path, 'rb') as f:
+                    sentence_embeddings = pickle.load(f)
+                
+                # Extract texts and labels from metadata
+                texts = [item['text'] for item in metadata]
+                labels = [item['label'] for item in metadata]
+                
+                # Convert to lists if they're numpy arrays
+                if isinstance(word_embeddings, np.ndarray):
+                    word_embeddings = list(word_embeddings)
+                if isinstance(sentence_embeddings, np.ndarray):
+                    sentence_embeddings = list(sentence_embeddings)
+                if isinstance(texts, np.ndarray):
+                    texts = list(texts)
+                if isinstance(labels, np.ndarray):
+                    labels = list(labels)
+                
+                # Add to the combined lists
+                all_word_embeddings.extend(word_embeddings)
+                all_sentence_embeddings.extend(sentence_embeddings)
+                all_texts.extend(texts)
+                all_labels.extend(labels)
+                
+                logger.info(f"Loaded {len(word_embeddings)} samples from {os.path.basename(chunk_dir)}")
+                
+            except Exception as e:
+                logger.error(f"Error loading chunk {chunk_dir}: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+        
+        if not all_word_embeddings:
+            logger.error("No data was loaded from any chunk")
+            return None
+            
+        logger.info(f"Successfully loaded {len(all_word_embeddings)} total samples from {len(chunk_dirs)} chunks")
+        return all_texts, all_labels, all_word_embeddings, all_sentence_embeddings
+        
+    except Exception as e:
+        logger.error(f"Error in load_embeddings: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
+
+def save_graphs(graphs, output_dir, batch_size=32, num_workers=4):
+    """Save a list of PyTorch Geometric Data objects to disk.
+    
+    Args:
+        graphs: List of PyTorch Geometric Data objects
+        output_dir: Directory to save the graphs
+        batch_size: Number of graphs to save in each file
+        num_workers: Number of worker processes to use
+    """
+    import os
+    import torch
+    from torch_geometric.data import Data, Batch
+    from torch_geometric.loader import DataLoader
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create a DataLoader to handle batching
+    loader = DataLoader(graphs, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    
+    # Save each batch
+    for batch_idx, batch in enumerate(loader):
+        batch_path = os.path.join(output_dir, f'batch_{batch_idx:04d}.pt')
+        try:
+            torch.save(batch, batch_path)
+            logger.info(f"Saved batch {batch_idx} with {len(batch)} graphs to {batch_path}")
+        except Exception as e:
+            logger.error(f"Error saving batch {batch_idx}: {str(e)}")
+    
+    logger.info(f"Saved {len(graphs)} graphs in {len(loader)} batches to {output_dir}")
+
 def get_dataset_info(embeddings_dir):
     """Get information about the dataset without loading all embeddings
     
@@ -142,125 +270,177 @@ def load_special_embeddings(embeddings_dir):
     logger.warning(f"No special embeddings found in {embeddings_dir} or {special_dir}")
     return None
 
-def create_word_graphs(word_embeddings, sentence_embeddings, texts, labels, special_embeddings=None, window_size=3, edge_type='window'):
-    """Create graph structures from word embeddings
+def load_constituency_tree(tree_path):
+    """Load a pre-generated constituency tree from file
+    
+    Args:
+        tree_path: Path to the pickle file containing the tree
+        
+    Returns:
+        The loaded tree object
+    """
+    import pickle
+    with open(tree_path, 'rb') as f:
+        return pickle.load(f)
+
+def extract_tree_structure(tree):
+    """Extract node features and edge indices from a constituency tree
+    
+    Args:
+        tree: The constituency tree object
+        
+    Returns:
+        tuple: (node_features, edge_indices)
+    """
+    import networkx as nx
+    
+    # Convert tree to networkx graph
+    G = nx.Graph()
+    
+    # We'll use a queue for BFS traversal
+    from collections import deque
+    queue = deque([(tree, 0)])  # (node, parent_id)
+    node_id = 0
+    
+    # Dictionaries to store node information
+    node_features = {}
+    edge_indices = []
+    
+    while queue:
+        node, parent_id = queue.popleft()
+        current_id = node_id
+        node_id += 1
+        
+        # Store node feature (using label or other identifier)
+        if hasattr(node, 'label'):
+            node_features[current_id] = node.label[0] if isinstance(node.label, list) else node.label
+        
+        # Add edge to parent if not root
+        if parent_id != -1:
+            edge_indices.append((parent_id, current_id))
+        
+        # Add children to queue
+        if hasattr(node, 'children'):
+            for child in node.children:
+                queue.append((child, current_id))
+    
+    return node_features, edge_indices
+
+def create_word_graphs(word_embeddings, sentence_embeddings, texts, labels, dataset_name, split='train', edge_type='constituency'):
+    """Create graph structures from pre-generated constituency trees and embeddings
     
     Args:
         word_embeddings: List of word embeddings for each text
         sentence_embeddings: List of sentence embeddings for each text
         texts: List of texts
         labels: List of labels
-        special_embeddings: Dictionary of special embeddings for constituency trees
-        window_size: Window size for creating edges
-        edge_type: Type of edges to create ('window' or 'fully_connected')
+        dataset_name: Name of the dataset (e.g., 'sst2')
+        split: Data split ('train', 'val', 'test')
+        edge_type: Type of edges to create (only 'constituency' is supported)
         
     Returns:
         List of torch_geometric.data.Data objects
     """
+    import os
+    import pickle
+    import networkx as nx
+    from tqdm import tqdm
+    
+    # Base directory for constituency trees
+    base_dir = os.path.join('/app/src/Clean_Code/output/text_graphs', 'stanfordnlp', dataset_name, split, 'constituency')
+    
     graphs = []
     
-    logger.info(f"Creating graphs with edge_type={edge_type}, window_size={window_size}")
+    logger.info(f"Creating graphs from pre-generated constituency trees in {base_dir}")
     logger.info(f"Input sizes: {len(word_embeddings)} word embeddings, {len(sentence_embeddings)} sentence embeddings, {len(texts)} texts, {len(labels)} labels")
     
-    for i in range(len(word_embeddings)):
+    # Ensure the directory exists
+    if not os.path.exists(base_dir):
+        raise FileNotFoundError(f"Constituency tree directory not found: {base_dir}")
+    
+    # Get list of all tree files
+    tree_files = sorted([f for f in os.listdir(base_dir) if f.endswith('.pkl')], 
+                        key=lambda x: int(x.split('.')[0]) if x.split('.')[0].isdigit() else float('inf'))
+    
+    # Process each sample
+    for i in tqdm(range(len(word_embeddings)), desc="Processing graphs"):
         try:
-            if i % 100 == 0:
-                logger.info(f"Processing sample {i}/{len(word_embeddings)}")
+            if i >= len(tree_files):
+                logger.warning(f"No tree file found for sample {i}")
+                continue
                 
-            # Get data for this sample
-            word_embedding = word_embeddings[i]
-            sentence_embedding = sentence_embeddings[i]
-            text = texts[i]
-            label = labels[i]
+            # Load the pre-generated tree
+            tree_path = os.path.join(base_dir, tree_files[i])
+            tree = load_constituency_tree(tree_path)
+            
+            # Get the corresponding embeddings and label
+            word_embedding = word_embeddings[i] if i < len(word_embeddings) else None
+            sentence_embedding = sentence_embeddings[i] if i < len(sentence_embeddings) else None
+            label = labels[i] if i < len(labels) else None
+            text = texts[i] if i < len(texts) else None
             
             # Handle label tensor
-            if isinstance(label, torch.Tensor):
+            if label is not None and isinstance(label, torch.Tensor):
                 if label.numel() > 1:
-                    # If label is a tensor with multiple elements, use the first one
                     label = label[0].item()
                 else:
                     label = label.item()
             
-            # Process embeddings - replace special tokens with special embeddings
-            processed_embeddings = []
+            # Extract tree structure
+            node_features, edge_indices = extract_tree_structure(tree)
             
-            for j, token in enumerate(text):
-                if special_embeddings and token in special_embeddings:
-                    # Use special embedding for this token
-                    processed_embeddings.append(special_embeddings[token])
-                else:
-                    # Use word embedding for this token
-                    if j < len(word_embedding):
-                        processed_embeddings.append(word_embedding[j])
-                    else:
-                        # Handle case where token index exceeds word embedding length
-                        logger.warning(f"Token index {j} exceeds word embedding length {len(word_embedding)} for sample {i}")
-                        # Use a zero vector as fallback
-                        if len(processed_embeddings) > 0:
-                            processed_embeddings.append(torch.zeros_like(processed_embeddings[0]))
-                        else:
-                            # If no embeddings processed yet, use sentence embedding dimension
-                            processed_embeddings.append(torch.zeros_like(sentence_embedding))
-            
-            # Convert to tensor
-            if len(processed_embeddings) > 0:
-                try:
-                    tensor_embeddings = []
-                    for emb in processed_embeddings:
-                        if isinstance(emb, torch.Tensor):
-                            tensor_embeddings.append(emb.float())
-                        else:
-                            tensor_embeddings.append(torch.tensor(emb, dtype=torch.float))
-                    x = torch.stack(tensor_embeddings)
-                except Exception as e:
-                    logger.error(f"Error converting embeddings to tensor for sample {i}: {str(e)}")
-                    continue
-            else:
-                logger.warning(f"No processed embeddings for sample {i}")
+            if not edge_indices:
+                logger.warning(f"No edges extracted from tree for sample {i}")
                 continue
             
-            # Create edges based on edge_type
-            if edge_type == 'window':
-                # Create window-based edges
-                edge_index = []
-                for j in range(len(text)):
-                    for k in range(max(0, j - window_size), min(len(text), j + window_size + 1)):
-                        if j != k:  # Don't connect word to itself
-                            edge_index.append([j, k])
-                
-                if not edge_index:  # Check if edge_index is empty
-                    logger.warning(f"No edges created for sample {i} with {len(text)} words")
-                    continue
-                
-                edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+            # Convert edge indices to tensor
+            edge_index = torch.tensor(edge_indices, dtype=torch.long).t().contiguous()
             
-            elif edge_type == 'fully_connected':
-                # Create fully connected edges
-                edge_index = []
-                for j in range(len(text)):
-                    for k in range(len(text)):
-                        if j != k:  # Don't connect word to itself
-                            edge_index.append([j, k])
-                
-                if not edge_index:  # Check if edge_index is empty
-                    logger.warning(f"No edges created for sample {i} with {len(text)} words")
-                    continue
-                
-                edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+            # Process node features (embeddings)
+            num_nodes = len(node_features)
             
+            # Initialize node features tensor
+            if word_embedding is not None and len(word_embedding) > 0:
+                # Use the first embedding to determine feature dimension
+                feature_dim = word_embedding[0].shape[0] if hasattr(word_embedding[0], 'shape') else len(word_embedding[0])
             else:
-                raise ValueError(f"Unsupported edge type: {edge_type}")
-                
+                # Fallback to sentence embedding dimension
+                feature_dim = sentence_embedding.shape[0] if sentence_embedding is not None else 768
+            
+            x = torch.zeros((num_nodes, feature_dim), dtype=torch.float)
+            
+            # Assign word embeddings to leaf nodes
+            leaf_count = 0
+            for node_id, node_feature in node_features.items():
+                # Check if this is a leaf node (no outgoing edges where this is the parent)
+                is_leaf = not any(p == node_id for p, _ in edge_indices)
+                if is_leaf and word_embedding is not None and leaf_count < len(word_embedding):
+                    x[node_id] = word_embedding[leaf_count]
+                    leaf_count += 1
+            
+            # For non-leaf nodes, use the mean of their children's embeddings
+            # Process nodes in reverse order (leaves to root)
+            for node_id in reversed(range(num_nodes)):
+                children = [c for p, c in edge_indices if p == node_id]
+                if children:
+                    child_embeddings = x[children]
+                    x[node_id] = child_embeddings.mean(dim=0)
+            
             # Create graph data object
             graph_data = Data(
                 x=x,
                 edge_index=edge_index,
-                y=torch.tensor([label], dtype=torch.long),
+                y=torch.tensor([label], dtype=torch.long) if label is not None else None,
                 text=text,
-                sentence_embedding=torch.tensor(sentence_embedding, dtype=torch.float)
+                sentence_embedding=torch.tensor(sentence_embedding, dtype=torch.float) if sentence_embedding is not None else None
             )
             
             graphs.append(graph_data)
+            
+        except Exception as e:
+            logger.error(f"Error processing sample {i}: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             
         except Exception as e:
             logger.error(f"Error creating graph for sample {i}: {str(e)}")
