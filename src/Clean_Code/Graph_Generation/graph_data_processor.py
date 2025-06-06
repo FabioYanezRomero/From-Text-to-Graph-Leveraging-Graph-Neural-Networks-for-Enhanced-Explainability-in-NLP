@@ -212,85 +212,69 @@ def load_chunk_from_disk(chunk_dir):
         chunk_dir: Directory containing chunk data
         
     Returns:
-        word_embeddings: List of word embeddings
-        sentence_embeddings: List of sentence embeddings
-        texts: List of texts
-        labels: List of labels
+        word_embeddings, sentence_embeddings, texts, labels
     """
-    # Get all chunk files in the directory
-    # Look for both old format (.pkl files with chunk_ prefix) and new format (.npz files with embeddings_chunk_ prefix)
+    # Get all chunk files
     chunk_files = [f for f in os.listdir(chunk_dir) if 
                  (f.endswith('.pkl') and f.startswith('chunk_')) or 
                  (f.endswith('.npz') and f.startswith('embeddings_chunk_'))]
     
-    # Sort files numerically by their index to maintain original order
     def extract_chunk_number(filename):
         if filename.startswith('chunk_'):
-            # Extract number from old format: chunk_X.pkl
             return int(filename.replace('chunk_', '').replace('.pkl', ''))
         elif filename.startswith('embeddings_chunk_'):
-            # Extract number from new format: embeddings_chunk_X.npz
             return int(filename.replace('embeddings_chunk_', '').replace('.npz', ''))
-        return 0
     
+    # Sort chunk files numerically by their index
     chunk_files = sorted(chunk_files, key=extract_chunk_number)
     
+    # Process only one chunk file at a time to save memory
     if not chunk_files:
-        raise FileNotFoundError(f"No chunk files found in {chunk_dir}")
+        logger.warning(f"No chunk files found in {chunk_dir}")
+        return [], [], [], []
     
-    # Initialize lists to store all data
+    # Load the first chunk file to get data
+    chunk_file = chunk_files[0]
+    chunk_path = os.path.join(chunk_dir, chunk_file)
+    
     word_embeddings = []
     sentence_embeddings = []
     texts = []
     labels = []
     
-    # Process all chunks
-    for chunk_file in chunk_files:
-        chunk_path = os.path.join(chunk_dir, chunk_file)
+    if chunk_file.endswith('.pkl'):
+        # Load pickle file
+        with open(chunk_path, 'rb') as f:
+            chunk_data = pkl.load(f)
         
-        # Handle different file formats
-        if chunk_file.endswith('.pkl'):
-            # Old format with pickle files
-            with open(chunk_path, 'rb') as f:
-                chunk_data = pkl.load(f)
-                
-            # Extract data based on the structure of the chunk
-            if isinstance(chunk_data, dict):
-                # New format with dictionary structure
-                word_embeddings.extend(chunk_data.get('word_embeddings', []))
-                sentence_embeddings.extend(chunk_data.get('sentence_embeddings', []))
-                texts.extend(chunk_data.get('texts', []))
-                labels.extend(chunk_data.get('labels', []))
-            elif isinstance(chunk_data, tuple) and len(chunk_data) >= 2:
-                # Old format with tuple structure
-                word_embeddings.extend(chunk_data[0])
-                sentence_embeddings.extend(chunk_data[1])
-                if len(chunk_data) > 2:
-                    texts.extend(chunk_data[2])
-                if len(chunk_data) > 3:
-                    labels.extend(chunk_data[3])
-        elif chunk_file.endswith('.npz'):
-            # New format with numpy compressed files
-            try:
-                chunk_data = np.load(chunk_path, allow_pickle=True)
-                
-                # Extract arrays from the npz file
-                if 'word_embeddings' in chunk_data:
-                    word_embeddings.extend(chunk_data['word_embeddings'])
-                if 'sentence_embeddings' in chunk_data:
-                    sentence_embeddings.extend(chunk_data['sentence_embeddings'])
-                if 'texts' in chunk_data:
-                    texts.extend(chunk_data['texts'])
-                if 'labels' in chunk_data:
-                    labels.extend(chunk_data['labels'])
-                    
-                logger.info(f"Loaded {len(chunk_data['word_embeddings']) if 'word_embeddings' in chunk_data else 0} samples from {chunk_file}")
-            except Exception as e:
-                logger.error(f"Error loading .npz file {chunk_path}: {e}")
-                continue
+        # Extract data
+        if isinstance(chunk_data, dict):
+            word_embeddings = chunk_data.get('word_embeddings', [])
+            sentence_embeddings = chunk_data.get('sentence_embeddings', [])
+            texts = chunk_data.get('texts', [])
+            labels = chunk_data.get('labels', [])
+        elif isinstance(chunk_data, list) and len(chunk_data) == 4:
+            word_embeddings, sentence_embeddings, texts, labels = chunk_data
     
+    elif chunk_file.endswith('.npz'):
+        # Load numpy file
+        chunk_data = np.load(chunk_path, allow_pickle=True)
+        
+        # Extract data
+        if 'word_embeddings' in chunk_data:
+            word_embeddings = chunk_data['word_embeddings']
+        if 'sentence_embeddings' in chunk_data:
+            sentence_embeddings = chunk_data['sentence_embeddings']
+        if 'texts' in chunk_data:
+            texts = chunk_data['texts']
+        if 'labels' in chunk_data:
+            labels = chunk_data['labels']
+    
+    logger.info(f"Loaded {len(word_embeddings)} samples from {chunk_file}")
     # If labels are missing, create dummy labels
-    if not labels and word_embeddings:
+    if ((isinstance(labels, list) and not labels) or 
+        (isinstance(labels, np.ndarray) and len(labels) == 0)) and \
+       word_embeddings is not None and len(word_embeddings) > 0:
         logger.warning(f"No labels found in chunks, creating dummy labels")
         labels = [0] * len(word_embeddings)
     
@@ -388,49 +372,52 @@ def extract_tree_structure(tree):
         if hasattr(node, 'children'):
             for child in node.children:
                 queue.append((child, current_id))
-    
+
     return node_features, edge_indices
 
 def create_word_graphs(word_embeddings, sentence_embeddings, texts, labels, dataset_name, split='train', edge_type='constituency'):
-    """Create graph structures from pre-generated constituency trees and embeddings
-    
+    """Create word graphs from word embeddings and constituency trees
+
     Args:
-        word_embeddings: List of word embeddings for each text
-        sentence_embeddings: List of sentence embeddings for each text
+        word_embeddings: List of word embeddings
+        sentence_embeddings: List of sentence embeddings
         texts: List of texts
         labels: List of labels
-        dataset_name: Name of the dataset (e.g., 'sst2')
-        split: Data split ('train', 'val', 'test')
-        edge_type: Type of edges to create (only 'constituency' is supported)
-        
+        dataset_name: Name of the dataset
+        split: Split name
+        edge_type: Type of edges to use
+
     Returns:
-        List of torch_geometric.data.Data objects
+        List of graphs
     """
-    import os
-    import pickle
-    import networkx as nx
-    from tqdm import tqdm
-    
-    # Base directory for constituency trees
-    logger.info(f"Dataset name received in create_word_graphs: {dataset_name}")
-    
     # Extract dataset provider and name
     if '/' in dataset_name:
         provider, name = dataset_name.split('/', 1)
     else:
         # If no provider is specified, try to determine from the dataset name
         if dataset_name == 'stanfordnlp':
-            provider, name = 'stanfordnlp', 'sst2'  # Default to sst2 if only stanfordnlp is provided
+            provider, name = 'stanfordnlp', 'sst2'
         else:
             provider, name = 'stanfordnlp', dataset_name
-    
+
+    # Handle case sensitivity in provider names by checking actual directory names
+    text_graphs_dir = '/app/src/Clean_Code/output/text_graphs'
+    if os.path.exists(text_graphs_dir):
+        for dir_name in os.listdir(text_graphs_dir):
+            if dir_name.lower() == provider.lower():
+                provider = dir_name  # Use the actual directory name with correct capitalization
+                break
+
+    logger.info(f"Dataset name received in create_word_graphs: {dataset_name}")
     logger.info(f"Provider: {provider}, Name: {name}")
-    base_dir = os.path.join('/app/src/Clean_Code/output/text_graphs', provider, name, split, 'constituency')
+
+    base_dir = os.path.join(text_graphs_dir, provider, name, split, 'constituency')
     logger.info(f"Looking for constituency trees in: {base_dir}")
+
     if not os.path.exists(base_dir):
         logger.warning(f"Constituency tree directory not found: {base_dir}. No graphs will be created.")
         return []
-    
+
     logger.info(f"Creating graphs from pre-generated constituency trees in {base_dir}")
     logger.info(f"Input sizes: {len(word_embeddings)} word embeddings, {len(sentence_embeddings)} sentence embeddings, {len(texts)} texts, {len(labels)} labels")
     
@@ -783,39 +770,137 @@ def process_embeddings(dataset_name, embeddings_dir, batch_size=10, edge_type='c
             chunks_dir = os.path.join(split_dir, 'chunks')
             total_graphs = 0
             
+            # Process one chunk at a time to manage memory
             for i, chunk_dir_name in enumerate(dataset_info['chunk_dirs']):
                 chunk_dir = os.path.join(chunks_dir, chunk_dir_name)
                 
                 try:
-                    # Load chunk data
-                    word_embeddings, sentence_embeddings, texts, labels = load_chunk_from_disk(chunk_dir)
+                    # Process each chunk file individually
+                    chunk_files = [f for f in os.listdir(chunk_dir) if 
+                                 (f.endswith('.pkl') and f.startswith('chunk_')) or 
+                                 (f.endswith('.npz') and f.startswith('embeddings_chunk_'))]
                     
-                    # Apply LLM predictions if needed
-                    if label_source == 'llm' and llm_pred_dict:
-                        # Try to match data indices to LLM predictions
-                        modified_labels = []
-                        for idx, label in enumerate(labels):
-                            # Use data index if available, otherwise use position in chunk
-                            data_idx = i * batch_size + idx
-                            if data_idx in llm_pred_dict:
-                                modified_labels.append(llm_pred_dict[data_idx])
-                            else:
-                                modified_labels.append(label)
-                                logger.warning(f"No LLM prediction found for data index {data_idx}, using original label")
+                    # Sort chunk files numerically
+                    def extract_chunk_number(filename):
+                        if filename.startswith('chunk_'):
+                            return int(filename.replace('chunk_', '').replace('.pkl', ''))
+                        elif filename.startswith('embeddings_chunk_'):
+                            return int(filename.replace('embeddings_chunk_', '').replace('.npz', ''))
+                    
+                    chunk_files = sorted(chunk_files, key=extract_chunk_number)
+                    
+                    # Process each chunk file individually
+                    for chunk_idx, chunk_file in enumerate(chunk_files):
+                        chunk_path = os.path.join(chunk_dir, chunk_file)
                         
-                        # Process chunk with modified labels
-                        num_graphs = process_embeddings_batch(
-                            word_embeddings, sentence_embeddings, texts, modified_labels,
-                            config, split_output_dir, i, special_embeddings
-                        )
-                    else:
-                        # Process chunk with original labels
-                        num_graphs = process_embeddings_batch(
-                            word_embeddings, sentence_embeddings, texts, labels,
-                            config, split_output_dir, i, special_embeddings
-                        )
-                    
-                    total_graphs += num_graphs
+                        # Load single chunk file
+                        try:
+                            if chunk_file.endswith('.pkl'):
+                                with open(chunk_path, 'rb') as f:
+                                    chunk_data = pkl.load(f)
+                                
+                                # Extract data based on structure
+                                if isinstance(chunk_data, dict):
+                                    word_embeddings = chunk_data.get('word_embeddings', [])
+                                    sentence_embeddings = chunk_data.get('sentence_embeddings', [])
+                                    texts = chunk_data.get('texts', [])
+                                    labels = chunk_data.get('labels', [])
+                                elif isinstance(chunk_data, list) and len(chunk_data) == 4:
+                                    word_embeddings, sentence_embeddings, texts, labels = chunk_data
+                                else:
+                                    logger.warning(f"Unknown chunk data format in {chunk_path}")
+                                    continue
+                                    
+                            elif chunk_file.endswith('.npz'):
+                                chunk_data = np.load(chunk_path, allow_pickle=True)
+                                
+                                # Extract arrays
+                                word_embeddings = chunk_data['word_embeddings'] if 'word_embeddings' in chunk_data else []
+                                sentence_embeddings = chunk_data['sentence_embeddings'] if 'sentence_embeddings' in chunk_data else []
+                                texts = chunk_data['texts'] if 'texts' in chunk_data else []
+                                labels = chunk_data['labels'] if 'labels' in chunk_data else []
+                            
+                            logger.info(f"Loaded {len(word_embeddings)} samples from {chunk_file}")
+                            
+                            # Create dummy labels if needed
+                            if (isinstance(labels, list) and not labels) or \
+                               (isinstance(labels, np.ndarray) and len(labels) == 0):
+                                if word_embeddings is not None and len(word_embeddings) > 0:
+                                    logger.warning(f"No labels found in chunk, creating dummy labels")
+                                    labels = [0] * len(word_embeddings)
+                            
+                            # Calculate number of samples in this chunk
+                            chunk_size = len(word_embeddings)
+                            
+                            # Process in smaller sub-batches
+                            sub_batch_size = min(50, batch_size)  # Use smaller sub-batches for large datasets
+                            
+                            for j in range(0, chunk_size, sub_batch_size):
+                                end_idx = min(j + sub_batch_size, chunk_size)
+                                
+                                # Extract sub-batch
+                                sub_word_embeddings = word_embeddings[j:end_idx]
+                                
+                                # Handle sentence embeddings safely
+                                if sentence_embeddings is not None and len(sentence_embeddings) > 0:
+                                    sub_sentence_embeddings = sentence_embeddings[j:end_idx]
+                                else:
+                                    sub_sentence_embeddings = []
+                                
+                                # Handle texts safely
+                                if texts is not None and len(texts) > 0:
+                                    sub_texts = texts[j:end_idx]
+                                else:
+                                    sub_texts = []
+                                
+                                # Handle labels safely
+                                if labels is not None and len(labels) > 0:
+                                    sub_labels = labels[j:end_idx]
+                                else:
+                                    sub_labels = []
+                                
+                                # Apply LLM predictions if needed
+                                if label_source == 'llm' and llm_pred_dict:
+                                    # Calculate base index for this chunk
+                                    base_idx = i * 1000  # Assuming each chunk has ~1000 samples
+                                    
+                                    # Try to match data indices to LLM predictions
+                                    modified_labels = []
+                                    for idx, label in enumerate(sub_labels):
+                                        # Calculate global index
+                                        data_idx = base_idx + j + idx
+                                        if data_idx in llm_pred_dict:
+                                            modified_labels.append(llm_pred_dict[data_idx])
+                                        else:
+                                            modified_labels.append(label)
+                                    
+                                    # Process sub-batch with modified labels
+                                    batch_idx = (i * 1000 + j) // sub_batch_size
+                                    num_graphs = process_embeddings_batch(
+                                        sub_word_embeddings, sub_sentence_embeddings, sub_texts, modified_labels,
+                                        config, split_output_dir, batch_idx, special_embeddings
+                                    )
+                                else:
+                                    # Process sub-batch with original labels
+                                    batch_idx = (i * 1000 + j) // sub_batch_size
+                                    num_graphs = process_embeddings_batch(
+                                        sub_word_embeddings, sub_sentence_embeddings, sub_texts, sub_labels,
+                                        config, split_output_dir, batch_idx, special_embeddings
+                                    )
+                                
+                                total_graphs += num_graphs
+                                
+                                # Force garbage collection to free memory
+                                import gc
+                                gc.collect()
+                                
+                            # Clear variables to free memory
+                            del word_embeddings, sentence_embeddings, texts, labels, chunk_data
+                            gc.collect()
+                            
+                        except Exception as e:
+                            logger.error(f"Error processing chunk file {chunk_path}: {str(e)}")
+                            continue
                     
                 except Exception as e:
                     logger.error(f"Error processing chunk {chunk_dir}: {str(e)}")
@@ -846,8 +931,11 @@ def process_embeddings(dataset_name, embeddings_dir, batch_size=10, edge_type='c
                 total_samples = len(word_embeddings)
                 total_graphs = 0
                 
-                for i in range(0, total_samples, batch_size):
-                    batch_end = min(i + batch_size, total_samples)
+                # Use smaller sub-batches for large datasets
+                sub_batch_size = min(50, batch_size)
+                
+                for i in range(0, total_samples, sub_batch_size):
+                    batch_end = min(i + sub_batch_size, total_samples)
                     
                     # Get batch data
                     batch_word_embeddings = word_embeddings[i:batch_end]
@@ -871,16 +959,20 @@ def process_embeddings(dataset_name, embeddings_dir, batch_size=10, edge_type='c
                         # Process batch with modified labels
                         num_graphs = process_embeddings_batch(
                             batch_word_embeddings, batch_sentence_embeddings, batch_texts, modified_labels,
-                            config, split_output_dir, i // batch_size, special_embeddings
+                            config, split_output_dir, i // sub_batch_size, special_embeddings
                         )
                     else:
                         # Process batch with original labels
                         num_graphs = process_embeddings_batch(
                             batch_word_embeddings, batch_sentence_embeddings, batch_texts, batch_labels,
-                            config, split_output_dir, i // batch_size, special_embeddings
+                            config, split_output_dir, i // sub_batch_size, special_embeddings
                         )
                     
                     total_graphs += num_graphs
+                    
+                    # Force garbage collection to free memory
+                    import gc
+                    gc.collect()
                 
                 logger.info(f"Processed {total_graphs} graphs for {split} split")
                 
