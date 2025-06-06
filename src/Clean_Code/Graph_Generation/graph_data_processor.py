@@ -75,13 +75,13 @@ def load_embeddings(input_dir, dataset, embedding_model, split):
                 
                 # Load metadata which contains texts and labels
                 with open(metadata_path, 'rb') as f:
-                    metadata = pickle.load(f)
+                    metadata = pkl.load(f)
                 
                 # Load word and sentence embeddings
                 with open(word_embeddings_path, 'rb') as f:
-                    word_embeddings = pickle.load(f)
+                    word_embeddings = pkl.load(f)
                 with open(sentence_embeddings_path, 'rb') as f:
-                    sentence_embeddings = pickle.load(f)
+                    sentence_embeddings = pkl.load(f)
                 
                 # Extract texts and labels from metadata
                 texts = [item['text'] for item in metadata]
