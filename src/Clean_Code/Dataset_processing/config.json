@@ -1,7 +1,0 @@
-{
-    "dataset_path": "../data/MED_ver_1.tsv",
-    "output_dir": "../processed_data/graphs",
-    "graph_types": ["syntactic", "semantic", "constituency", "knowledge"],
-    "batch_size": 100,
-    "log_level": "INFO"
-}

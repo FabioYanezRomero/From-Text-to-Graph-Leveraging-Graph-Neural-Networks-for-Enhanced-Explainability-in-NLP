@@ -7,7 +7,7 @@
 DATASET_NAME="setfit/ag_news"
 # The embeddings are stored in a nested structure with the dataset name repeated
 EMBEDDINGS_DIR="/app/src/Clean_Code/output/embeddings/setfit/ag_news"
-BATCH_SIZE=20  # Reduced batch size for better memory management
+BATCH_SIZE=200  # Reduced batch size for better memory management
 EDGE_TYPE="constituency"
 LABEL_SOURCE="llm"  # Can be 'original' or 'llm'
 
