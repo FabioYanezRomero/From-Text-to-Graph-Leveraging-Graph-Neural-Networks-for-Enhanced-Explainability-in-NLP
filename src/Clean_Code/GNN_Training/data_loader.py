@@ -17,7 +17,7 @@ class GraphDataset(Dataset):
     Dataset for loading graph data from pickle files.
     
     This dataset loads graph data that has been preprocessed and stored in pickle files.
-    Each pickle file contains a batch of graphs in PyTorch Geometric format.
+    Each pickle file contains a list of graphs in PyTorch Geometric format.
     """
     def __init__(self, root_dir, transform=None, pre_transform=None, pre_filter=None):
         """
@@ -29,20 +29,57 @@ class GraphDataset(Dataset):
             pre_transform: Transform to apply to each graph before saving to disk
             pre_filter: Filter to apply to each graph before saving to disk
         """
-        super(GraphDataset, self).__init__(root_dir, transform, pre_transform, pre_filter)
+        # Initialize with empty root since we're not using the default PyG file structure
+        super(GraphDataset, self).__init__(None, transform, pre_transform, pre_filter)
+        
         self.root_dir = root_dir
         self.file_paths = sorted(glob.glob(os.path.join(root_dir, "*.pkl")))
         
-        # Load the first batch to get information about the dataset
+        # Initialize data structures to store all graphs
+        self.graphs = []
+        self.file_to_idx_map = {}  # Maps file index to graph indices
+        self._num_node_features = None
+        self._num_classes = None
+        
+        # Load all graph data and build index mapping
         if len(self.file_paths) > 0:
-            sample_batch = torch.load(self.file_paths[0])
-            if isinstance(sample_batch, Batch):
-                self.num_classes = self._infer_num_classes(sample_batch)
-                self.num_node_features = sample_batch.num_node_features
+            start_idx = 0
+            for file_idx, file_path in enumerate(self.file_paths):
+                # Use pickle to load the data
+                with open(file_path, 'rb') as f:
+                    import pickle
+                    batch_data = pickle.load(f)
+                
+                # Store the mapping from file index to graph indices
+                if isinstance(batch_data, list):
+                    num_graphs = len(batch_data)
+                    self.file_to_idx_map[file_idx] = (start_idx, start_idx + num_graphs)
+                    start_idx += num_graphs
+                    
+                    # Add all graphs to our list
+                    self.graphs.extend(batch_data)
+                    
+                    print(f"Loaded {num_graphs} graphs from {os.path.basename(file_path)}")
+                else:
+                    raise ValueError(f"Expected a list of graphs, got {type(batch_data)}")
+            
+            # Get dataset properties from the first graph
+            if len(self.graphs) > 0:
+                self._num_node_features = self.graphs[0].num_node_features
+                self._num_classes = self._infer_num_classes(self.graphs[0])
+                print(f"Dataset loaded with {len(self.graphs)} total graphs, {self._num_node_features} node features, {self._num_classes} classes")
             else:
-                raise ValueError(f"Expected PyTorch Geometric Batch, got {type(sample_batch)}")
+                raise ValueError("No graphs found in the dataset")
         else:
             raise ValueError(f"No pickle files found in {root_dir}")
+            
+    @property
+    def num_node_features(self):
+        return self._num_node_features
+        
+    @property
+    def num_classes(self):
+        return self._num_classes
         
     def _infer_num_classes(self, batch):
         """
@@ -62,26 +99,34 @@ class GraphDataset(Dataset):
     
     def len(self):
         """
-        Get the number of files in the dataset.
+        Get the total number of graphs in the dataset.
         
         Returns:
-            Number of files
+            Number of graphs
         """
-        return len(self.file_paths)
+        return len(self.graphs)
     
     def get(self, idx):
         """
-        Get a batch of graphs from a file.
+        Get a single graph by index.
         
         Args:
-            idx: Index of the file to load
+            idx: Index of the graph to retrieve
             
         Returns:
-            Batch of graphs
+            A single graph (PyTorch Geometric Data object)
         """
-        file_path = self.file_paths[idx]
-        batch = torch.load(file_path)
-        return batch
+        if idx < 0 or idx >= len(self.graphs):
+            raise IndexError(f"Index {idx} out of range for dataset with {len(self.graphs)} graphs")
+        
+        # Get the graph directly from our list
+        graph = self.graphs[idx]
+        
+        # Apply transforms if specified
+        if self.transform is not None:
+            graph = self.transform(graph)
+            
+        return graph
 
 
 def load_graph_data(data_dir, batch_size=32, shuffle=True, num_workers=4):
