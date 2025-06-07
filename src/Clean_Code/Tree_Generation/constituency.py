@@ -16,6 +16,44 @@ from .base_generator import BaseTreeGenerator
 
 # Dictionary mapping constituency labels to more descriptive phrases
 PHRASE_MAPPER = {
+    # POS TAGS
+    'CC': '«COORDINATING CONJUNCTION»',
+    'CD': '«CARDINAL NUMBER»',
+    'DT': '«DETERMINER»',
+    'EX': '«EXISTENTIAL THERE»',
+    'FW': '«FOREIGN WORD»',
+    'IN': '«PREPOSITION OR SUBORDINATING CONJUNCTION»',
+    'JJ': '«ADJECTIVE»',
+    'JJR': '«ADJECTIVE, COMPARATIVE»',
+    'JJS': '«ADJECTIVE, SUPERLATIVE»',
+    'LS': '«LIST MARKER»',
+    'MD': '«MODAL VERB»',
+    'NN': '«NOUN, SINGULAR OR MASS»',
+    'NNS': '«NOUN, PLURAL»',
+    'NNP': '«PROPER NOUN, SINGULAR»',
+    'NNPS': '«PROPER NOUN, PLURAL»',
+    'PDT': '«PREDETERMINER»',
+    'POS': '«POSSESSIVE ENDING»',
+    'PRP': '«PERSONAL PRONOUN»',
+    'PRP$': '«POSSESSIVE PRONOUN»',
+    'RB': '«ADVERB»',
+    'RBR': '«ADVERB, COMPARATIVE»',
+    'RBS': '«ADVERB, SUPERLATIVE»',
+    'RP': '«PARTICLE»',
+    'SYM': '«SYMBOL»',
+    'TO': '«TO»',
+    'UH': '«INTERJECTION»',
+    'VB': '«VERB, BASE FORM»',
+    'VBD': '«VERB, PAST TENSE»',
+    'VBG': '«VERB, GERUND OR present participle»',
+    'VBN': '«VERB, past participle»',
+    'VBP': '«VERB, non-3rd person singular present»',
+    'VBZ': '«VERB, 3rd person singular present»',
+    'WDT': '«WH-DETERMINER»',
+    'WP': '«WH-PRONOUN»',
+    'WP$': '«WH-POSSESSIVE PRONOUN»',
+    'WRB': '«WH-ADVERB»',
+    # CONSTITUENCY TAGS
     'S': '«SENTENCE»',
     'NP': '«NOUN PHRASE»',
     'VP': '«VERB PHRASE»',
@@ -61,19 +99,17 @@ class ConstituencyTreeGenerator(BaseTreeGenerator):
         device (str): The device to run the parser on (CPU or CUDA).
     """
 
-    def __init__(self, model: str = 'default_accurate', device: str = 'cuda:0'):
+    def __init__(self, device: str = 'cuda:0'):
         """
         Initialize the constituency parser with Stanza.
 
         Args:
-            model (str, optional): Package name for Stanza. Defaults to 'default_accurate'.
             device (str, optional): Device to run the parser on. Defaults to 'cuda:0'.
 
         Raises:
             RuntimeError: If the specified device is not available.
         """
-        super().__init__(model, device)
-        self.property = 'constituency'
+        super().__init__(property='constituency', device=device)
         
         # Verify device availability for better error handling
         if device.startswith('cuda') and not torch.cuda.is_available():
@@ -106,43 +142,31 @@ class ConstituencyTreeGenerator(BaseTreeGenerator):
                 print(f"Error downloading default models: {e2}")
         
         # Initialize the Stanza pipeline with BERT-based constituency parser
-        try:
-            print("Initializing Stanza pipeline with BERT-based constituency parser...")
-            self.nlp = stanza.Pipeline(
-                lang='en',
-                processors={
-                    'tokenize': 'default',
-                    'pos': 'default',
-                    'constituency': 'default_accurate'  # Uses BERT for best accuracy
-                },
-                package='default_accurate',  # Specify the package for BERT-based model
-                use_gpu=(stanza_device == 'gpu'),
-                download_method=None,  # We already downloaded the models
-                tokenize_pretokenized=False,
-                tokenize_no_ssplit=False,
-                pos_batch_size=1000,
-                constituency_batch_size=1000,
-                constituency_pretagged=True  # Use POS tags from the POS tagger
-            )
-            print("Stanza pipeline with BERT-based constituency parser initialized successfully.")
-        except Exception as e:
-            print(f"Error details: {str(e)}")
-            print("Falling back to default constituency parser...")
-            try:
-                self.nlp = stanza.Pipeline(
-                    lang='en',
-                    processors='tokenize,pos,constituency',
-                    use_gpu=(stanza_device == 'gpu'),
-                    download_method=None,
-                    tokenize_pretokenized=False,
-                    tokenize_no_ssplit=False,
-                    pos_batch_size=1000,
-                    constituency_batch_size=1000
-                )
-                print("Default Stanza pipeline initialized successfully.")
-            except Exception as e2:
-                print(f"Error initializing default pipeline: {str(e2)}")
-                raise RuntimeError(f"Failed to initialize Stanza pipeline: {e2}")
+        print("Initializing Stanza pipeline with BERT-based constituency parser...")
+        from transformers import AutoModel, AutoTokenizer
+
+        # Use the model name that matches your Stanza model (e.g., 'google/electra-large-discriminator')
+        AutoModel.from_pretrained('google/electra-large-discriminator')
+        AutoTokenizer.from_pretrained('google/electra-large-discriminator')
+        
+        self.nlp = stanza.Pipeline(
+            lang='en',
+            processors={
+                'tokenize': 'default',
+                'pos': 'default',
+                'constituency': 'default_accurate'  # Uses BERT for best accuracy
+            },
+            package='default_accurate',  # Specify the package for BERT-based model
+            use_gpu=(stanza_device == 'gpu'),
+            download_method=stanza.DownloadMethod.NONE,  # We already downloaded the models
+            tokenize_pretokenized=False,
+            tokenize_no_ssplit=False,
+            pos_batch_size=1000,
+            constituency_batch_size=1000,
+            constituency_pretagged=True  # Use POS tags from the POS tagger
+        )
+        print("Stanza pipeline with BERT-based constituency parser initialized successfully.")
+        
 
     def _parse(self, sentences: List[str]):
         """
@@ -289,7 +313,7 @@ class ConstituencyTreeGenerator(BaseTreeGenerator):
         # Fallback for unknown types
         return str(tree)
 
-    def _build_graph(self, graph: nx.DiGraph, node_list: List, sentence: str, parent_id: str = '', graph_id: Optional[str] = None) -> nx.DiGraph:
+    def _build_graph(self, graph: nx.DiGraph, node_list: List, sentence: str, parent_id: str = '', graph_id: str = None) -> nx.DiGraph:
         """
         Add edges and nodes to the graph from the node list.
 
@@ -303,6 +327,12 @@ class ConstituencyTreeGenerator(BaseTreeGenerator):
         Returns:
             nx.DiGraph: The constructed graph.
         """
+        parent = node_list[0] + parent_id
+        if parent not in graph:
+            # Add parent node with appropriate label
+            label = PHRASE_MAPPER.get(str(parent), parent)
+            graph.add_node(str(parent), label=label)    
+
         parent = node_list[0] + parent_id
         if parent not in graph:
             # Add parent node with appropriate label
@@ -335,7 +365,6 @@ class ConstituencyTreeGenerator(BaseTreeGenerator):
                     continue
         
         # Add graph metadata
-        graph.graph['model'] = self.model
         graph.graph['property'] = self.property
         if graph_id:
             graph.graph['id'] = graph_id

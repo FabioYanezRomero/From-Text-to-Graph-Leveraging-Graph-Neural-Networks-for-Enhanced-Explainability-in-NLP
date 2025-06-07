@@ -20,15 +20,14 @@ class BaseTreeGenerator(ABC):
         property (str): Type of tree property (e.g., 'constituency').
         device (str): Device to run computation on ('cpu', 'cuda:0', etc.)
     """
-    def __init__(self, model: str, property: str = None, device: str = 'cuda:0'): # type: ignore
+    def __init__(self, property: str = None, device: str = 'cuda:0'): # type: ignore
         """
         Initialize the tree generator with a model and device.
         
         Args:
-            model (str): Name of the model to use.
+            property (str): Type of tree property to generate.
             device (str, optional): Device to run the model on. Defaults to 'cuda:0'.
         """
-        self.model = model
         self.property = property  # To be set by child classes
         self.device = device
     
@@ -46,13 +45,12 @@ class BaseTreeGenerator(ABC):
         pass
     
     @abstractmethod
-    def _build_graph(self, parsed_data: Any, ids: Optional[List[str]] = None) -> List[nx.DiGraph]:
+    def _build_graph(self, *args, **kwargs) -> List[nx.DiGraph]:
         """
         Build graphs from the parsed data.
         
         Args:
-            parsed_data (Any): The parsed representation of the sentences.
-            ids (Optional[List[str]]): Optional list of IDs to assign to the graphs.
+            args (Any): The parsed representation of the sentences.
         
         Returns:
             List[nx.DiGraph]: List of directed graphs.
@@ -60,7 +58,7 @@ class BaseTreeGenerator(ABC):
         pass
     
     @abstractmethod
-    def get_graph(self, sentences: List[str], ids: Optional[List[str]] = None) -> List[nx.DiGraph]:
+    def get_graph(self, sentences: List[str], ids: Optional[List[str]] = None) -> nx.DiGraph:
         """
         Generate graphs for a list of sentences.
         
