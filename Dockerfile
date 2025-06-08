@@ -44,14 +44,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy requirements file first to leverage Docker cache
 COPY requirements.txt .
 
-# Install PyTorch first
-RUN pip install --no-cache-dir torch==2.5.1+cu121 torchvision==0.20.1+cu121 torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+# Install PyTorch 2.6
+RUN pip install --no-cache-dir torch==2.6.0+cu126 torchvision==0.21.0+cu126 torchaudio==2.6.0+cu126 --index-url https://download.pytorch.org/whl/cu126
 
 # Install PyTorch Geometric and its dependencies
-RUN pip install --no-cache-dir torch-scatter -f https://data.pyg.org/whl/torch-2.5.1+cu121.html && \
-    pip install --no-cache-dir torch-sparse -f https://data.pyg.org/whl/torch-2.5.1+cu121.html && \
-    pip install --no-cache-dir torch-cluster -f https://data.pyg.org/whl/torch-2.5.1+cu121.html && \
-    pip install --no-cache-dir torch-spline-conv -f https://data.pyg.org/whl/torch-2.5.1+cu121.html && \
+RUN pip install --no-cache-dir torch-scatter -f https://data.pyg.org/whl/torch-2.6.0+cu126.html && \
+    pip install --no-cache-dir torch-sparse -f https://data.pyg.org/whl/torch-2.6.0+cu126.html && \
+    pip install --no-cache-dir torch-cluster -f https://data.pyg.org/whl/torch-2.6.0+cu126.html && \
+    pip install --no-cache-dir torch-spline-conv -f https://data.pyg.org/whl/torch-2.6.0+cu126.html && \
     pip install --no-cache-dir torch-geometric
 
 # Install remaining requirements (excluding PyTorch and PyG packages)
