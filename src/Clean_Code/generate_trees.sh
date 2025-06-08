@@ -5,8 +5,8 @@
 # Configuration Parameters
 GRAPH_TYPE="constituency"  # "constituency", "syntactic", "semantic"
 DATASET="stanfordnlp/sst2"   # "stanfordnlp/sst2", "SetFit/ag_news"
-SUBSETS=("validation")  # "train", "test", "validation"
-BATCH_SIZE=256
+SUBSETS=("train")  # "train", "test", "validation"
+BATCH_SIZE=2048
 DEVICE="cuda:0"            # "cuda:0", "cpu"
 OUTPUT_DIR="/app/src/Clean_Code/output/text_trees"
 
