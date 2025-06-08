@@ -311,77 +311,9 @@ def save_chunk(word_embeddings, sent_embeddings, output_dir, chunk_num):
         reserved = torch.cuda.memory_reserved() / (1024 ** 3)
         logger.info(f"GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
 
-def generate_special_embeddings(model, tokenizer, device='cuda'):
-    """Generate special embeddings for constituency tokens
-    
-    This function generates embeddings for special constituency tokens by extracting
-    the CLS token representation for each token.
-    """
-    logger.info("Generating special embeddings for constituency tokens")
-    
-    # Define constituency dictionary for special tokens
-    constituency_dict = {
-        '«SENTENCE»': 'Sentence',
-        '«REDUCED RELATIVE CLAUSE»': 'Reduced relative clause',
-        '«NOUN PHRASE»': 'Noun phrase',
-        '«VERB PHRASE»': 'Verb phrase',
-        '«PREPOSITIONAL PHRASE»': 'Prepositional phrase',
-        '«ADVERB PHRASE»': 'Adverb phrase',
-        '«UNLIKE COORDINATED PHRASE»': 'Unlike coordinated phrase',
-        '«ADJECTIVE PHRASE»': 'Adjective phrase',
-        '«SUBORDINATE CLAUSE»': 'Subordinate clause',
-        '«WH-ADVERB PHRASE»': 'Wh-adverb phrase',
-        '«WHADVP»': 'Wh-adverb phrase',
-        '«NX»': 'Nominal phrase',
-        '«QUANTIFIER PHRASE»': 'Quantifier phrase',
-        '«NOUN PHRASE (NO HEAD)»': 'Noun phrase (no head)',
-        '«PARTICLE»': 'Particle',
-        '«PARENTETICAL»': 'Parentetical',
-        '«WH-NOUN PHRASE»': 'Wh-noun phrase',
-        '«WH-ADJECTIVE PHRASE»': 'Wh-adjective phrase',
-        '«NOT A CONSTITUENT»': 'Not a constituent',
-        '«FRAGMENT»': 'Fragment',
-        '«INVERTED SENTENCE»': 'Inverted sentence',
-        '«INTERJECTION»': 'Interjection',
-        '«WH-PREPOSITIONAL PHRASE»': 'Wh-prepositional phrase',
-        '«QUESTION»': 'Question',
-        '«SUBORDINATE CLAUSE QUESTION»': 'Subordinate clause question',
-        '«CONJUCTION PHRASE»': 'Conjunction phrase',
-        '«UNKNOWN»': 'Unknown',
-        '«LIST MARKER»': 'List marker',
-        'constituency relation': 'Constituency relation'
-    }
-    
-    special_embeddings = {}
-    model.eval()
-    model.to(device)
-    
-    with torch.no_grad():
-        for token, description in tqdm(constituency_dict.items(), desc="Generating special embeddings"):
-            # Tokenize the token
-            inputs = tokenizer(description, return_tensors="pt").to(device)
-            
-            # Get model outputs with hidden states
-            outputs = model(**inputs, output_hidden_states=True)
-            
-            # Get the last hidden state
-            if hasattr(outputs, 'hidden_states'):
-                last_hidden_state = outputs.hidden_states[-1]
-            else:
-                last_hidden_state = outputs.last_hidden_state
-            
-            # Extract the CLS token embedding
-            cls_embedding = last_hidden_state[:, 0, :].squeeze(0).cpu()
-            
-            # Store the embedding
-            special_embeddings[token] = cls_embedding
-    
-    logger.info(f"Generated special embeddings for {len(special_embeddings)} constituency tokens")
-    return special_embeddings
 
-def generate_embeddings(config):
-    """Main function to generate embeddings"""
-    # Set device
+def generate_word_embeddings(config):
+     # Set device
     if config.get('cuda', False) and torch.cuda.is_available():
         device = torch.device('cuda')
         logger.info(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
@@ -393,7 +325,8 @@ def generate_embeddings(config):
             logger.warning("CUDA requested but not available, using CPU instead")
         else:
             logger.info("Using CPU device")
-    
+
+
     # Load dataset
     texts, labels = load_dataset(config['dataset_name'])
     
@@ -402,7 +335,6 @@ def generate_embeddings(config):
     os.makedirs(output_dir, exist_ok=True)
     
     # Load model and tokenizer
-    logger.info(f"Loading model: {config['model_path']}")
     tokenizer = AutoTokenizer.from_pretrained(config['model_name'])
     
     # Check if the model path exists
@@ -435,12 +367,7 @@ def generate_embeddings(config):
     if device.type == 'cuda':
         logger.info(f"CUDA memory after model loading: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
     
-    # Generate special embeddings for constituency tokens
-    logger.info("Generating special embeddings for constituency tokens")
-    special_embeddings = generate_special_embeddings(model, tokenizer, device=device)
-    logger.info(f"Generated {len(special_embeddings)} special embeddings")
-    
-    # Generate embeddings for the dataset and save in chunks
+    # Generate word embeddings for the dataset and save in chunks
     split = config['split']
     logger.info(f"Processing {split} split")
     
@@ -462,40 +389,197 @@ def generate_embeddings(config):
         output_dir=output_dir
     )
     
-    # Save special embeddings
+    logger.info(f"Embeddings saved in chunks to {chunk_dir}")
+    
+    return output_dir
+
+
+
+def generate_special_embeddings(config):
+    """Generate special embeddings for constituency tokens
+    
+    This function generates embeddings for special constituency tokens by extracting
+    the CLS token representation for each token.
+    """
+
+    # Set device
+    if config.get('cuda', False) and torch.cuda.is_available():
+        device = torch.device('cuda')
+        logger.info(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+        logger.info(f"CUDA memory allocated: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
+        logger.info(f"CUDA memory reserved: {torch.cuda.memory_reserved(0) / 1e9:.2f} GB")
+    else:
+        device = torch.device('cpu')
+        if config.get('cuda', False) and not torch.cuda.is_available():
+            logger.warning("CUDA requested but not available, using CPU instead")
+        else:
+            logger.info("Using CPU device")
+
+
+    logger.info("Generating special embeddings for constituency tokens")
+    
+    # Define constituency dictionary for special tokens
+    constituency_dict = {
+    # POS TAGS
+    'CC': '«COORDINATING CONJUNCTION»',
+    'CD': '«CARDINAL NUMBER»',
+    'DT': '«DETERMINER»',
+    'EX': '«EXISTENTIAL THERE»',
+    'FW': '«FOREIGN WORD»',
+    'IN': '«PREPOSITION OR SUBORDINATING CONJUNCTION»',
+    'JJ': '«ADJECTIVE»',
+    'JJR': '«ADJECTIVE, COMPARATIVE»',
+    'JJS': '«ADJECTIVE, SUPERLATIVE»',
+    'LS': '«LIST MARKER»',
+    'MD': '«MODAL VERB»',
+    'NN': '«NOUN, SINGULAR OR MASS»',
+    'NNS': '«NOUN, PLURAL»',
+    'NNP': '«PROPER NOUN, SINGULAR»',
+    'NNPS': '«PROPER NOUN, PLURAL»',
+    'PDT': '«PREDETERMINER»',
+    'POS': '«POSSESSIVE ENDING»',
+    'PRP': '«PERSONAL PRONOUN»',
+    'PRP$': '«POSSESSIVE PRONOUN»',
+    'RB': '«ADVERB»',
+    'RBR': '«ADVERB, COMPARATIVE»',
+    'RBS': '«ADVERB, SUPERLATIVE»',
+    'RP': '«PARTICLE»',
+    'SYM': '«SYMBOL»',
+    'TO': '«TO»',
+    'UH': '«INTERJECTION»',
+    'VB': '«VERB, BASE FORM»',
+    'VBD': '«VERB, PAST TENSE»',
+    'VBG': '«VERB, GERUND OR present participle»',
+    'VBN': '«VERB, past participle»',
+    'VBP': '«VERB, non-3rd person singular present»',
+    'VBZ': '«VERB, 3rd person singular present»',
+    'WDT': '«WH-DETERMINER»',
+    'WP': '«WH-PRONOUN»',
+    'WP$': '«WH-POSSESSIVE PRONOUN»',
+    'WRB': '«WH-ADVERB»',
+    # CONSTITUENCY TAGS
+    'S': '«SENTENCE»',
+    'NP': '«NOUN PHRASE»',
+    'VP': '«VERB PHRASE»',
+    'PP': '«PREPOSITIONAL PHRASE»',
+    'ADJP': '«ADJECTIVE PHRASE»',
+    'ADVP': '«ADVERB PHRASE»',
+    'SBAR': '«SUBORDINATE CLAUSE»',
+    'PRT': '«PARTICLE»',
+    'INTJ': '«INTERJECTION»',
+    'CONJP': '«CONJUCTION PHRASE»',
+    'LST': '«LIST MARKER»',
+    'UCP': '«UNLIKE COORDINATED PHRASE»',
+    'PRN': '«PARENTETICAL»',
+    'FRAG': '«FRAGMENT»',
+    'SINV': '«INVERTED SENTENCE»',
+    'SBARQ': '«SUBORDINATE CLAUSE QUESTION»',
+    'SQ': '«QUESTION»',
+    'WHADJP': '«WH-ADJECTIVE PHRASE»',
+    'WHAVP': '«WH-ADVERB PHRASE»',
+    'WHNP': '«WH-NOUN PHRASE»',
+    'WHPP': '«WH-PREPOSITIONAL PHRASE»',
+    'RRC': '«REDUCED RELATIVE CLAUSE»',
+    'NX': '«NOUN PHRASE (NO HEAD)»',
+    'WHADVP': '«WH-ADVERB PHRASE»',
+    'QP': '«QUANTIFIER PHRASE»',
+    'NAC': '«NOT A CONSTITUENT»',
+    'X': '«UNKNOWN»'
+    }
+
+    tokenizer = AutoTokenizer.from_pretrained(config['model_name'])
+
+    # Check if the model path exists
+    if os.path.exists(config['model_path']):
+        # Load the fine-tuned model
+        model = AutoModel.from_pretrained(config['model_name'])
+        model_state_dict = torch.load(config['model_path'], map_location=device)
+        
+        # Remove classifier weights if present (we only need the encoder)
+        keys_to_remove = [k for k in model_state_dict.keys() if k.startswith('classifier')]
+        for key in keys_to_remove:
+            del model_state_dict[key]
+            
+        # Load the state dict
+        model.load_state_dict(model_state_dict, strict=False)
+        logger.info(f"Loaded fine-tuned model from {config['model_path']}")
+    else:
+        # Load the pre-trained model if fine-tuned model not found
+        model = AutoModel.from_pretrained(config['model_name'])
+        logger.warning(f"Fine-tuned model not found at {config['model_path']}, using pre-trained model") 
+    
+    special_embeddings = {}
+    model.eval()
+    model.to(device)
+    
+    with torch.no_grad():
+        for token, description in tqdm(constituency_dict.items(), desc="Generating special embeddings"):
+            # Tokenize the token
+            inputs = tokenizer(description, return_tensors="pt").to(device)
+            
+            # Get model outputs with hidden states
+            outputs = model(**inputs, output_hidden_states=True)
+            
+            # Get the last hidden state
+            if hasattr(outputs, 'hidden_states'):
+                last_hidden_state = outputs.hidden_states[-1]
+            else:
+                last_hidden_state = outputs.last_hidden_state
+            
+            # Extract the CLS token embedding
+            cls_embedding = last_hidden_state[:, 0, :].squeeze(0).cpu()
+            
+            # Store the embedding
+            special_embeddings[token] = cls_embedding
+    
+    logger.info(f"Generated special embeddings for {len(special_embeddings)} constituency tokens")
+    
+    # Save special embeddings to file
+    output_dir = os.path.join(config['output_dir'], config['dataset_name'].replace('/', '_'))
+    os.makedirs(output_dir, exist_ok=True)
     special_embeddings_path = os.path.join(output_dir, 'special_embeddings.pkl')
+    
+    # Save special embeddings
     with open(special_embeddings_path, 'wb') as f:
         pkl.dump(special_embeddings, f)
     
-    # Save metadata
-    metadata = {
-        'dataset_name': config['dataset_name'],
-        'model_name': config['model_name'],
-        'num_samples': len(texts),
-        'chunk_dir': chunk_dir,
-        'special_embeddings_path': special_embeddings_path
-    }
-    metadata_path = os.path.join(output_dir, 'metadata.json')
-    with open(metadata_path, 'w') as f:
-        json.dump(metadata, f)
-    
-    logger.info(f"Embeddings saved in chunks to {chunk_dir}")
-    logger.info(f"Special embeddings saved to {special_embeddings_path}")
-    logger.info(f"Metadata saved to {metadata_path}")
-    
+    logger.info(f"Saved special embeddings to {special_embeddings_path}")
+
+def generate_embeddings(config):
+    """
+    Generate embeddings based on config flags.
+    If both special_embeddings and word_embeddings are set, generate both.
+    If neither is set, default to word embeddings for backward compatibility.
+    """
+    output_dir = os.path.join(config['output_dir'], config['dataset_name'].replace('/', '_'))
+    os.makedirs(output_dir, exist_ok=True)
+
+    special_flag = config.get('special_embeddings', False)
+    word_flag = config.get('word_embeddings', False)
+
+    # If neither flag is set, raise error
+    if not special_flag and not word_flag:
+        raise ValueError("At least one of --special_embeddings or --word_embeddings must be set")
+
+    if special_flag:
+        generate_special_embeddings(config)
+    if word_flag:
+        generate_word_embeddings(config)
     return output_dir
 
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Generate GNN embeddings from fine-tuned models')
     parser.add_argument('--dataset_name', type=str, required=True, help='Name of the dataset')
-    parser.add_argument('--model_name', type=str, required=True, help='Name of the pre-trained model')
-    parser.add_argument('--model_path', type=str, required=True, help='Path to the fine-tuned model')
+    parser.add_argument('--model_name', type=str, required=False, help='Name of the pre-trained model')
+    parser.add_argument('--model_path', type=str, required=False, help='Path to the fine-tuned model')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size for processing (default: 1)')
     parser.add_argument('--chunk_size', type=int, default=1000, help='Number of samples per chunk file')
     parser.add_argument('--output_dir', type=str, default='output', help='Output directory')
     parser.add_argument('--cuda', action='store_true', help='Use CUDA if available')
     parser.add_argument('--split', type=str, default='train', help='Dataset split to process')
+    parser.add_argument('--special_embeddings', type=str, default='false', help='Generate special embeddings (true/false)')
+    parser.add_argument('--word_embeddings', type=str, default='false', help='Generate word embeddings (true/false)')
     return vars(parser.parse_args())
 
 def main():
@@ -504,6 +588,9 @@ def main():
     
     # Parse command line arguments
     config = parse_args()
+    # Convert string parameters to booleans
+    config['special_embeddings'] = str(config.get('special_embeddings', 'false')).lower() == 'true'
+    config['word_embeddings'] = str(config.get('word_embeddings', 'false')).lower() == 'true'
     
     # Set up logging
     logging.basicConfig(
@@ -521,13 +608,14 @@ def main():
         logger.info(f"  {key}: {value}")
     
     try:
-        # Generate embeddings
+        # Generate embeddings based on flags
         output_dir = generate_embeddings(config)
         logger.info(f"Successfully completed embedding generation. Results saved to: {output_dir}")
     except Exception as e:
         logger.error(f"Error during embedding generation: {str(e)}")
         logger.error(traceback.format_exc())
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

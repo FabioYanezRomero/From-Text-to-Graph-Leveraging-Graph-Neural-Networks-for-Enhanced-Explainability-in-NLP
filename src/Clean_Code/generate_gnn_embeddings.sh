@@ -5,9 +5,8 @@
 export PYTHONPATH=$PYTHONPATH:$(dirname $(dirname $(realpath $0)))
 
 # Default parameters
+model_name="bert-base-uncased"  # or your actual model name
 dataset_name="stanfordnlp/sst2"
-model_name=""  # Will be auto-detected if not provided
-model_path=""  # Will be auto-detected if not provided
 batch_size=50     # Process multiple samples at once for faster processing
 chunk_size=1000  # Number of samples per chunk file
 output_dir="/app/src/Clean_Code/output"
@@ -15,42 +14,41 @@ results_dir="/app/src/Clean_Code/output/finetuned_llms"
 metric="f1-score"
 splits="all"  # Process all available splits by default
 auto_select_model=true
-
+special_embeddings="true"
+word_embeddings="false"
 # Help message
 show_help() {
     echo "Usage: $0 [options]"
     echo ""
     echo "Options:"
+    echo "  --model_name NAME        Model name or path (default: google-bert/bert-base-uncased)"
+    echo "  --model_path PATH        Path to fine-tuned model checkpoint (auto-selected by default)"
     echo "  --dataset_name NAME      Dataset name (e.g., stanfordnlp/sst2, setfit/ag_news) [required]"
-    echo "  --model_name NAME        Base model name (default: auto-detected from best checkpoint)"
-    echo "  --model_path PATH        Path to the fine-tuned model (default: auto-selected best checkpoint)"
     echo "  --no_auto_select         Disable automatic selection of the best model checkpoint"
     echo "  --results_dir DIR        Directory containing fine-tuned model results"
     echo "  --batch_size SIZE        Batch size for processing (default: 8)"
     echo "  --chunk_size SIZE        Number of samples per chunk file (default: 1000)"
     echo "  --output_dir DIR         Output directory (default: /app/src/Clean_Code/output)"
     echo "  --splits SPLITS          Dataset splits to process (comma-separated or 'all', default: all)"
+    echo "  --special_embeddings     Generate special embeddings (constituency tokens)"
+    echo "  --word_embeddings        Generate word embeddings (default if neither flag is set)"
     echo "  --help                   Show this help message and exit"
 }
 
-# Parse command line arguments
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dataset_name)
             dataset_name="$2"
             shift 2
             ;;
-        --model_name)
-            model_name="$2"
-            shift 2
+        --no_auto_select)
+            auto_select_model=false
+            shift
             ;;
         --model_path)
             model_path="$2"
             shift 2
-            ;;
-        --no_auto_select)
-            auto_select_model=false
-            shift
             ;;
         --results_dir)
             results_dir="$2"
@@ -76,8 +74,17 @@ while [[ $# -gt 0 ]]; do
             chunk_size="$2"
             shift 2
             ;;
+        --special_embeddings)
+            special_embeddings=true
+            shift
+            ;;
+        --word_embeddings)
+            word_embeddings=true
+            shift
+            ;;
         --help)
             show_help
+            exit 0
             ;;
         *)
             echo "Unknown option: $1"
@@ -159,14 +166,16 @@ for split in "${SPLIT_ARRAY[@]}"; do
     mkdir -p "$split_dir"
     
     python -m Clean_Code.GNN_Embeddings.embedding_generator \
-        --dataset_name "$dataset_name" \
         --model_name "$model_name" \
         --model_path "$model_path" \
+        --dataset_name "$dataset_name" \
         --batch_size "$batch_size" \
         --chunk_size "$chunk_size" \
         --output_dir "$split_dir" \
         --split "$split" \
-        --cuda
+        --cuda \
+        --special_embeddings "$special_embeddings" \
+        --word_embeddings "$word_embeddings"
     
     # Check if embedding generation was successful
     if [ $? -ne 0 ]; then
