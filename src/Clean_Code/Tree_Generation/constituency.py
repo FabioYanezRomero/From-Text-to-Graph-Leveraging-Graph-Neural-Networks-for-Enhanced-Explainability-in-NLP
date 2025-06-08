@@ -331,53 +331,73 @@ class ConstituencyTreeGenerator(BaseTreeGenerator):
         if node_id_counter is None:
             node_id_counter = {'val': 0}
 
-        # Assign a unique numerical id to this node
-        nid = node_id_counter['val']
-        node_id_counter['val'] += 1
-
-        parent = node_list[0] + parent_id
-        # Add parent node with id and label if not already present
-        if parent not in graph:
-            # Always use PHRASE_MAPPER for constituent node labels if available
-            label_key = node_list[0]
-            mapped_label = PHRASE_MAPPER.get(label_key, label_key)
-            graph.add_node(parent, id=nid, label=f"{nid}: {mapped_label}")
-        else:
-            # If already present, update with id if not set
-            if 'id' not in graph.nodes[parent]:
-                graph.nodes[parent]['id'] = nid
-                # Update label with mapping if needed
-                label_key = node_list[0]
-                mapped_label = PHRASE_MAPPER.get(label_key, label_key)
-                graph.nodes[parent]['label'] = f"{nid}: {mapped_label}"
-
+        import string
+        parent_label = node_list[0]
         children = node_list[1:]
+        # Check if parent is a punctuation constituent (single character and in string.punctuation)
+        if isinstance(parent_label, str) and len(parent_label) == 1 and parent_label in string.punctuation:
+            # Do not add the punctuation constituent node, connect children directly to parent's parent
+            for i, child in enumerate(children):
+                if isinstance(child, list):
+                    # Recursively process children, connecting to parent's parent
+                    self._build_graph(graph, child, sentence, parent_id, graph_id, node_id_counter, parent_nid=parent_nid)
+                else:
+                    # Add leaf node (punctuation word)
+                    try:
+                        leaf_nid = node_id_counter['val']
+                        node_id_counter['val'] += 1
+                        mapped_leaf_label = PHRASE_MAPPER.get(child, child)
+                        if parent_nid is not None:
+                            # Find the parent node key by id
+                            parent_node_key = None
+                            for k, v in graph.nodes(data=True):
+                                if v.get('id') == parent_nid:
+                                    parent_node_key = k
+                                    break
+                            if parent_node_key is not None:
+                                graph.add_node(leaf_nid, id=leaf_nid, label=mapped_leaf_label)
+                                graph.add_edge(parent_node_key, leaf_nid, label="constituency relation")
+                        else:
+                            # If no parent_nid, treat as root
+                            graph.add_node(leaf_nid, id=leaf_nid, label=mapped_leaf_label)
+                    except Exception:
+                        continue
+            return graph
+        # Normal case: not a punctuation constituent
+        parent = parent_label + parent_id
+        if parent not in graph:
+            nid = node_id_counter['val']
+            node_id_counter['val'] += 1
+            label_key = parent_label
+            mapped_label = PHRASE_MAPPER.get(label_key, label_key)
+            graph.add_node(parent, id=nid, label=mapped_label)
         for i, child in enumerate(children):
             if isinstance(child, list):
-                # Process non-leaf nodes (constituents)
                 child_id = parent_id + str(i)
                 child_label = child[0]
                 node_key = str(child_label) + str(child_id)
-
-                # Assign id and label
-                child_nid = node_id_counter['val']
-                node_id_counter['val'] += 1
-                # Always use PHRASE_MAPPER for constituent node labels if available
-                mapped_child_label = PHRASE_MAPPER.get(child_label, child_label)
-                graph.add_node(node_key, id=child_nid, label=f"{child_nid}: {mapped_child_label}")
-                graph.add_edge(parent, node_key, label="constituency relation")
-                self._build_graph(graph, child, sentence, child_id, graph_id, node_id_counter, parent_nid=nid)
+                # Only skip adding node if it's a punctuation constituent
+                if not (isinstance(child_label, str) and len(child_label) == 1 and child_label in string.punctuation):
+                    if node_key not in graph:
+                        child_nid = node_id_counter['val']
+                        node_id_counter['val'] += 1
+                        mapped_child_label = PHRASE_MAPPER.get(child_label, child_label)
+                        graph.add_node(node_key, id=child_nid, label=mapped_child_label)
+                    graph.add_edge(parent, node_key, label="constituency relation")
+                    self._build_graph(graph, child, sentence, child_id, graph_id, node_id_counter, parent_nid=graph.nodes[parent]['id'])
+                else:
+                    # If child is a punctuation constituent, skip adding node and process its children directly
+                    self._build_graph(graph, child, sentence, child_id, graph_id, node_id_counter, parent_nid=graph.nodes[parent]['id'])
             else:
-                # Process leaf nodes (words)
                 try:
-                    counter = node_id_counter['val']
+                    leaf_nid = node_id_counter['val']
                     node_id_counter['val'] += 1
-                    # Always use PHRASE_MAPPER for leaf (word) labels if available
                     mapped_leaf_label = PHRASE_MAPPER.get(child, child)
-                    graph.add_node(counter, id=counter, label=f"{counter}: {mapped_leaf_label}")
-                    graph.add_edge(parent, counter, label="constituency relation")
+                    graph.add_node(leaf_nid, id=leaf_nid, label=mapped_leaf_label)
+                    graph.add_edge(parent, leaf_nid, label="constituency relation")
                 except Exception:
                     continue
+        return graph
         # Add graph metadata
         graph.graph['property'] = self.property
         if graph_id:
