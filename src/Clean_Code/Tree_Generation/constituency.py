@@ -142,12 +142,12 @@ class ConstituencyTreeGenerator(BaseTreeGenerator):
                 print(f"Error downloading default models: {e2}")
         
         # Initialize the Stanza pipeline with BERT-based constituency parser
-        print("Initializing Stanza pipeline with BERT-based constituency parser...")
-        from transformers import AutoModel, AutoTokenizer
+        #print("Initializing Stanza pipeline with BERT-based constituency parser...")
+        #from transformers import AutoModel, AutoTokenizer
 
         # Use the model name that matches your Stanza model (e.g., 'google/electra-large-discriminator')
-        AutoModel.from_pretrained('google/electra-large-discriminator')
-        AutoTokenizer.from_pretrained('google/electra-large-discriminator')
+        #AutoModel.from_pretrained('google/electra-large-discriminator')
+        #AutoTokenizer.from_pretrained('google/electra-large-discriminator')
         
         self.nlp = stanza.Pipeline(
             lang='en',
@@ -313,7 +313,7 @@ class ConstituencyTreeGenerator(BaseTreeGenerator):
         # Fallback for unknown types
         return str(tree)
 
-    def _build_graph(self, graph: nx.DiGraph, node_list: List, sentence: str, parent_id: str = '', graph_id: str = None) -> nx.DiGraph:
+    def _build_graph(self, graph: nx.DiGraph, node_list: List, sentence: str, parent_id: str = '', graph_id: str = None, node_id_counter=None, parent_nid=None) -> nx.DiGraph:
         """
         Add edges and nodes to the graph from the node list.
 
@@ -327,48 +327,61 @@ class ConstituencyTreeGenerator(BaseTreeGenerator):
         Returns:
             nx.DiGraph: The constructed graph.
         """
-        parent = node_list[0] + parent_id
-        if parent not in graph:
-            # Add parent node with appropriate label
-            label = PHRASE_MAPPER.get(str(parent), parent)
-            graph.add_node(str(parent), label=label)    
+        # Setup id counter if not provided
+        if node_id_counter is None:
+            node_id_counter = {'val': 0}
+
+        # Assign a unique numerical id to this node
+        nid = node_id_counter['val']
+        node_id_counter['val'] += 1
 
         parent = node_list[0] + parent_id
+        # Add parent node with id and label if not already present
         if parent not in graph:
-            # Add parent node with appropriate label
-            label = PHRASE_MAPPER.get(str(parent), parent)
-            graph.add_node(str(parent), label=label)
-        
+            # Always use PHRASE_MAPPER for constituent node labels if available
+            label_key = node_list[0]
+            mapped_label = PHRASE_MAPPER.get(label_key, label_key)
+            graph.add_node(parent, id=nid, label=f"{nid}: {mapped_label}")
+        else:
+            # If already present, update with id if not set
+            if 'id' not in graph.nodes[parent]:
+                graph.nodes[parent]['id'] = nid
+                # Update label with mapping if needed
+                label_key = node_list[0]
+                mapped_label = PHRASE_MAPPER.get(label_key, label_key)
+                graph.nodes[parent]['label'] = f"{nid}: {mapped_label}"
+
         children = node_list[1:]
         for i, child in enumerate(children):
             if isinstance(child, list):
                 # Process non-leaf nodes (constituents)
                 child_id = parent_id + str(i)
                 child_label = child[0]
-                node_id = str(child_label) + str(child_id)
-                
-                graph.add_node(node_id, label=child_label)
-                graph.nodes[node_id]['label'] = PHRASE_MAPPER.get(child_label, child_label)
-                graph.add_edge(parent, node_id, label="constituency relation")
-                
-                self._build_graph(graph, child, sentence, child_id)
+                node_key = str(child_label) + str(child_id)
+
+                # Assign id and label
+                child_nid = node_id_counter['val']
+                node_id_counter['val'] += 1
+                # Always use PHRASE_MAPPER for constituent node labels if available
+                mapped_child_label = PHRASE_MAPPER.get(child_label, child_label)
+                graph.add_node(node_key, id=child_nid, label=f"{child_nid}: {mapped_child_label}")
+                graph.add_edge(parent, node_key, label="constituency relation")
+                self._build_graph(graph, child, sentence, child_id, graph_id, node_id_counter, parent_nid=nid)
             else:
                 # Process leaf nodes (words)
                 try:
-                    # Use the index of the word in the sentence as the node ID
-                    counter = sentence.index(child)
-                    graph.add_node(counter, label=child)
-                    graph.nodes[counter]['label'] = PHRASE_MAPPER.get(child, child)
+                    counter = node_id_counter['val']
+                    node_id_counter['val'] += 1
+                    # Always use PHRASE_MAPPER for leaf (word) labels if available
+                    mapped_leaf_label = PHRASE_MAPPER.get(child, child)
+                    graph.add_node(counter, id=counter, label=f"{counter}: {mapped_leaf_label}")
                     graph.add_edge(parent, counter, label="constituency relation")
-                except ValueError:
-                    # Word not found in the sentence
+                except Exception:
                     continue
-        
         # Add graph metadata
         graph.graph['property'] = self.property
         if graph_id:
             graph.graph['id'] = graph_id
-        
         return graph
     
     def _remove_nodes_and_reconnect(self, graph: nx.DiGraph) -> None:
@@ -428,7 +441,8 @@ class ConstituencyTreeGenerator(BaseTreeGenerator):
                     graph=graph,
                     node_list=tree_list,
                     sentence=sentences[i],
-                    graph_id=ids[i] if ids else None
+                    graph_id=ids[i] if ids else None,
+                    node_id_counter={'val': 0}  # reset id counter for each graph
                 )
                 
                 # Remove nodes that start with '_' and reconnect their parents to their children

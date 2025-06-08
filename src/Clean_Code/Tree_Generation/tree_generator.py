@@ -131,7 +131,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--graph_type", type=str, default="constituency")
     parser.add_argument("--dataset", type=str, default="SetFit/ag_news")
-    parser.add_argument("--subsets", type=list, default=["train", "validation", "test"])
+    parser.add_argument("--subsets", nargs='+', type=str, default=["train", "validation", "test"])
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--output_dir", type=str, default="/app/src/Clean_Code/output")

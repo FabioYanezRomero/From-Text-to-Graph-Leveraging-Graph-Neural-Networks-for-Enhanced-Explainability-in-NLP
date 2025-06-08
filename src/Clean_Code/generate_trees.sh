@@ -5,7 +5,7 @@
 # Configuration Parameters
 GRAPH_TYPE="constituency"  # "constituency", "syntactic", "semantic"
 DATASET="stanfordnlp/sst2"   # "stanfordnlp/sst2", "SetFit/ag_news"
-SUBSETS=("train", "validation", "test")  # "train", "test", "validation"
+SUBSETS=("validation")  # "train", "test", "validation"
 BATCH_SIZE=256
 DEVICE="cuda:0"            # "cuda:0", "cpu"
 OUTPUT_DIR="/app/src/Clean_Code/output/text_trees"
@@ -19,7 +19,7 @@ chmod +x "$SCRIPT_DIR/Tree_Generation/tree_generator.py"
 python -m "Clean_Code.Tree_Generation.tree_generator" \
   --graph_type "$GRAPH_TYPE" \
   --dataset "$DATASET" \
-  --subsets "$SUBSETS" \
+  --subsets "${SUBSETS[@]}" \
   --batch_size "$BATCH_SIZE" \
   --device "$DEVICE" \
   --output_dir "$OUTPUT_DIR" \
