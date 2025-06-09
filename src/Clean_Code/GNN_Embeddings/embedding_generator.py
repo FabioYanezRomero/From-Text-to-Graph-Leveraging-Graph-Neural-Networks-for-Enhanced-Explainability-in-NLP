@@ -514,7 +514,9 @@ def generate_special_embeddings(config):
     
     with torch.no_grad():
         for token, description in tqdm(constituency_dict.items(), desc="Generating special embeddings"):
-            # Tokenize the token
+            # IMPORTANT: We generate the embedding for the VALUE (description), NOT the key (token).
+            # The mapping is: key (token) -> embedding of value (description)
+            # This ensures the embedding represents the semantic meaning of the description.
             inputs = tokenizer(description, return_tensors="pt").to(device)
             
             # Get model outputs with hidden states
@@ -529,21 +531,28 @@ def generate_special_embeddings(config):
             # Extract the CLS token embedding
             cls_embedding = last_hidden_state[:, 0, :].squeeze(0).cpu()
             
-            # Store the embedding
-            special_embeddings[token] = cls_embedding
+            # Store the embedding with the DESCRIPTION (value) as the key
+            special_embeddings[description] = cls_embedding
     
-    logger.info(f"Generated special embeddings for {len(special_embeddings)} constituency tokens")
+    logger.info(f"Generated special embeddings for {len(special_embeddings)} constituency descriptions (keys are now descriptions, not tags)")
     
-    # Save special embeddings to file
-    output_dir = os.path.join(config['output_dir'], config['dataset_name'].replace('/', '_'))
+    # Save special embeddings to a global directory (not per split)
+    output_dir = os.path.join(config['output_dir'], 'special_embeddings', config['model_name'].replace('/', '_'))
     os.makedirs(output_dir, exist_ok=True)
     special_embeddings_path = os.path.join(output_dir, 'special_embeddings.pkl')
-    
+
+    # If file already exists, load and return it
+    if os.path.exists(special_embeddings_path):
+        logger.info(f"Special embeddings already exist at {special_embeddings_path}, loading instead of regenerating.")
+        with open(special_embeddings_path, 'rb') as f:
+            special_embeddings = pkl.load(f)
+        return special_embeddings
+
     # Save special embeddings
     with open(special_embeddings_path, 'wb') as f:
         pkl.dump(special_embeddings, f)
-    
     logger.info(f"Saved special embeddings to {special_embeddings_path}")
+    return special_embeddings
 
 def generate_embeddings(config):
     """
