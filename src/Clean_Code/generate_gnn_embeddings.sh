@@ -14,8 +14,8 @@ results_dir="/app/src/Clean_Code/output/finetuned_llms"
 metric="f1-score"
 splits="all"  # Process all available splits by default
 auto_select_model=true
-special_embeddings="true"
-word_embeddings="false"
+special_embeddings="false"
+word_embeddings="true"
 # Help message
 show_help() {
     echo "Usage: $0 [options]"

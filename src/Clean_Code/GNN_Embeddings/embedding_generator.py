@@ -236,21 +236,23 @@ def extract_embeddings(texts, model, tokenizer, batch_size=1, chunk_size=1000, d
                 
                 # Process each sample in the batch
                 for j in range(len(batch_texts)):
+
+                    input_ids = inputs['input_ids'][j].tolist()
                     # Get the sentence embedding (CLS token)
+                    
                     sentence_embedding = last_hidden_state[j, 0, :].cpu().numpy()
                     
                     # Get word embeddings by averaging token embeddings
                     word_embeddings = []
                     mapping = mappings[j]
                     for word, token_indices in mapping.items():
-                        if token_indices:  # Skip empty token indices
-                            # Get embeddings for all tokens of this word
+                        if token_indices:
                             token_embeddings = [last_hidden_state[j, idx, :].cpu().numpy() for idx in token_indices]
-                            # Average the embeddings
                             word_embedding = np.mean(token_embeddings, axis=0)
-                            word_embeddings.append((word, word_embedding))
-                    
-                    # Add to current chunk
+                            word_tokens = [input_ids[idx] for idx in token_indices]
+                            word_str = tokenizer.decode(word_tokens, skip_special_tokens=True)
+                            word_embeddings.append((word_str, word_embedding))
+                    # Now word_embeddings is a list of (word, embedding) tuples in order
                     current_chunk_word.append(word_embeddings)
                     current_chunk_sent.append(sentence_embedding)
                 
