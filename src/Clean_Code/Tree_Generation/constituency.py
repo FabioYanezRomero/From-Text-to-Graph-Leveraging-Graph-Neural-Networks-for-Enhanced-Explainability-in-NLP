@@ -56,7 +56,6 @@ PHRASE_MAPPER = {
     'WP$': '«WH-POSSESSIVE PRONOUN»',
     'WRB': '«WH-ADVERB»',
     # CONSTITUENCY TAGS
-    'S': '«SENTENCE»',
     'NP': '«NOUN PHRASE»',
     'VP': '«VERB PHRASE»',
     'PP': '«PREPOSITIONAL PHRASE»',
@@ -150,11 +149,11 @@ class ConstituencyTreeGenerator(BaseTreeGenerator):
         
         # Initialize the Stanza pipeline with BERT-based constituency parser
         #print("Initializing Stanza pipeline with BERT-based constituency parser...")
-        #from transformers import AutoModel, AutoTokenizer
+        from transformers import AutoModel, AutoTokenizer
 
         # Use the model name that matches your Stanza model (e.g., 'google/electra-large-discriminator')
-        #AutoModel.from_pretrained('google/electra-large-discriminator')
-        #AutoTokenizer.from_pretrained('google/electra-large-discriminator')
+        AutoModel.from_pretrained('google/electra-large-discriminator')
+        AutoTokenizer.from_pretrained('google/electra-large-discriminator')
         
         self.nlp = stanza.Pipeline(
             lang='en',
