@@ -10,7 +10,7 @@ from datasets import load_dataset
 
 import re
 
-def load_trees(tree_dir, split, batch_size):
+def load_trees(tree_dir, batch_size):
     """
     Load all constituency trees from numbered pickle files in the directory, sorted numerically.
     Each .pkl file is a list, whose [0] is a tuple, whose [0][0] is a list of DiGraph objects.
@@ -42,7 +42,6 @@ def load_sentences(dataset_name, split):
     else:
         raise ValueError("No suitable sentence/text column found in dataset.")
 
-# Provided constituency_dict (tag -> pretty label)
 constituency_dict = {
     # POS TAGS
     'CC': '«COORDINATING CONJUNCTION»',
@@ -117,6 +116,8 @@ constituency_dict = {
     'RRB': '«RIGHT PARENTHESIS»',
     '-LRB-': '«LEFT PARENTHESIS»',
     '-RRB-': '«RIGHT PARENTHESIS»',
+    'AFX': '«AFFIX»',
+    'NFP': '«SUPERFLUOUS PUNCTUATION»',
 }
 
 def is_special_label(label):
@@ -140,6 +141,14 @@ def validate_graph_structure(graph, graph_idx=None):
                 f"Leaf node (id={nid}, label={label}) in graph {graph_idx} is a special label, expected a word!"
             )
 
+def normalize_special_labels(graph):
+    """Replace any non-leaf node label that is a key in constituency_dict with its pretty label."""
+    for nid, data in graph.nodes(data=True):
+        if graph.out_degree(nid) > 0:
+            label = data['label']
+            if label in constituency_dict:
+                data['label'] = constituency_dict[label]
+
 def compute_special_embeddings(labels, model, tokenizer, device):
     """Compute CLS embeddings for each special label."""
     special_embeddings = {}
@@ -154,12 +163,14 @@ def compute_special_embeddings(labels, model, tokenizer, device):
 
 def get_word_embeddings(sentence, model, tokenizer, device):
     """Get wordpiece embeddings for each word in the sentence."""
-    inputs = tokenizer(sentence, return_tensors='pt', return_offsets_mapping=True, truncation=True).to(device)
+    inputs = tokenizer(sentence, return_tensors='pt', return_offsets_mapping=True, truncation=True)
+    offsets = inputs.pop('offset_mapping')  # Remove offset_mapping before passing to model
+    inputs = {k: v.to(device) for k, v in inputs.items()}
     outputs = model(**inputs)
     hidden = outputs.last_hidden_state.squeeze(0).detach().cpu().numpy()
     # Map wordpieces back to words
     tokens = tokenizer.convert_ids_to_tokens(inputs['input_ids'].squeeze(0))
-    offsets = inputs['offset_mapping'].squeeze(0).tolist()
+    offsets = offsets.squeeze(0).tolist()
     words = sentence.split()
     word_embs = []
     for word in words:
@@ -168,7 +179,7 @@ def get_word_embeddings(sentence, model, tokenizer, device):
         if indices:
             emb = hidden[indices].mean(axis=0)
         else:
-            raise ValueError(f"Word '{word}' not found in sentence '{sentence}'")
+            emb = np.zeros_like(hidden[0])
         word_embs.append(emb)
     return word_embs
 
@@ -189,31 +200,54 @@ def assign_embeddings_to_graph(graph, sentence, word_embs, special_embeddings):
                 data['embedding'] = np.zeros_like(next(iter(special_embeddings.values())))
     return graph
 
+def clean_graph_whitespace_nodes(graph):
+    """
+    Remove non-leaf nodes with empty or whitespace-only labels,
+    reconnecting their children to their parent(s) to preserve hierarchy.
+    """
+    problematic_labels = ['', '``', "''", '""', '`', "´", '“', '”', '‘', '’']
+    nodes_to_remove = []
+    for node, data in list(graph.nodes(data=True)):
+        label = data.get('label', '')
+        if label in problematic_labels or label.strip() == '':
+            if graph.out_degree(node) > 0:
+                nodes_to_remove.append(node)
+    for node in nodes_to_remove:
+        parents = list(graph.predecessors(node))
+        children = list(graph.successors(node))
+        for parent in parents:
+            for child in children:
+                graph.add_edge(parent, child)
+        graph.remove_node(node)
+
 def main():
-    parser = argparse.ArgumentParser(description='Generate NetworkX constituency graphs with embeddings')
-    parser.add_argument('--dataset_name', type=str, required=True)
-    parser.add_argument('--split', type=str, required=True)
-    parser.add_argument('--tree_dir', type=str, required=True)
-    parser.add_argument('--output_dir', type=str, required=True)
+
+    parser = argparse.ArgumentParser(description="Generate constituency graphs with node embeddings for GNN training.")
+    parser.add_argument('--dataset_name', type=str, default='stanfordnlp/sst2')
+    parser.add_argument('--split', type=str, default='validation')
+    parser.add_argument('--tree_dir', type=str, default='/app/src/Clean_Code/output/text_trees/stanfordnlp/sst2/validation/constituency')
+    parser.add_argument('--output_dir', type=str, default='/app/src/Clean_Code/output/gnn_embeddings/stanfordnlp/sst2/validation')
     parser.add_argument('--model_name', type=str, default='bert-base-uncased')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size for processing graphs and sentences')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
     sentences = load_sentences(args.dataset_name, args.split)
-    graphs = load_trees(args.tree_dir, args.split)
-
-    assert len(sentences) == len(graphs), f"Mismatch: {len(sentences)} sentences, {len(graphs)} graphs"
-
+    graph_batches = load_trees(args.tree_dir, args.batch_size)
+    total_graphs = sum(len(batch) for batch in graph_batches)
+    assert len(sentences) == total_graphs, f"Mismatch: {len(sentences)} sentences, {total_graphs} graphs"
+    
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     model = AutoModel.from_pretrained(args.model_name).to(args.device)
 
     # Collect all unique special labels from all graphs
     special_labels = set()
-    for graph in graphs:
-        for _, data in graph.nodes(data=True):
-            if is_special_label(data['label']):
-                special_labels.add(data['label'])
+    for graph_batch in graph_batches:
+        for graph in graph_batch:
+            for _, data in graph.nodes(data=True):
+                if is_special_label(data['label']):
+                    special_labels.add(data['label'])
     # Optionally save found special labels for debugging
     debug_labels_path = os.path.join(args.output_dir, f'{args.split}_special_labels.txt')
     with open(debug_labels_path, 'w') as f:
@@ -224,23 +258,33 @@ def main():
     special_embeddings = compute_special_embeddings(list(special_labels), model, tokenizer, args.device)
     embedding_dim = next(iter(special_embeddings.values())).shape[0] if special_embeddings else model.config.hidden_size
 
-    processed_graphs = []
-    for idx, (sentence, graph) in enumerate(tqdm(zip(sentences, graphs), total=len(sentences), desc='Processing graphs')):
-        validate_graph_structure(graph, graph_idx=idx)
-        word_embs = get_word_embeddings(sentence, model, tokenizer, args.device)
-        word_idx = 0
-        for nid, data in graph.nodes(data=True):
-            if is_special_label(data['label']):
-                data['embedding'] = special_embeddings.get(data['label'], np.zeros(embedding_dim))
-            else:
-                data['embedding'] = word_embs[word_idx] if word_idx < len(word_embs) else np.zeros(embedding_dim)
-                word_idx += 1
-        processed_graphs.append(graph)
-
-    # Save all graphs as a pickle file
-    with open(os.path.join(args.output_dir, f'{args.split}_graphs_with_embeddings.pkl'), 'wb') as f:
-        pkl.dump(processed_graphs, f)
-    print(f"Saved {len(processed_graphs)} graphs to {args.output_dir}")
+    batch_counter = 0
+    for batch_idx, graph_batch in enumerate(tqdm(graph_batches, desc='Processing batches', unit='batch')):
+        batch_processed_graphs = []
+        # Compute the sentence indices for this batch
+        start_idx = batch_idx * args.batch_size
+        end_idx = start_idx + len(graph_batch)
+        sentence_batch = sentences[start_idx:end_idx]
+        for idx_in_batch, (sentence, graph) in enumerate(tqdm(zip(sentence_batch, graph_batch), total=len(graph_batch), desc=f'Processing graphs in batch {batch_idx}', leave=False, unit='graph')):
+            clean_graph_whitespace_nodes(graph)
+            normalize_special_labels(graph)
+            validate_graph_structure(graph, graph_idx=start_idx + idx_in_batch)
+            word_embs = get_word_embeddings(sentence, model, tokenizer, args.device)
+            word_idx = 0
+            for nid, data in graph.nodes(data=True):
+                if is_special_label(data['label']):
+                    data['embedding'] = special_embeddings.get(data['label'], np.zeros(embedding_dim))
+                else:
+                    data['embedding'] = word_embs[word_idx] if word_idx < len(word_embs) else np.zeros_like(word_embs[0])
+                    word_idx += 1
+            batch_processed_graphs.append(graph)
+        batch_path = os.path.join(
+            args.output_dir,
+            f'{args.split}_batch_{batch_idx:04d}_graphs_with_embeddings.pkl'
+        )
+        with open(batch_path, 'wb') as f:
+            pkl.dump(batch_processed_graphs, f)
+        print(f"Saved batch {batch_idx} with {len(batch_processed_graphs)} graphs to {batch_path}")
 
 if __name__ == "__main__":
     main()
