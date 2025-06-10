@@ -460,8 +460,8 @@ def generate_special_embeddings(config):
     'WP$': '«WH-POSSESSIVE PRONOUN»',
     'WRB': '«WH-ADVERB»',
     # CONSTITUENCY TAGS
-    'ROOT': 'ROOT',  # Added root node designation [1]
-    'SENTENCE': '«SENTENCE»',  # Confirmed sentence label [1][2]
+    'ROOT': '«ROOT»',  
+    'SENTENCE': '«SENTENCE»', 
     'NP': '«NOUN PHRASE»',
     'VP': '«VERB PHRASE»',
     'PP': '«PREPOSITIONAL PHRASE»',
@@ -493,6 +493,8 @@ def generate_special_embeddings(config):
     'NML': '«NOMINALIZATION»',
     'LRB': '«LEFT PARENTHESIS»',
     'RRB': '«RIGHT PARENTHESIS»',
+    '-LRB-': '«LEFT PARENTHESIS»',
+    '-RRB-': '«RIGHT PARENTHESIS»',
     }
 
     tokenizer = AutoTokenizer.from_pretrained(config['model_name'])
