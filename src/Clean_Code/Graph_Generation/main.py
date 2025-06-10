@@ -6,26 +6,34 @@ import networkx as nx
 from graph_data_processor import create_word_graphs
 from utils import load_embeddings, load_special_embeddings, load_labels
 
+import argparse
+
 # ---- CONFIGURATION ----
-EMBEDDINGS_DIR = '/app/src/Clean_Code/output/embeddings/stanfordnlp/sst2/train'
-DATASET = 'stanfordnlp_sst2'
-EMBEDDING_MODEL = 'stanfordnlp_sst2'
-SPLIT = 'train'
-SPECIAL_EMB_DIR = '/app/src/Clean_Code/output/embeddings/stanfordnlp/sst2/train/special_embeddings/google-bert_bert-base-uncased/'
-LLM_DIR = '/app/src/Clean_Code/output/finetuned_llms/stanfordnlp'
-MODALITY = 'constituency'
-BATCH_SIZE = 128  # User-defined
+def parse_args():
+    parser = argparse.ArgumentParser(description="Generate PyTorch Geometric graphs from embeddings and trees.")
+    parser.add_argument('--embeddings_dir', type=str, default='/app/src/Clean_Code/output/embeddings/stanfordnlp/sst2/train', help='Directory containing embeddings')
+    parser.add_argument('--dataset', type=str, default='stanfordnlp_sst2', help='Dataset name (e.g., stanfordnlp_sst2)')
+    parser.add_argument('--embedding_model', type=str, default='stanfordnlp_sst2', help='Embedding model name')
+    parser.add_argument('--split', type=str, default='validation', help='Data split (train/validation/test)')
+    parser.add_argument('--special_emb_dir', type=str, default='/app/src/Clean_Code/output/embeddings/stanfordnlp/sst2/train/special_embeddings/google-bert_bert-base-uncased/', help='Directory for special embeddings')
+    parser.add_argument('--llm_dir', type=str, default='/app/src/Clean_Code/output/finetuned_llms/stanfordnlp', help='Directory for LLM labels')
+    parser.add_argument('--modality', type=str, default='constituency', help='Modality (e.g., constituency, dependency)')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size for graph generation')
+    parser.add_argument('--output_dir', type=str, default='/app/src/Clean_Code/output/graphs', help='Output directory for graphs')
+    parser.add_argument('--split_out', type=str, default=None, help='Output split name (optional)')
+    return parser.parse_args()
 
 
 def main():
     import numpy as np
+    args = parse_args()
     # Step 1: List and sort all tree files
     tree_base_dir = '/app/src/Clean_Code/output/text_trees'
     tree_dir = os.path.join(
         tree_base_dir,
-        '/'.join(DATASET.split('_')),
-        SPLIT,
-        MODALITY,
+        *args.dataset.split('/'),
+        args.split,
+        args.modality,
     )
     if not os.path.exists(tree_dir):
         raise FileNotFoundError(f"Tree directory not found: {tree_dir}")
@@ -33,10 +41,10 @@ def main():
     tree_paths = [os.path.join(tree_dir, fname) for fname in tree_files]
 
     # Step 2: Load LLM labels for best epoch
-    labels_dict = load_labels(label_source="llm", split=SPLIT, dataset_name="stanfordnlp/sst2", llm_dir=LLM_DIR)
+    labels_dict = load_labels(label_source="llm", split=args.split, dataset_name="stanfordnlp/sst2", llm_dir=args.llm_dir)
 
     # Step 3: Prepare for on-demand chunked embedding loading
-    embedding_chunks_dir = os.path.join(EMBEDDINGS_DIR, EMBEDDING_MODEL, 'embedding_chunks')
+    embedding_chunks_dir = os.path.join(args.embeddings_dir, args.embedding_model, 'embedding_chunks')
     if not os.path.exists(embedding_chunks_dir):
         raise FileNotFoundError(f"Embedding chunks directory not found: {embedding_chunks_dir}")
     embedding_chunk_files = sorted(
@@ -63,7 +71,7 @@ def main():
         return word_embeddings
 
     # Step 5: Load special embeddings
-    special_embs = load_special_embeddings(SPECIAL_EMB_DIR)
+    special_embs = load_special_embeddings(args.special_emb_dir)
     if special_embs is None:
         print("Warning: Special embeddings not found.")
 
@@ -80,7 +88,9 @@ def main():
     progress = tqdm(total=total_graphs, desc="Processing all graphs")
     offset = 0
     import torch
-    output_dir = f"/app/src/Clean_Code/output/pytorch_geometric/{DATASET}/{SPLIT}"
+    # Determine output directory
+    split_out = args.split_out if args.split_out is not None else args.split
+    output_dir = os.path.join(args.output_dir, args.dataset, split_out)
     os.makedirs(output_dir, exist_ok=True)
 
     for file_idx, file_path in enumerate(tree_paths):
@@ -92,9 +102,9 @@ def main():
 
         graph_idx = 0
         while graph_idx < num_graphs_in_file:
-            batch_trees = trees[0][0][graph_idx:graph_idx + BATCH_SIZE]
-            batch_embeddings = file_embeddings[graph_idx:graph_idx + BATCH_SIZE]
-            batch_labels = file_labels[graph_idx:graph_idx + BATCH_SIZE]
+            batch_trees = trees[0][0][graph_idx:graph_idx + args.batch_size]
+            batch_embeddings = file_embeddings[graph_idx:graph_idx + args.batch_size]
+            batch_labels = file_labels[graph_idx:graph_idx + args.batch_size]
 
             graphs = create_word_graphs(
                 batch_embeddings,
@@ -104,14 +114,14 @@ def main():
                 show_progress=True
             )
             # Save the batch of graphs
-            batch_number = graph_idx // BATCH_SIZE
+            batch_number = graph_idx // args.batch_size
             output_file = os.path.join(
                 output_dir,
                 f"file_{file_idx:03d}_batch_{batch_number:03d}.pt"
             )
             torch.save(graphs, output_file)
             progress.update(len(graphs))
-            graph_idx += BATCH_SIZE
+            graph_idx += args.batch_size
 
         offset += num_graphs_in_file
     progress.close()

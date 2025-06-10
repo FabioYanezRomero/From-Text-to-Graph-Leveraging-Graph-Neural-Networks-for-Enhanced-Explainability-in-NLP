@@ -486,7 +486,12 @@ def generate_special_embeddings(config):
     'WHADVP': '«WH-ADVERB PHRASE»',
     'QP': '«QUANTIFIER PHRASE»',
     'NAC': '«NOT A CONSTITUENT»',
-    'X': '«UNKNOWN»'
+    'X': '«UNKNOWN»',
+    'HYPH': '«HYPHEN»',
+    'HVS': '«HYPHENATED VERB SUBSTITUTION»',
+    'NML': '«NOMINALIZATION»',
+    'LRB': '«LEFT PARENTHESIS»',
+    'RRB': '«RIGHT PARENTHESIS»',
     }
 
     tokenizer = AutoTokenizer.from_pretrained(config['model_name'])

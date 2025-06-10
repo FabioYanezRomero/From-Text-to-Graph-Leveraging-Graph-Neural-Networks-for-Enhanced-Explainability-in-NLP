@@ -7,7 +7,7 @@
 export PYTHONPATH=$PYTHONPATH:$(dirname $(dirname $(realpath $0)))
 
 # Default parameters
-dataset_name="setfit/ag_news"
+dataset_name="stanfordnlp/sst2"
 module="GCNConv"
 hidden_dim=256
 num_layers=3
@@ -26,7 +26,7 @@ seed=42
 cuda=false
 fp16=false
 label_source="llm"
-data_dir="/app/src/Clean_Code/output/embeddings/graphs"
+data_dir="/app/src/Clean_Code/output/pytorch_geometric"
 output_dir="/app/src/Clean_Code/output/gnn_results"
 
 # Help message

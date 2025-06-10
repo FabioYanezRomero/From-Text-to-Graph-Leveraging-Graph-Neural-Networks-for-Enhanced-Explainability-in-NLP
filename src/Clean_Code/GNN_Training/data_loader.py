@@ -33,8 +33,18 @@ class GraphDataset(Dataset):
         super(GraphDataset, self).__init__(None, transform, pre_transform, pre_filter)
         
         self.root_dir = root_dir
-        self.file_paths = sorted(glob.glob(os.path.join(root_dir, "*.pkl")))
-        
+        # Prefer .pt files if present, else fall back to .pkl
+        pt_paths = sorted(glob.glob(os.path.join(root_dir, "*.pt")))
+        pkl_paths = sorted(glob.glob(os.path.join(root_dir, "*.pkl")))
+        if len(pt_paths) > 0:
+            self.file_paths = pt_paths
+            file_type = 'pt'
+        elif len(pkl_paths) > 0:
+            self.file_paths = pkl_paths
+            file_type = 'pkl'
+        else:
+            raise ValueError(f"No .pt or .pkl files found in {root_dir}")
+
         # Initialize data structures to store all graphs
         self.graphs = []
         self.file_to_idx_map = {}  # Maps file index to graph indices
@@ -42,36 +52,35 @@ class GraphDataset(Dataset):
         self._num_classes = None
         
         # Load all graph data and build index mapping
-        if len(self.file_paths) > 0:
-            start_idx = 0
-            for file_idx, file_path in enumerate(self.file_paths):
-                # Use pickle to load the data
+        start_idx = 0
+        for file_idx, file_path in enumerate(self.file_paths):
+            if file_type == 'pt':
+                batch_data = torch.load(file_path, weights_only=False)
+            else:
                 with open(file_path, 'rb') as f:
                     import pickle
                     batch_data = pickle.load(f)
-                
-                # Store the mapping from file index to graph indices
-                if isinstance(batch_data, list):
-                    num_graphs = len(batch_data)
-                    self.file_to_idx_map[file_idx] = (start_idx, start_idx + num_graphs)
-                    start_idx += num_graphs
-                    
-                    # Add all graphs to our list
-                    self.graphs.extend(batch_data)
-                    
-                    print(f"Loaded {num_graphs} graphs from {os.path.basename(file_path)}")
-                else:
-                    raise ValueError(f"Expected a list of graphs, got {type(batch_data)}")
             
-            # Get dataset properties from the first graph
-            if len(self.graphs) > 0:
-                self._num_node_features = self.graphs[0].num_node_features
-                self._num_classes = self._infer_num_classes(self.graphs[0])
-                print(f"Dataset loaded with {len(self.graphs)} total graphs, {self._num_node_features} node features, {self._num_classes} classes")
+            # Store the mapping from file index to graph indices
+            if isinstance(batch_data, list):
+                num_graphs = len(batch_data)
+                self.file_to_idx_map[file_idx] = (start_idx, start_idx + num_graphs)
+                start_idx += num_graphs
+                
+                # Add all graphs to our list
+                self.graphs.extend(batch_data)
+                
+                print(f"Loaded {num_graphs} graphs from {os.path.basename(file_path)}")
             else:
-                raise ValueError("No graphs found in the dataset")
+                raise ValueError(f"Expected a list of graphs in {file_path}, got {type(batch_data)}")
+        
+        # Get dataset properties from the first graph
+        if len(self.graphs) > 0:
+            self._num_node_features = self.graphs[0].num_node_features
+            self._num_classes = self._infer_num_classes(self.graphs[0])
+            print(f"Dataset loaded with {len(self.graphs)} total graphs, {self._num_node_features} node features, {self._num_classes} classes")
         else:
-            raise ValueError(f"No pickle files found in {root_dir}")
+            raise ValueError("No graphs found in the dataset")
             
     @property
     def num_node_features(self):
