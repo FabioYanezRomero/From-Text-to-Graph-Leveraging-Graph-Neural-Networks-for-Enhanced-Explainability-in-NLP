@@ -64,20 +64,12 @@ def create_word_graphs(word_embedding_tuples_list, nx_graphs, special_embeddings
             elif label in word_to_emb:
                 node_features.append(torch.tensor(word_to_emb[label], dtype=torch.float))
             else:
-                print(f"[ERROR] No embedding found for node {nid}")
+                print(f"[ERROR] No embedding found for node {nid} with label {label}")
                 node_features.append(torch.zeros(embedding_dim))
             node_labels.append(label)
 
         # Edge index
         edge_index = []
-        # Eliminate the ROOT and SENTENCE nodes
-        # TODO: Handle the case with ROOT and SENTENCE nodes with the special embeddings
-        nx_tree.remove_node('ROOT')
-
-        for node in nx_tree.nodes(data=True):
-            if node[1]['label'] == '«SENTENCE»':
-                nx_tree.remove_node(node[0])
-                break
         for src, dst in nx_tree.edges():
             try:
                 edge_index.append([node_id_to_idx[src], node_id_to_idx[dst]])

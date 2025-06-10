@@ -17,6 +17,8 @@ from .base_generator import BaseTreeGenerator
 # Dictionary mapping constituency labels to more descriptive phrases
 PHRASE_MAPPER = {
     # POS TAGS
+    'ROOT': '«ROOT»',  # Added root node designation [1]
+    'SENTENCE': '«SENTENCE»',  # Confirmed sentence label [1][2]
     'CC': '«COORDINATING CONJUNCTION»',
     'CD': '«CARDINAL NUMBER»',
     'DT': '«DETERMINER»',
@@ -80,7 +82,12 @@ PHRASE_MAPPER = {
     'WHADVP': '«WH-ADVERB PHRASE»',
     'QP': '«QUANTIFIER PHRASE»',
     'NAC': '«NOT A CONSTITUENT»',
-    'X': '«UNKNOWN»'
+    'X': '«UNKNOWN»',
+    'HYPH': '«HYPHEN»',
+    'HVS': '«HYPHENATED VERB SUBSTITUTION»',
+    'NML': '«NOMINALIZATION»',
+    'LRB': '«LEFT PARENTHESIS»',
+    'RRB': '«RIGHT PARENTHESIS»',    # Add more constituency tags as needed
 }
 
 

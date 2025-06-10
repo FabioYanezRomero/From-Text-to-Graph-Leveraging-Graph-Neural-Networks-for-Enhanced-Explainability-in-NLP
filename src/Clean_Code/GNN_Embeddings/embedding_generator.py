@@ -460,7 +460,8 @@ def generate_special_embeddings(config):
     'WP$': '«WH-POSSESSIVE PRONOUN»',
     'WRB': '«WH-ADVERB»',
     # CONSTITUENCY TAGS
-    'S': '«SENTENCE»',
+    'ROOT': 'ROOT',  # Added root node designation [1]
+    'SENTENCE': '«SENTENCE»',  # Confirmed sentence label [1][2]
     'NP': '«NOUN PHRASE»',
     'VP': '«VERB PHRASE»',
     'PP': '«PREPOSITIONAL PHRASE»',

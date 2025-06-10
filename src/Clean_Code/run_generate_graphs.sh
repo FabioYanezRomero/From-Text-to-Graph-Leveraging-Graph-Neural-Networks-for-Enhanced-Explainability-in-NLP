@@ -13,7 +13,7 @@ OUTPUT_DIR="/app/src/Clean_Code/output/pytorch_geometric"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_SCRIPT="$SCRIPT_DIR/Graph_Generation/main.py"
 
-for SPLIT in train validation; do
+for SPLIT in validation; do
     if [ "$SPLIT" = "validation" ]; then
         SPLIT_OUT="validation_llm_labels"
     else
