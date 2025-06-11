@@ -118,6 +118,8 @@ constituency_dict = {
     '-RRB-': '«RIGHT PARENTHESIS»',
     'AFX': '«AFFIX»',
     'NFP': '«SUPERFLUOUS PUNCTUATION»',
+    'S': '«SENTENCE»',
+    'ADD': '«ADDITIONAL PHRASE»',
 }
 
 def is_special_label(label):
@@ -224,9 +226,9 @@ def main():
 
     parser = argparse.ArgumentParser(description="Generate constituency graphs with node embeddings for GNN training.")
     parser.add_argument('--dataset_name', type=str, default='stanfordnlp/sst2')
-    parser.add_argument('--split', type=str, default='validation')
-    parser.add_argument('--tree_dir', type=str, default='/app/src/Clean_Code/output/text_trees/stanfordnlp/sst2/validation/constituency')
-    parser.add_argument('--output_dir', type=str, default='/app/src/Clean_Code/output/gnn_embeddings/stanfordnlp/sst2/validation')
+    parser.add_argument('--split', type=str, default='train')
+    parser.add_argument('--tree_dir', type=str, default='/app/src/Clean_Code/output/text_trees/stanfordnlp/sst2/train/constituency')
+    parser.add_argument('--output_dir', type=str, default='/app/src/Clean_Code/output/gnn_embeddings/stanfordnlp/sst2/train')
     parser.add_argument('--model_name', type=str, default='bert-base-uncased')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size for processing graphs and sentences')
