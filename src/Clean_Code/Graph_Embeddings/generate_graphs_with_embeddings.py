@@ -185,7 +185,7 @@ def get_word_embeddings(sentence, model, tokenizer, device):
         word_embs.append(emb)
     return word_embs
 
-def assign_embeddings_to_graph(graph, sentence, word_embs, special_embeddings):
+def assign_embeddings_to_graph(graph, word_embs, special_embeddings):
     word_idx = 0
     for nid, data in graph.nodes(data=True):
         if data['type'] == 'word':
