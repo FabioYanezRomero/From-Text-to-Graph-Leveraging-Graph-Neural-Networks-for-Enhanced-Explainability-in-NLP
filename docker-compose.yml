@@ -60,29 +60,33 @@ services:
   # AutoGOAL optimization service built from source
   autogoal:
     build:
-      context: .  # Use project root as context
-      dockerfile: docker-compose/autogoal.Dockerfile  # Use our custom Dockerfile
+      context: ./autogoal_repo
+      dockerfile: dockerfiles/development/dockerfile
       args:
         - BUILD_ENVIRONMENT=development
-      cache_from:
-        - autogoal/autogoal:core
+    container_name: autogoal-core-gpu
+    hostname: autogoal-core-gpu
     volumes:
-      # Mount the main application code
+      - type: bind
+        source: ./autogoal_repo
+        target: /home/coder/autogoal
       - type: bind
         source: .
         target: /app
-      # Shared data volumes
       - type: volume
         source: app-data
         target: /app/data
       - type: volume
         source: autogoal-data
         target: /home/coder/autogoal-data
-      # Cache for pip
       - type: volume
         source: pip-cache
         target: /home/coder/.cache/pip
     working_dir: /home/coder/autogoal
+    ports:
+      - "8500:8501"
+      - "8000:8000"
+    user: "1000:1000"
     tty: true
     stdin_open: true
     environment:
@@ -90,7 +94,8 @@ services:
       - BUILD_ENVIRONMENT=development
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
-    user: coder
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
     networks:
       - app-network
     restart: unless-stopped
@@ -99,6 +104,11 @@ services:
         limits:
           cpus: '4'
           memory: 8G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 # Network configuration
 networks:
