@@ -59,13 +59,10 @@ services:
 
   # AutoGOAL optimization service built from source
   autogoal:
-    build:
-      context: ./autogoal_repo
-      dockerfile: dockerfiles/development/dockerfile
-      args:
-        - BUILD_ENVIRONMENT=development
+    image: autogoal/autogoal:core
     container_name: autogoal-core-gpu
     hostname: autogoal-core-gpu
+    user: 1000:1000
     volumes:
       - type: bind
         source: ./autogoal_repo
@@ -86,7 +83,6 @@ services:
     ports:
       - "8500:8501"
       - "8000:8000"
-    user: "1000:1000"
     tty: true
     stdin_open: true
     environment:
