@@ -2,8 +2,47 @@ import torch
 from dig.xgraph.method import SubgraphX
 import numpy as np
 from tqdm import tqdm
-from experiment.Optimization.architecture_GNNs_single import *
-from experiment.Clustered_optimization.dataloader import *
+from Clean_Code.GNN_Training.gnn_models import GNN_Classifier
+from Clean_Code.LazyTrainer.datasets import load_graph_data
+from torch_geometric.loader import DataLoader
+import json
+import os
+
+# Path to best model and args
+BEST_MODEL_DIR = "/app/output_lazy/stanfordnlp_sst2_GCNConv_20250612_091841"
+BEST_MODEL_PATH = os.path.join(BEST_MODEL_DIR, "best_model.pt")
+ARGS_PATH = os.path.join(BEST_MODEL_DIR, "args.json")
+VAL_DATA_PATH = "/app/src/Clean_Code/output/pyg_graphs/stanfordnlp/sst2/validation"
+
+with open(ARGS_PATH, "r") as f:
+    args = json.load(f)
+
+# Model instantiation: use args from training
+model = GNN_Classifier(
+    input_dim=args.get("input_dim", 768),
+    hidden_dim=args["hidden_dim"],
+    output_dim=args.get("num_classes", 2),
+    num_layers=args["num_layers"],
+    dropout=args["dropout"],
+    module=args["module"],
+    layer_norm=args.get("layer_norm", False),
+    residual=args.get("residual", False),
+    pooling=args.get("pooling", "max")
+)
+
+# Validation data loading using LazyTrainer helper
+_, val_loader = load_graph_data(
+    data_dir=VAL_DATA_PATH,
+    batch_size=1,
+    shuffle=False,
+    num_workers=4
+)
+model.load_state_dict(torch.load(BEST_MODEL_PATH, map_location="cpu"))
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = model.to(device)
+model.eval()
+
+
 import pickle as pkl
 from datetime import datetime
 from autogoal.kb import AlgorithmBase, SemanticType
@@ -25,22 +64,10 @@ from autogoal.utils import nice_repr
 # max_nodes = 15  # int
 
 
-def explain(
-    algorithm,
-    dataset,
-    device,
-    num_hops,
-    rollout,
-    min_atoms,
-    c_puct,
-    expand_atoms,
-    local_radius,
-    sample_num,
-    max_nodes,
-):
+def explain_with_subgraphx(model, loader, device, num_hops=1, rollout=50, min_atoms=2, c_puct=10, expand_atoms=2, local_radius=1, sample_num=5, max_nodes=15):
     explainer = SubgraphX(
-        model=algorithm.model,
-        num_classes=args['labels'],
+        model=model,
+        num_classes=args.get("num_classes", 2),
         device=device,
         num_hops=num_hops,
         rollout=rollout,
@@ -49,35 +76,30 @@ def explain(
         expand_atoms=expand_atoms,
         local_radius=local_radius,
         sample_num=sample_num,
-        save_dir="/usrvol/explainability_results/",
+        save_dir=os.path.join(BEST_MODEL_DIR, "subgraphx_explanations"),
     )
     masked_list = []
     maskout_list = []
     sparsity_list = []
-    loader = HomogeneousDataLoader(dataset, batch_size=1, shuffle=False)
     
-    for batch in tqdm(loader):
-        graph, label = batch
-        # Graphs input information for subgraphX
-        data = Data(x=graph.x, edge_index=graph.edge_index, batch= graph.batch).to(device)
-        x = data.x
-        edge_index = data.edge_index
-        label = int(label)
-        batch = data.batch
-        
+    for batch in tqdm(loader, desc="Explaining validation graphs"):
+        batch = batch.to(device)
+        x = batch.x
+        edge_index = batch.edge_index
+        label = int(batch.y.item()) if hasattr(batch, 'y') else 0
+        batch_idx = batch.batch if hasattr(batch, 'batch') else torch.zeros(x.size(0), dtype=torch.long)
+
         _, related_pred = explainer.explain(
             x=x,
             edge_index=edge_index,
             label=label,
             max_nodes=max_nodes,
+            batch=batch_idx
         )
         masked_list.append(related_pred["masked"])
         maskout_list.append(related_pred["maskout"])
         sparsity_list.append(related_pred["sparsity"])
-        
-
-    # Estos tres valores los queremos maximizar
-    return (masked_list, maskout_list, sparsity_list)
+    return masked_list, maskout_list, sparsity_list
 
 
 def load_dataset():
