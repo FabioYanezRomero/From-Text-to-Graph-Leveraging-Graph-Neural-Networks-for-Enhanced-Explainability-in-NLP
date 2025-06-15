@@ -59,7 +59,9 @@ services:
 
   # AutoGOAL optimization service built from source
   autogoal:
-    image: autogoal/autogoal:core
+    build:
+      context: .
+      dockerfile: autogoal_repo/dockerfiles/core/dockerfile
     container_name: autogoal-core-gpu
     hostname: autogoal-core-gpu
     user: 1000:1000

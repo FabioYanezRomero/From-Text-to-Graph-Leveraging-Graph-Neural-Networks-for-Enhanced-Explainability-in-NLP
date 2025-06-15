@@ -1,5 +1,5 @@
 import torch
-from dig.xgraph.method import SubgraphX
+from Clean_Code.Optimization.custom_subgraphx import CustomSubgraphX
 import numpy as np
 from tqdm import tqdm
 from Clean_Code.GNN_Training.gnn_models import GNN_Classifier
@@ -7,6 +7,10 @@ from Clean_Code.LazyTrainer.datasets import load_graph_data
 from torch_geometric.loader import DataLoader
 import json
 import os
+
+# --- Patch DIG Shapley to fix MarginalSubgraphDataset instantiation ---
+from Clean_Code.Optimization.custom_shapley_patch import patch_marginal_contribution, value_func_wrapper
+patch_marginal_contribution()
 
 # Path to best model and args
 BEST_MODEL_DIR = "/app/output_lazy/stanfordnlp_sst2_GCNConv_20250612_091841"
@@ -65,7 +69,7 @@ from autogoal.utils import nice_repr
 
 
 def explain_with_subgraphx(model, loader, device, num_hops=1, rollout=50, min_atoms=2, c_puct=10, expand_atoms=2, local_radius=1, sample_num=5, max_nodes=15):
-    explainer = SubgraphX(
+    explainer = CustomSubgraphX(
         model=model,
         num_classes=args.get("num_classes", 2),
         device=device,
@@ -77,6 +81,7 @@ def explain_with_subgraphx(model, loader, device, num_hops=1, rollout=50, min_at
         local_radius=local_radius,
         sample_num=sample_num,
         save_dir=os.path.join(BEST_MODEL_DIR, "subgraphx_explanations"),
+        value_func=value_func_wrapper(model)
     )
     masked_list = []
     maskout_list = []
@@ -93,18 +98,53 @@ def explain_with_subgraphx(model, loader, device, num_hops=1, rollout=50, min_at
             x=x,
             edge_index=edge_index,
             label=label,
-            max_nodes=max_nodes,
-            batch=batch_idx
+            max_nodes=max_nodes
         )
         masked_list.append(related_pred["masked"])
         maskout_list.append(related_pred["maskout"])
         sparsity_list.append(related_pred["sparsity"])
+
+# --- AutoGOAL-compatible explain function ---
+def explain(model, loader, device, num_hops=1, rollout=50, min_atoms=2, c_puct=10, expand_atoms=2, local_radius=1, sample_num=5, max_nodes=15, batch=None):
+    """
+    AutoGOAL-compatible explain function. The 'batch' argument is ignored (required for signature compatibility).
+    Calls explain_with_subgraphx with the provided arguments.
+    """
+    return explain_with_subgraphx(
+        model,
+        loader,
+        device,
+        num_hops=num_hops,
+        rollout=rollout,
+        min_atoms=min_atoms,
+        c_puct=c_puct,
+        expand_atoms=expand_atoms,
+        local_radius=local_radius,
+        sample_num=sample_num,
+        max_nodes=max_nodes
+    )
     return masked_list, maskout_list, sparsity_list
 
 
 def load_dataset():
-    dataset = Dataset_GNN(
-        root=args["root_test_data_path"], files_path=args["raw_test_data_path"]
+    # Try to get the test split path, fallback to evaluation split if not present
+    test_path = args.get("root_test_data_path")
+    eval_path = args.get("root_eval_data_path")
+    # Default hardcoded fallback for SST2, adjust as needed
+    default_eval = "/app/src/Clean_Code/output/pyg_graphs/stanfordnlp/sst2/validation"
+    if test_path is not None and os.path.exists(test_path):
+        data_dir = test_path
+    elif eval_path is not None and os.path.exists(eval_path):
+        print("[WARN] Test set not found, using evaluation split.")
+        data_dir = eval_path
+    else:
+        print("[WARN] No test/eval path in args or file not found, using default evaluation split.")
+        data_dir = default_eval
+    dataset, _ = load_graph_data(
+        data_dir=data_dir,
+        batch_size=1,  # batch_size is not used for sampling, set to 1
+        shuffle=False,
+        num_workers=4
     )
     return dataset
 
@@ -129,17 +169,21 @@ class SubgraphXAutogoal(AlgorithmBase):
         sample_num: DiscreteValue(1, 5),  # type: ignore
         max_nodes: DiscreteValue(2, 40),  # type: ignore
     ):
-        self.model = GNN_classifier(
-            size=args["size"],
+        self.model = GNN_Classifier(
+            input_dim=args.get("input_dim", 768),
+            hidden_dim=args["hidden_dim"],
+            output_dim=args.get("num_classes", 2),
             num_layers=args["num_layers"],
             dropout=args["dropout"],
             module=args["module"],
-            layer_norm=args["layer_norm"],
-            residual=args["residual"],
-            pooling=args["pooling"],
-            lin_transform=args["lin_transform"],
+            layer_norm=args.get("layer_norm", False),
+            residual=args.get("residual", False),
+            pooling=args.get("pooling", "max")
         )
-        self.state_dict = torch.load(args['model_dir'])
+        model_path = args.get('model_dir', BEST_MODEL_PATH)
+        if 'model_dir' not in args:
+            print(f"[WARN] 'model_dir' not found in args, using BEST_MODEL_PATH: {BEST_MODEL_PATH}")
+        self.state_dict = torch.load(model_path)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_hops = num_hops
         self.rollout = rollout
@@ -169,9 +213,10 @@ class SubgraphXAutogoal(AlgorithmBase):
 
     def run(self, dataset: XGraph) -> GraphSeqExplanation:
         self.load_model()
-        return explain(
-            self,
-            dataset,
+        # Call explain_with_subgraphx instead of undefined explain
+        masked_list, maskout_list, sparsity_list = explain_with_subgraphx(
+            self.model,
+            dataset,  # dataset is expected to be a loader
             self.device,
             self.num_hops,
             self.rollout,
@@ -180,8 +225,11 @@ class SubgraphXAutogoal(AlgorithmBase):
             self.expand_atoms,
             self.local_radius,
             self.sample_num,
-            self.max_nodes,
+            self.max_nodes
         )
+        # Optionally, you may want to wrap or return these in a GraphSeqExplanation or similar structure
+        return GraphSeqExplanation(masked_list, maskout_list, sparsity_list)
+
 
 def my_metric(X, result):
     masked_score = np.mean(result[0])
@@ -203,23 +251,22 @@ def run_autogoal():
     # Load dataset
     initial_dataset = load_dataset()
     np.random.seed(54)
-    sample = np.random.choice(args['dataset_length'], args['num_samples'])
+    # Use a default for dataset_length if not present
+    dataset_length = args.get('dataset_length', len(initial_dataset))
+    num_samples = args.get('num_samples', 100)
+    if 'num_samples' not in args:
+        print(f"[WARN] 'num_samples' not found in args, defaulting to {num_samples}.")
+    sample = np.random.choice(dataset_length, num_samples, replace=False)
     training_sample = []
-    # Validate initial_dataset dimensions
-    num_datasets = len(initial_dataset)
-    graphs_per_dataset = len(initial_dataset[0])
-
-    # Ensure initial_dataset has enough datasets
-    # required_datasets = (max(sample) // graphs_per_dataset) + 1
-    # assert num_datasets >= required_datasets, f"initial_dataset must have at least {required_datasets} datasets."
-
-    # Process the sample
+    # Sample graphs directly from the dataset
     for i in sample:
-        specific_dataset = i // graphs_per_dataset
-        specific_graph = i % graphs_per_dataset
-        training_sample.append(initial_dataset[specific_dataset][specific_graph])
-
+        try:
+            training_sample.append(initial_dataset[i])
+        except Exception as e:
+            print(f"[ERROR] Could not access graph index {i}: {e}")
     X_train = training_sample
+    # Optionally, print dataset stats for debugging
+    print(f"[INFO] Training sample size: {len(X_train)} / {len(initial_dataset)} total graphs")
 
     automl = AutoML(
         # Declare the input and output types

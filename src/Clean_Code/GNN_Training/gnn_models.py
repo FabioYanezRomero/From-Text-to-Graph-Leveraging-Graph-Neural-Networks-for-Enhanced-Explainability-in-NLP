@@ -86,7 +86,7 @@ class GNN_Classifier(torch.nn.Module):
             nn.Linear(hidden_dim, output_dim)
         )
     
-    def forward(self, x, edge_index, batch):
+    def forward(self, x, edge_index, batch=None):
         """
         Forward pass through the GNN classifier.
         
