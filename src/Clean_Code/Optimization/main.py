@@ -1,16 +1,42 @@
 import torch
-from Clean_Code.Optimization.custom_subgraphx import CustomSubgraphX
+from src.Clean_Code.Optimization.custom_subgraphx import CustomSubgraphX
+from torch_geometric.data import Data
 import numpy as np
 from tqdm import tqdm
-from Clean_Code.GNN_Training.gnn_models import GNN_Classifier
-from Clean_Code.LazyTrainer.datasets import load_graph_data
+from src.Clean_Code.GNN_Training.gnn_models import GNN_Classifier
+from src.Clean_Code.LazyTrainer.datasets import load_graph_data
 from torch_geometric.loader import DataLoader
 import json
 import os
+from torch.utils.data import Dataset
 
-# --- Patch DIG Shapley to fix MarginalSubgraphDataset instantiation ---
-from Clean_Code.Optimization.custom_shapley_patch import patch_marginal_contribution, value_func_wrapper
-patch_marginal_contribution()
+
+class MarginalSubgraphDataset(Dataset):
+    def __init__(self, data, exclude_mask, include_mask, subgraph_build_func):
+        self.num_nodes = data.num_nodes
+        self.X = data.x
+        self.edge_index = data.edge_index
+        self.device = self.X.device
+
+        self.label = data.y
+        self.exclude_mask = torch.tensor(exclude_mask).type(torch.float32).to(self.device)
+        self.include_mask = torch.tensor(include_mask).type(torch.float32).to(self.device)
+        self.subgraph_build_func = subgraph_build_func
+
+    def __len__(self):
+        return self.exclude_mask.shape[0]
+
+    def __getitem__(self, idx):
+        exclude_graph_X, exclude_graph_edge_index = self.subgraph_build_func(self.X, self.edge_index, self.exclude_mask[idx])
+        include_graph_X, include_graph_edge_index = self.subgraph_build_func(self.X, self.edge_index, self.include_mask[idx])
+        exclude_data = Data(x=exclude_graph_X, edge_index=exclude_graph_edge_index)
+        include_data = Data(x=include_graph_X, edge_index=include_graph_edge_index)
+        return exclude_data, include_data
+
+# Monkey-patch DIG's class
+import dig.xgraph.method.shapley
+dig.xgraph.method.shapley.MarginalSubgraphDataset = MarginalSubgraphDataset
+
 
 # Path to best model and args
 BEST_MODEL_DIR = "/app/output_lazy/stanfordnlp_sst2_GCNConv_20250612_091841"
@@ -34,6 +60,37 @@ model = GNN_Classifier(
     pooling=args.get("pooling", "max")
 )
 
+# --- UniversalDataModelWrapper to ensure compatibility with SubgraphX ---
+class UniversalDataModelWrapper(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, *args, **kwargs):
+        # If called with a single argument that is a Data object
+        if len(args) == 1 and hasattr(args[0], 'x') and hasattr(args[0], 'edge_index'):
+            data = args[0]
+            return self.model(
+                x=data.x,
+                edge_index=data.edge_index,
+                batch=getattr(data, 'batch', None)
+            )
+        # If called with x, edge_index, (batch)
+        elif len(args) >= 2:
+            return self.model(*args, **kwargs)
+        # If called with only keyword arguments
+        elif 'data' in kwargs:
+            data = kwargs['data']
+            return self.model(
+                x=data.x,
+                edge_index=data.edge_index,
+                batch=getattr(data, 'batch', None)
+            )
+        else:
+            raise TypeError("Unsupported input signature for model wrapper.")
+
+
+
 # Validation data loading using LazyTrainer helper
 _, val_loader = load_graph_data(
     data_dir=VAL_DATA_PATH,
@@ -46,6 +103,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
 model.eval()
 
+model = UniversalDataModelWrapper(model)
 
 import pickle as pkl
 from datetime import datetime
@@ -81,11 +139,9 @@ def explain_with_subgraphx(model, loader, device, num_hops=1, rollout=50, min_at
         local_radius=local_radius,
         sample_num=sample_num,
         save_dir=os.path.join(BEST_MODEL_DIR, "subgraphx_explanations"),
-        value_func=value_func_wrapper(model)
     )
-    masked_list = []
-    maskout_list = []
-    sparsity_list = []
+    explanations = []
+    related_preds = []
     
     for batch in tqdm(loader, desc="Explaining validation graphs"):
         batch = batch.to(device)
@@ -94,15 +150,15 @@ def explain_with_subgraphx(model, loader, device, num_hops=1, rollout=50, min_at
         label = int(batch.y.item()) if hasattr(batch, 'y') else 0
         batch_idx = batch.batch if hasattr(batch, 'batch') else torch.zeros(x.size(0), dtype=torch.long)
 
-        _, related_pred = explainer.explain(
+        explanation, related_pred = explainer.explain(
             x=x,
             edge_index=edge_index,
             label=label,
             max_nodes=max_nodes
         )
-        masked_list.append(related_pred["masked"])
-        maskout_list.append(related_pred["maskout"])
-        sparsity_list.append(related_pred["sparsity"])
+        explanations.append(explanation)
+        related_preds.append(related_pred)
+    return explanations, related_preds
 
 # --- AutoGOAL-compatible explain function ---
 def explain(model, loader, device, num_hops=1, rollout=50, min_atoms=2, c_puct=10, expand_atoms=2, local_radius=1, sample_num=5, max_nodes=15, batch=None):
@@ -183,8 +239,11 @@ class SubgraphXAutogoal(AlgorithmBase):
         model_path = args.get('model_dir', BEST_MODEL_PATH)
         if 'model_dir' not in args:
             print(f"[WARN] 'model_dir' not found in args, using BEST_MODEL_PATH: {BEST_MODEL_PATH}")
-        self.state_dict = torch.load(model_path)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.load_state_dict(torch.load(model_path, map_location="cpu"))
+        self.model = self.model.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+        self.model.eval()
+        self.model = UniversalDataModelWrapper(self.model)
+        self.device = self.model.model.device if hasattr(self.model, 'model') and hasattr(self.model.model, 'device') else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_hops = num_hops
         self.rollout = rollout
         self.min_atoms = min_atoms
@@ -194,9 +253,13 @@ class SubgraphXAutogoal(AlgorithmBase):
         self.sample_num = sample_num
         self.max_nodes = max_nodes
 
-    def load_model(self):
-        self.model.load_state_dict(self.state_dict)
-        self.model.to(self.device)
+
+
+    def load_model(self, path):
+        self.model.load_state_dict(torch.load(path, map_location="cpu"))
+        if not isinstance(self.model, UniversalDataModelWrapper):
+            self.model = UniversalDataModelWrapper(self.model)
+        self.model = self.model.to(self.device)
         self.model.eval()
 
     def save_results(self, masked_score, maskout_score, sparsity_score):
@@ -212,9 +275,9 @@ class SubgraphXAutogoal(AlgorithmBase):
             pkl.dump(results, f)
 
     def run(self, dataset: XGraph) -> GraphSeqExplanation:
-        self.load_model()
-        # Call explain_with_subgraphx instead of undefined explain
-        masked_list, maskout_list, sparsity_list = explain_with_subgraphx(
+        # self.load_model()  # Model is loaded in __init__, no need to reload here.
+        # Use explain_with_subgraphx and collect explanations and related_preds
+        explanations, related_preds = explain_with_subgraphx(
             self.model,
             dataset,  # dataset is expected to be a loader
             self.device,
@@ -227,14 +290,28 @@ class SubgraphXAutogoal(AlgorithmBase):
             self.sample_num,
             self.max_nodes
         )
-        # Optionally, you may want to wrap or return these in a GraphSeqExplanation or similar structure
-        return GraphSeqExplanation(masked_list, maskout_list, sparsity_list)
+        # Optionally, wrap or return these in a GraphSeqExplanation or similar structure
+        return GraphSeqExplanation(explanations, related_preds)
 
 
 def my_metric(X, result):
-    masked_score = np.mean(result[0])
-    maskout_score = np.mean(result[1])
-    sparsity_score = np.mean(result[2])
+    # result is GraphSeqExplanation(explanations, related_preds)
+    related_preds = result[1] if isinstance(result, tuple) else getattr(result, 'related_preds', None)
+    if related_preds is None:
+        # fallback for old format
+        related_preds = result
+
+    masked_scores = []
+    maskout_scores = []
+    sparsity_scores = []
+    for pred in related_preds:
+        masked_scores.append(pred.get('masked', 0))
+        maskout_scores.append(pred.get('maskout', 0))
+        sparsity_scores.append(pred.get('sparsity', 0))
+    masked_score = np.mean(masked_scores)
+    maskout_score = np.mean(maskout_scores)
+    sparsity_score = np.mean(sparsity_scores)
+    # maximize the mean of all three
     return np.mean([masked_score, maskout_score, sparsity_score])
 
 
