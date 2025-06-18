@@ -7,7 +7,7 @@ import numpy as np
 import networkx as nx
 from transformers import AutoModel, AutoTokenizer
 from datasets import load_dataset
-
+from dicts import constituency_dict
 import re
 
 def load_trees(tree_dir, batch_size):
@@ -42,85 +42,7 @@ def load_sentences(dataset_name, split):
     else:
         raise ValueError("No suitable sentence/text column found in dataset.")
 
-constituency_dict = {
-    # POS TAGS
-    'CC': '«COORDINATING CONJUNCTION»',
-    'CD': '«CARDINAL NUMBER»',
-    'DT': '«DETERMINER»',
-    'EX': '«EXISTENTIAL THERE»',
-    'FW': '«FOREIGN WORD»',
-    'IN': '«PREPOSITION OR SUBORDINATING CONJUNCTION»',
-    'JJ': '«ADJECTIVE»',
-    'JJR': '«ADJECTIVE, COMPARATIVE»',
-    'JJS': '«ADJECTIVE, SUPERLATIVE»',
-    'LS': '«LIST MARKER»',
-    'MD': '«MODAL VERB»',
-    'NN': '«NOUN, SINGULAR OR MASS»',
-    'NNS': '«NOUN, PLURAL»',
-    'NNP': '«PROPER NOUN, SINGULAR»',
-    'NNPS': '«PROPER NOUN, PLURAL»',
-    'PDT': '«PREDETERMINER»',
-    'POS': '«POSSESSIVE ENDING»',
-    'PRP': '«PERSONAL PRONOUN»',
-    'PRP$': '«POSSESSIVE PRONOUN»',
-    'RB': '«ADVERB»',
-    'RBR': '«ADVERB, COMPARATIVE»',
-    'RBS': '«ADVERB, SUPERLATIVE»',
-    'RP': '«PARTICLE»',
-    'SYM': '«SYMBOL»',
-    'TO': '«TO»',
-    'UH': '«INTERJECTION»',
-    'VB': '«VERB, BASE FORM»',
-    'VBD': '«VERB, PAST TENSE»',
-    'VBG': '«VERB, GERUND OR present participle»',
-    'VBN': '«VERB, past participle»',
-    'VBP': '«VERB, non-3rd person singular present»',
-    'VBZ': '«VERB, 3rd person singular present»',
-    'WDT': '«WH-DETERMINER»',
-    'WP': '«WH-PRONOUN»',
-    'WP$': '«WH-POSSESSIVE PRONOUN»',
-    'WRB': '«WH-ADVERB»',
-    # CONSTITUENCY TAGS
-    'ROOT': '«ROOT»',  
-    'SENTENCE': '«SENTENCE»', 
-    'NP': '«NOUN PHRASE»',
-    'VP': '«VERB PHRASE»',
-    'PP': '«PREPOSITIONAL PHRASE»',
-    'ADJP': '«ADJECTIVE PHRASE»',
-    'ADVP': '«ADVERB PHRASE»',
-    'SBAR': '«SUBORDINATE CLAUSE»',
-    'PRT': '«PARTICLE»',
-    'INTJ': '«INTERJECTION»',
-    'CONJP': '«CONJUCTION PHRASE»',
-    'LST': '«LIST MARKER»',
-    'UCP': '«UNLIKE COORDINATED PHRASE»',
-    'PRN': '«PARENTETICAL»',
-    'FRAG': '«FRAGMENT»',
-    'SINV': '«INVERTED SENTENCE»',
-    'SBARQ': '«SUBORDINATE CLAUSE QUESTION»',
-    'SQ': '«QUESTION»',
-    'WHADJP': '«WH-ADJECTIVE PHRASE»',
-    'WHAVP': '«WH-ADVERB PHRASE»',
-    'WHNP': '«WH-NOUN PHRASE»',
-    'WHPP': '«WH-PREPOSITIONAL PHRASE»',
-    'RRC': '«REDUCED RELATIVE CLAUSE»',
-    'NX': '«NOUN PHRASE (NO HEAD)»',
-    'WHADVP': '«WH-ADVERB PHRASE»',
-    'QP': '«QUANTIFIER PHRASE»',
-    'NAC': '«NOT A CONSTITUENT»',
-    'X': '«UNKNOWN»',
-    'HYPH': '«HYPHEN»',
-    'HVS': '«HYPHENATED VERB SUBSTITUTION»',
-    'NML': '«NOMINALIZATION»',
-    'LRB': '«LEFT PARENTHESIS»',
-    'RRB': '«RIGHT PARENTHESIS»',
-    '-LRB-': '«LEFT PARENTHESIS»',
-    '-RRB-': '«RIGHT PARENTHESIS»',
-    'AFX': '«AFFIX»',
-    'NFP': '«SUPERFLUOUS PUNCTUATION»',
-    'S': '«SENTENCE»',
-    'ADD': '«ADDITIONAL PHRASE»',
-}
+
 
 def is_special_label(label):
     """Detect if a label is a special (constituency or POS) label by dict or the «...» pattern."""
@@ -164,22 +86,39 @@ def compute_special_embeddings(labels, model, tokenizer, device):
     return special_embeddings
 
 def get_word_embeddings(sentence, model, tokenizer, device):
-    """Get wordpiece embeddings for each word in the sentence."""
+    """Get wordpiece embeddings for each word in the sentence using robust alignment via offset overlaps."""
     inputs = tokenizer(sentence, return_tensors='pt', return_offsets_mapping=True, truncation=True)
     offsets = inputs.pop('offset_mapping')  # Remove offset_mapping before passing to model
     inputs = {k: v.to(device) for k, v in inputs.items()}
     outputs = model(**inputs)
     hidden = outputs.last_hidden_state.squeeze(0).detach().cpu().numpy()
-    # Map wordpieces back to words
     tokens = tokenizer.convert_ids_to_tokens(inputs['input_ids'].squeeze(0))
     offsets = offsets.squeeze(0).tolist()
     words = sentence.split()
     word_embs = []
+
+    # Compute character spans for each word
+    char_idx = 0
+    word_spans = []
     for word in words:
-        # Find the token indices that correspond to this word
-        indices = [i for i, (tok, (start, end)) in enumerate(zip(tokens, offsets)) if tok not in [tokenizer.cls_token, tokenizer.sep_token] and word in sentence[start:end]]
-        if indices:
-            emb = hidden[indices].mean(axis=0)
+        # Skip leading spaces
+        while char_idx < len(sentence) and sentence[char_idx].isspace():
+            char_idx += 1
+        start = char_idx
+        end = start + len(word)
+        word_spans.append((start, end))
+        char_idx = end
+
+    for word, (w_start, w_end) in zip(words, word_spans):
+        token_indices = []
+        for i, (tok, (t_start, t_end)) in enumerate(zip(tokens, offsets)):
+            if tok in [tokenizer.cls_token, tokenizer.sep_token]:
+                continue
+            # Check for overlap between word and token spans
+            if max(w_start, t_start) < min(w_end, t_end):
+                token_indices.append(i)
+        if token_indices:
+            emb = hidden[token_indices].mean(axis=0)
         else:
             emb = np.zeros_like(hidden[0])
         word_embs.append(emb)
@@ -224,11 +163,12 @@ def clean_graph_whitespace_nodes(graph):
 
 def main():
 
-    parser = argparse.ArgumentParser(description="Generate constituency graphs with node embeddings for GNN training.")
+    parser = argparse.ArgumentParser(description="Generate constituency or syntactic graphs with node embeddings for GNN training.")
+    parser.add_argument('--graph_type', type=str, choices=['constituency', 'syntactic'], help='Type of graph to process', default='syntactic')
     parser.add_argument('--dataset_name', type=str, default='stanfordnlp/sst2')
-    parser.add_argument('--split', type=str, default='train')
-    parser.add_argument('--tree_dir', type=str, default='/app/src/Clean_Code/output/text_trees/stanfordnlp/sst2/train/constituency')
-    parser.add_argument('--output_dir', type=str, default='/app/src/Clean_Code/output/gnn_embeddings/stanfordnlp/sst2/train')
+    parser.add_argument('--split', type=str, default='validation')
+    parser.add_argument('--tree_dir', type=str, default='/app/src/Clean_Code/output/text_trees/stanfordnlp/sst2/validation/syntactic')
+    parser.add_argument('--output_dir', type=str, default='/app/src/Clean_Code/output/gnn_embeddings/stanfordnlp/sst2/validation/syntactic')
     parser.add_argument('--model_name', type=str, default='bert-base-uncased')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size for processing graphs and sentences')
@@ -243,21 +183,11 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     model = AutoModel.from_pretrained(args.model_name).to(args.device)
 
-    # Collect all unique special labels from all graphs
-    special_labels = set()
-    for graph_batch in graph_batches:
-        for graph in graph_batch:
-            for _, data in graph.nodes(data=True):
-                if is_special_label(data['label']):
-                    special_labels.add(data['label'])
-    # Optionally save found special labels for debugging
-    debug_labels_path = os.path.join(args.output_dir, f'{args.split}_special_labels.txt')
-    with open(debug_labels_path, 'w') as f:
-        for label in sorted(special_labels):
-            f.write(f'{label}\n')
-    print(f"Found {len(special_labels)} special labels. Saved to {debug_labels_path}")
-
-    special_embeddings = compute_special_embeddings(list(special_labels), model, tokenizer, args.device)
+    special_embeddings = {}
+    if args.graph_type == 'constituency':
+        # Define special_labels as all values in constituency_dict
+        special_labels = set(constituency_dict.values())
+        special_embeddings = compute_special_embeddings(list(special_labels), model, tokenizer, args.device)
     embedding_dim = next(iter(special_embeddings.values())).shape[0] if special_embeddings else model.config.hidden_size
 
     batch_counter = 0
@@ -268,21 +198,53 @@ def main():
         end_idx = start_idx + len(graph_batch)
         sentence_batch = sentences[start_idx:end_idx]
         for idx_in_batch, (sentence, graph) in enumerate(tqdm(zip(sentence_batch, graph_batch), total=len(graph_batch), desc=f'Processing graphs in batch {batch_idx}', leave=False, unit='graph')):
-            clean_graph_whitespace_nodes(graph)
-            normalize_special_labels(graph)
-            validate_graph_structure(graph, graph_idx=start_idx + idx_in_batch)
-            word_embs = get_word_embeddings(sentence, model, tokenizer, args.device)
-            word_idx = 0
-            for nid, data in graph.nodes(data=True):
-                if is_special_label(data['label']):
-                    data['embedding'] = special_embeddings.get(data['label'], np.zeros(embedding_dim))
-                else:
-                    data['embedding'] = word_embs[word_idx] if word_idx < len(word_embs) else np.zeros_like(word_embs[0])
-                    word_idx += 1
+            if args.graph_type == 'constituency':
+                clean_graph_whitespace_nodes(graph)
+                normalize_special_labels(graph)
+                validate_graph_structure(graph, graph_idx=start_idx + idx_in_batch)
+                word_embs = get_word_embeddings(sentence, model, tokenizer, args.device)
+                word_idx = 0
+                for nid, data in graph.nodes(data=True):
+                    if is_special_label(data['label']):
+                        data['embedding'] = special_embeddings.get(data['label'], np.zeros(embedding_dim))
+                    else:
+                        data['embedding'] = word_embs[word_idx] if word_idx < len(word_embs) else np.zeros_like(word_embs[0])
+                        word_idx += 1
+            else:
+                # Use Stanza to tokenize the sentence as was done during tree generation
+                import stanza
+                if not hasattr(main, 'stanza_pipeline'):
+                    main.stanza_pipeline = stanza.Pipeline(lang='en', processors='tokenize', tokenize_no_ssplit=True, use_gpu=False)
+                stanza_doc = main.stanza_pipeline(sentence)
+                stanza_words = [word.text for sent in stanza_doc.sentences for word in sent.words]
+                word_embs = get_word_embeddings(' '.join(stanza_words), model, tokenizer, args.device)
+                if len(stanza_words) != len(word_embs):
+                    raise ValueError(f"Stanza token count ({len(stanza_words)}) and embedding count ({len(word_embs)}) mismatch.")
+                # Robust alignment: for each stanza token, find the first unmatched graph node with matching text
+                stanza_words_norm = [w.strip().lower() for w in stanza_words]
+                graph_word_nodes = [(nid, data) for nid, data in graph.nodes(data=True) if data.get('text', None) is not None]
+                node_matched = [False] * len(graph_word_nodes)
+                for token_idx, stanza_token in enumerate(stanza_words_norm):
+                    found = False
+                    for node_idx, (nid, data) in enumerate(graph_word_nodes):
+                        node_word_norm = data['text'].strip().lower()
+                        if not node_matched[node_idx] and node_word_norm == stanza_token:
+                            data['embedding'] = word_embs[token_idx]
+                            node_matched[node_idx] = True
+                            found = True
+                            break
+                    if not found:
+                        data['embedding'] = np.zeros_like(word_embs[0])
+                        
+
+                for (matched, (nid, data)) in zip(node_matched, graph_word_nodes):
+                    if not matched:
+                        data['embedding'] = np.zeros_like(word_embs[0])
+
             batch_processed_graphs.append(graph)
         batch_path = os.path.join(
             args.output_dir,
-            f'{args.split}_batch_{batch_idx:04d}_graphs_with_embeddings.pkl'
+            f'{args.graph_type}_{args.split}_batch_{batch_idx:04d}_graphs_with_embeddings.pkl'
         )
         with open(batch_path, 'wb') as f:
             pkl.dump(batch_processed_graphs, f)

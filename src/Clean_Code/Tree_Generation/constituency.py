@@ -244,7 +244,7 @@ class ConstituencyTreeGenerator(BaseTreeGenerator):
             use_gpu=(stanza_device == 'gpu'),
             download_method=stanza.DownloadMethod.NONE,  # We already downloaded the models
             tokenize_pretokenized=False,
-            tokenize_no_ssplit=False,
+            tokenize_no_ssplit=True,
             pos_batch_size=1000,
             constituency_batch_size=1000,
             constituency_pretagged=True  # Use POS tags from the POS tagger

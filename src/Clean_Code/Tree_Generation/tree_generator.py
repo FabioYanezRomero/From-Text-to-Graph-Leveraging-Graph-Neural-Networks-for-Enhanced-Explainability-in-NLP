@@ -41,12 +41,12 @@ def build_trees(graph_type, dataset_name, subset, batch_size, device, output_dir
     dataloader = DataLoader(dataset=instance, batch_size=batch_size, shuffle=False)
     
     # Create output directory
-    output_path = os.path.join(output_dir, dataset_name, subset, "constituency")
+    output_path = os.path.join(output_dir, dataset_name, subset, graph_type)
     os.makedirs(output_path, exist_ok=True)
     
     # Process dataset
     iterator = 0
-    for batch in tqdm(dataloader, desc=f"Processing {dataset_name}/{subset} constituency trees"):
+    for batch in tqdm(dataloader, desc=f"Processing {dataset_name}/{subset} {graph_type} trees"):
         # Extract sentences and labels
         try:
             sentences = batch['sentence']
@@ -118,7 +118,7 @@ def subsets_handler(dataset, subsets):
 
 
 def main(args):
-    # Process datasets - only for constituency trees
+    # Process datasets
     process_dataset(
         graph_type=args.graph_type,
         dataset=args.dataset,

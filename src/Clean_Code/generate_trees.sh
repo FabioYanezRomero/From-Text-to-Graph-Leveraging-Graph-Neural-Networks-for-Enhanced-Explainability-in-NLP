@@ -27,4 +27,4 @@ python -m "Clean_Code.Tree_Generation.tree_generator" \
   --device "$DEVICE" \
   --output_dir "$OUTPUT_DIR" \
 
-echo "Constituency tree generation complete!"
+echo "$GRAPH_TYPE tree generation complete!"
