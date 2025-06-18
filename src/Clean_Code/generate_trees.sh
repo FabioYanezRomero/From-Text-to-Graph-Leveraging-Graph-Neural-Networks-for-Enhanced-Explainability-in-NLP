@@ -3,10 +3,10 @@
 # This script calls the Tree_Generation module to generate constituency parse trees from text datasets
 
 # Configuration Parameters
-GRAPH_TYPE="constituency"  # "constituency", "syntactic", "semantic"
+GRAPH_TYPE="syntactic"  # "constituency", "syntactic"
 DATASET="stanfordnlp/sst2"   # "stanfordnlp/sst2", "SetFit/ag_news"
-SUBSETS=("train")  # "train", "test", "validation"
-BATCH_SIZE=2048
+SUBSETS=(train validation)  # "train", "test", "validation"
+BATCH_SIZE=1000
 DEVICE="cuda:0"            # "cuda:0", "cpu"
 OUTPUT_DIR="/app/src/Clean_Code/output/text_trees"
 

@@ -14,12 +14,12 @@ from datasets import load_dataset
 from torch.utils.data import DataLoader
 import pickle as pkl
 from src.Clean_Code.Tree_Generation.constituency import ConstituencyTreeGenerator
-
+from src.Clean_Code.Tree_Generation.syntactic import SyntacticTreeGenerator
 
 
 def build_trees(graph_type, dataset_name, subset, batch_size, device, output_dir):
     """
-    Build constituency trees from a dataset
+    Build trees from a dataset
     
     Args:
         graph_type (str): Type of graph to generate (constituency, syntactic, semantic)
@@ -31,6 +31,8 @@ def build_trees(graph_type, dataset_name, subset, batch_size, device, output_dir
     # Create appropriate tree generator
     if graph_type == 'constituency':
         generator = ConstituencyTreeGenerator(device=device)
+    elif graph_type == 'syntactic':
+        generator = SyntacticTreeGenerator(device=device)
     else:
         raise NotImplementedError(f"Graph type {graph_type} is not supported.")
     # Load dataset

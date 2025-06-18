@@ -75,7 +75,7 @@ build-%:
 
 # Development
 ## Start all services (build if needed)
-up: build
+up:
 	@echo "${GREEN}🚀 Starting all services...${RESET}"
 	${DOCKER_COMPOSE} up -d
 

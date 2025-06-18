@@ -1,124 +1,128 @@
 """
-Syntactic Graph Generator Module
-This module provides functionality to create syntactic graphs from sentences.
-It leverages the supar Parser to generate dependency trees and converts them
+Syntactic Tree Generator Module
+
+This module provides functionality to create syntactic trees from sentences.
+It leverages the Stanza NLP library to generate syntactic trees and converts them
 into directed graphs where nodes represent words and edges represent syntactic relations.
 """
+
 from typing import List, Dict, Union, Any, Optional
+import os
 import networkx as nx
 import torch
-from supar import Parser
-from .base_generator import BaseGraphGenerator
+import torch.cuda
+import stanza
+from .base_generator import BaseTreeGenerator
+import concurrent.futures
 
 
-# Available Supar dependency parsing models
-SUPAR_DEP_MODELS = [
-    'biaffine-dep-en',
-    'biaffine-dep-roberta-en',
-    'crf2o-dep-en',
-    'crf2o-dep-roberta-en'
-]
 
-
-class SyntacticGraphGenerator(BaseGraphGenerator):
+class SyntacticTreeGenerator(BaseTreeGenerator):
     """
-    Creates syntactic graphs from sentences.
-    This class processes sentences using a syntactic parser and converts
+    Creates syntactic trees from sentences.
+
+    This class processes sentences using a Stanza syntactic parser and converts
     the parsed trees into directed graphs. Each node in the graph represents
-    a word from the sentence, and edges represent syntactic dependencies.
+    either a syntactic phrase or a word from the sentence.
+
+    Attributes:
+        model (str): Name or configuration of the syntactic parser model.
+        property (str): Property type, always set to 'syntactic'.
+        nlp: The loaded Stanza pipeline.
+        device (str): The device to run the parser on (CPU or CUDA).
     """
-    def __init__(self, model: str, device: str = 'cuda:0'):
+
+    def __init__(self, device: str = 'cuda:0'):
         """
-        Initialize the syntactic parser with a given model.
+        Initialize the syntactic parser with Stanza.
+
         Args:
-            model (str): Name of the syntactic parser model to load (e.g., 'dep-biaffine-roberta-en').
             device (str, optional): Device to run the parser on. Defaults to 'cuda:0'.
+
         Raises:
             RuntimeError: If the specified device is not available.
         """
-        super().__init__(model, device)
-        if model not in SUPAR_DEP_MODELS:
-            raise ValueError(f"Unknown model: {model}. Available models: {SUPAR_DEP_MODELS}")
-        self.property = 'syntactic'  # Corrected spelling from 'sintactic'
+        super().__init__(property='syntactic', device=device)
         
         # Verify device availability for better error handling
         if device.startswith('cuda') and not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available. Please use 'cpu' instead or check CUDA installation.")
         
+        self.device = device
         if device.startswith('cuda'):
             torch.cuda.set_device(device)
         
-        try:
-            self.sint = Parser.load(model)
-        except Exception as e:
-            raise RuntimeError(f"Failed to load syntactic parser model '{model}': {e}")
-    
+        # Set up Stanza configuration
+        stanza_device = 'gpu' if device.startswith('cuda') else 'cpu'
+
+        # Download the combined_charlm model (best accuracy)
+        stanza.download('en', package='combined_charlm', processors={
+            'tokenize': 'default',
+            "lemma": "combined_nocharlm",
+            'pos': 'default',
+            'depparse': 'default'  # Uses BERT for best accuracy
+        })
+        
+        self.nlp = stanza.Pipeline(
+            lang='en',
+            processors='tokenize,pos,lemma,depparse',  
+            package={'depparse': 'combined_charlm'},
+            use_gpu=stanza_device == 'gpu',
+            download_method=stanza.DownloadMethod.NONE,  # We already downloaded the models
+            tokenize_pretokenized=False,
+            tokenize_no_ssplit=False,
+            pos_batch_size=1000,
+            depparse_batch_size=1000,
+            depparse_pretagged=True  # Use POS tags from the POS tagger
+        )
+        print("Stanza pipeline with combined_charlm model initialized successfully.")
+        
+
     def _parse(self, sentences: List[str]):
         """
-        Parse sentences using the syntactic parser.
+        Parse sentences using the Stanza syntactic parser, respecting the batch size.
+
         Args:
             sentences (List[str]): List of sentences to parse.
+
         Returns:
-            The parsed syntactic trees.
+            List: List of parsed syntactic trees, one per input sentence.
         """
-        return self.sint.predict(sentences, verbose=False, lang='en')
-    
-    def _build_graph(self, trees, ids: Optional[List[str]] = None) -> List[nx.DiGraph]:
+        results = []
+        for s in sentences:
+            results.append(self.nlp(str(s)))
+        return results
+
+    def _build_graph(self, parsed_results: stanza.Document) -> List[nx.DiGraph]:
         """
-        Build graphs from the parsed syntactic trees.
-        Args:
-            trees: The parsed syntactic trees.
-            ids (Optional[List[str]], optional): Optional list of IDs to assign to graphs. Defaults to None.
-        Returns:
-            List[nx.DiGraph]: List of directed graphs representing the syntactic structure.
+        Build graphs from the parsed data in parallel across sentences.
         """
-        graph_list = []
-        
-        for i, tree in enumerate(trees):
+        def build_graph_for_sentence(sentence):
             graph = nx.DiGraph()
-            
-            # Add nodes (words) to the graph
-            for j in range(len(tree.values[1])):
-                graph.add_node(j+1, label=tree.values[1][j])
-            
-            # Add edges (dependencies) to the graph
-            for j in range(len(tree.values[6])):
-                parent = int(tree.values[6][j])
-                if parent == 0:  # Skip root nodes (they have no parent)
-                    continue
-                else:
-                    child = int(tree.values[0][j])
-                    relation = tree.values[7][j]
-                    graph.add_edge(parent, child, label=relation)
-            
-            # Add graph metadata
-            graph.graph['model'] = self.model
-            graph.graph['property'] = self.property
-            if ids and i < len(ids):
-                graph.graph['id'] = ids[i]
-                
-            graph_list.append(graph)
-            
-        return graph_list
-    
+            for token in sentence.tokens:
+                word = token.words[0]
+                graph.add_node(word.id, text=word.text, pos=word.upos)
+                if word.head != 0:
+                    graph.add_edge(word.head, word.id, deprel=word.deprel)
+            return graph
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            graphs = list(executor.map(build_graph_for_sentence, parsed_results.sentences))
+        return graphs
+
     def get_graph(self, sentences: List[str], ids: Optional[List[str]] = None) -> List[nx.DiGraph]:
         """
-        Get the syntactic graph for each sentence in the list.
+        Generate syntactic dependency graphs for a list of sentences.
+
         Args:
             sentences (List[str]): List of sentences to process.
-            ids (Optional[List[str]], optional): List of IDs to assign to each graph. Defaults to None.
+            ids (List[str], optional): Not used, for interface compatibility.
+    
         Returns:
-            List[nx.DiGraph]: List of syntactic graphs.
-            
-        Raises:
-            ValueError: If ids are provided but don't match the number of sentences.
+            List[nx.DiGraph]: List of syntactic dependency graphs.
         """
-        if ids is not None and len(ids) != len(sentences):
-            raise ValueError(f"Number of ids ({len(ids)}) must match number of sentences ({len(sentences)})")
-        
-        try:
-            syntactic_trees = self._parse(sentences)
-            graphs = self._build_graph(syntactic_trees, ids)
-            return graphs
-        except Exception as e:
-            raise RuntimeError(f"Error generating syntactic graphs: {e}")
+        parsed_batches = self._parse(sentences)
+        graphs = []
+        for parsed in parsed_batches:
+            graphs.extend(self._build_graph(parsed))
+        return graphs

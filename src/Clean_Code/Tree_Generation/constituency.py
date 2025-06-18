@@ -15,6 +15,84 @@ import stanza
 from .base_generator import BaseTreeGenerator
 
 # Dictionary mapping constituency labels to more descriptive phrases
+POS_MAPPER = {
+    'ROOT': '«ROOT»',  # Added root node designation [1]
+    'SENTENCE': '«SENTENCE»',  # Confirmed sentence label [1][2]
+    'CC': '«COORDINATING CONJUNCTION»',
+    'CD': '«CARDINAL NUMBER»',
+    'DT': '«DETERMINER»',
+    'EX': '«EXISTENTIAL THERE»',
+    'FW': '«FOREIGN WORD»',
+    'IN': '«PREPOSITION OR SUBORDINATING CONJUNCTION»',
+    'JJ': '«ADJECTIVE»',
+    'JJR': '«ADJECTIVE, COMPARATIVE»',
+    'JJS': '«ADJECTIVE, SUPERLATIVE»',
+    'LS': '«LIST MARKER»',
+    'MD': '«MODAL VERB»',
+    'NN': '«NOUN, SINGULAR OR MASS»',
+    'NNS': '«NOUN, PLURAL»',
+    'NNP': '«PROPER NOUN, SINGULAR»',
+    'NNPS': '«PROPER NOUN, PLURAL»',
+    'PDT': '«PREDETERMINER»',
+    'POS': '«POSSESSIVE ENDING»',
+    'PRP': '«PERSONAL PRONOUN»',
+    'PRP$': '«POSSESSIVE PRONOUN»',
+    'RB': '«ADVERB»',
+    'RBR': '«ADVERB, COMPARATIVE»',
+    'RBS': '«ADVERB, SUPERLATIVE»',
+    'RP': '«PARTICLE»',
+    'SYM': '«SYMBOL»',
+    'TO': '«TO»',
+    'UH': '«INTERJECTION»',
+    'VB': '«VERB, BASE FORM»',
+    'VBD': '«VERB, PAST TENSE»',
+    'VBG': '«VERB, GERUND OR present participle»',
+    'VBN': '«VERB, past participle»',
+    'VBP': '«VERB, non-3rd person singular present»',
+    'VBZ': '«VERB, 3rd person singular present»',
+    'WDT': '«WH-DETERMINER»',
+    'WP': '«WH-PRONOUN»',
+    'WP$': '«WH-POSSESSIVE PRONOUN»',
+    'WRB': '«WH-ADVERB»',
+}
+
+
+
+CONSTITUENCY_MAPPER = {
+    'NP': '«NOUN PHRASE»',
+    'VP': '«VERB PHRASE»',
+    'PP': '«PREPOSITIONAL PHRASE»',
+    'ADJP': '«ADJECTIVE PHRASE»',
+    'ADVP': '«ADVERB PHRASE»',
+    'SBAR': '«SUBORDINATE CLAUSE»',
+    'PRT': '«PARTICLE»',
+    'INTJ': '«INTERJECTION»',
+    'CONJP': '«CONJUCTION PHRASE»',
+    'LST': '«LIST MARKER»',
+    'UCP': '«UNLIKE COORDINATED PHRASE»',
+    'PRN': '«PARENTETICAL»',
+    'FRAG': '«FRAGMENT»',
+    'SINV': '«INVERTED SENTENCE»',
+    'SBARQ': '«SUBORDINATE CLAUSE QUESTION»',
+    'SQ': '«QUESTION»',
+    'WHADJP': '«WH-ADJECTIVE PHRASE»',
+    'WHAVP': '«WH-ADVERB PHRASE»',
+    'WHNP': '«WH-NOUN PHRASE»',
+    'WHPP': '«WH-PREPOSITIONAL PHRASE»',
+    'RRC': '«REDUCED RELATIVE CLAUSE»',
+    'NX': '«NOUN PHRASE (NO HEAD)»',
+    'WHADVP': '«WH-ADVERB PHRASE»',
+    'QP': '«QUANTIFIER PHRASE»',
+    'NAC': '«NOT A CONSTITUENT»',
+    'X': '«UNKNOWN»',
+    'HYPH': '«HYPHEN»',
+    'HVS': '«HYPHENATED VERB SUBSTITUTION»',
+    'NML': '«NOMINALIZATION»',
+    'LRB': '«LEFT PARENTHESIS»',
+    'RRB': '«RIGHT PARENTHESIS»', 
+}
+
+
 PHRASE_MAPPER = {
     # POS TAGS
     'ROOT': '«ROOT»',  # Added root node designation [1]
