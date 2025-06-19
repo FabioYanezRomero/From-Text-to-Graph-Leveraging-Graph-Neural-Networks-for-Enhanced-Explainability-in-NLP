@@ -50,10 +50,10 @@ def build_label_map(pred_json_path, epoch, split, use_pred=True):
             label_map[idx] = label
     return label_map
 
-def main(label_source='llm', use_pred=True, hf_dataset_name='stanfordnlp/sst2'):
+def main(label_source='llm', use_pred=True, hf_dataset_name='stanfordnlp/sst2', graph_type='syntactic'):
     # Input and output base paths
     IN_BASE = f'/app/src/Clean_Code/output/gnn_embeddings/{hf_dataset_name}'
-    OUT_BASE = f'/app/src/Clean_Code/output/pyg_graphs/{hf_dataset_name}'
+    OUT_BASE = f'/app/src/Clean_Code/output/pyg_graphs/{hf_dataset_name}/{graph_type}'
     LLM_DIR = f'/app/src/Clean_Code/output/finetuned_llms/{hf_dataset_name}'
     SPLITS = ['train', 'validation']
 
@@ -105,23 +105,24 @@ def main(label_source='llm', use_pred=True, hf_dataset_name='stanfordnlp/sst2'):
         raise ValueError(f"Invalid label source: {label_source}")
 
     for split in SPLITS:
-        in_dir = os.path.join(IN_BASE, split)
-        out_dir = os.path.join(OUT_BASE, split)
+        in_dir = os.path.join(IN_BASE, split, graph_type)
+        out_dir = os.path.join(OUT_BASE, graph_type, split)
         os.makedirs(out_dir, exist_ok=True)
 
         # Find all relevant .pkl files and sort numerically
-        pkl_files = glob(os.path.join(in_dir, f'{split}_batch_*.pkl'))
-        pkl_files.sort(key=lambda x: int(x.split('_batch_')[1].split('_')[0]))
+        pkl_files = glob(os.path.join(in_dir, f'*{split}_batch_*.pkl'))
+        pkl_files.sort(key=lambda x: int([s for s in x.split('_') if s.isdigit()][-1]))
 
+        print(f"Processing split: {split}, graph type: {graph_type}, {len(pkl_files)} batch files found.")
         running_data_index = 0
         for pkl_file in pkl_files:
-            print(f"Processing {pkl_file} ...")
+            print(f"  Processing {pkl_file} ...")
             with open(pkl_file, 'rb') as f:
                 graphs = pickle.load(f)
             pyg_graphs = nx_list_to_pyg(graphs)
 
             # Assign label to Data.y for each graph, using running_data_index
-            for i in range(len(graphs)):
+            for i, graph in enumerate(graphs):
                 data_index = running_data_index
                 if data_index in label_maps[split]:
                     label = label_maps[split][data_index]
@@ -133,7 +134,7 @@ def main(label_source='llm', use_pred=True, hf_dataset_name='stanfordnlp/sst2'):
 
             pt_file = os.path.join(out_dir, os.path.basename(pkl_file).replace('.pkl', '.pt'))
             torch.save(pyg_graphs, pt_file)
-            print(f"Saved {pt_file}")
+            print(f"  Saved {pt_file}")
     print("Batch conversion complete.")
 
 if __name__ == "__main__":

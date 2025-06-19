@@ -21,7 +21,7 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 # Local imports – models and utils come from original package, dataset from ours
 # ---------------------------------------------------------------------------
-from src.Clean_Code.GNN_Training.gnn_models import GNN_Classifier, RGNN_Classifier
+from src.Clean_Code.GNN_Training.gnn_models import GNN_Classifier
 from src.Clean_Code.GNN_Training.utils import (
     create_optimizer,
     create_scheduler,
@@ -29,7 +29,7 @@ from src.Clean_Code.GNN_Training.utils import (
     save_metrics,
     set_seed,
 )
-from src.Clean_Code.LazyTrainer.datasets import load_graph_data
+from Clean_Code.LazyTrainer.datasets import load_graph_data
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -46,6 +46,7 @@ default_args = [
     '--batch_size', '32',
     '--num_epochs', '5',
     '--cuda',
+    '--graph_type', 'syntactic',
     # Add or remove arguments as needed for your debugging
 ]
 
@@ -56,6 +57,7 @@ def parse_args() -> argparse.Namespace:  # noqa: D401
     parser.add_argument("--dataset_name", type=str, default="stanfordnlp/sst2")
     parser.add_argument("--data_dir", type=str, required=True, help="Folder with PyG graph files")
     parser.add_argument("--label_source", type=str, default="llm", choices=["original", "llm"])
+    parser.add_argument("--graph_type", type=str, required=True, choices=["syntactic", "constituency"], help="Type of graph to train on (syntactic or constituency)")
 
     # Model
     parser.add_argument("--module", type=str, default="GCNConv",
@@ -78,7 +80,7 @@ def parse_args() -> argparse.Namespace:  # noqa: D401
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cuda", action="store_true")
     parser.add_argument("--fp16", action="store_true")
-    parser.add_argument("--output_dir", type=str, default="output_lazy")
+    parser.add_argument("--output_dir", type=str, default="/app/src/Clean_Code/output/output_lazy")
 
     import sys
     if len(sys.argv) > 1:
@@ -182,7 +184,10 @@ def main():
 
     # output folder
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join(args.output_dir, f"{args.dataset_name.replace('/', '_')}_{args.module}_{timestamp}")
+    # Use output path: src/Clean_Code/output/output_lazy/{graph_type}/...
+    lazy_base = os.path.join("src", "Clean_Code", "output", "output_lazy", args.graph_type)
+    os.makedirs(lazy_base, exist_ok=True)
+    run_dir = os.path.join(lazy_base, f"{args.dataset_name.replace('/', '_')}_{args.module}_{timestamp}")
     os.makedirs(run_dir, exist_ok=True)
     with open(os.path.join(run_dir, "args.json"), "w") as f:
         json.dump(vars(args), f, indent=2)
@@ -195,11 +200,12 @@ def main():
     # Data (simple split assumption: train / validation / test subdirs)
     split_paths: Dict[str, str] = {}
     for split in ("train", "validation", "test"):
-        p = os.path.join(args.data_dir, split)
+        p = os.path.join(args.data_dir, args.graph_type, split)
         if os.path.isdir(p):
             split_paths[split] = p
-    if not split_paths:
-        split_paths["train"] = args.data_dir  # fallback: all graphs as train
+    # No fallback: require explicit structure
+    if "train" not in split_paths:
+        raise FileNotFoundError(f"Could not find training data in {os.path.join(args.data_dir, args.graph_type, 'train')}")
 
     train_ds, train_loader = load_graph_data(split_paths["train"], batch_size=args.batch_size, shuffle=True)
     val_loader = None

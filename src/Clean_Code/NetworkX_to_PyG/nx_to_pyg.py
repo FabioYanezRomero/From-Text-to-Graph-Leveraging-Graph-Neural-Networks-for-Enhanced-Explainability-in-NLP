@@ -21,13 +21,32 @@ def nx_to_pyg(graph: nx.DiGraph):
     # Node features: use 'embedding' if present, else zeros
     embeddings = []
     labels = []
+    emb_dim = None
+    # Find embedding dimension from first available embedding
     for node in node_list:
         attr = graph.nodes[node]
         emb = attr.get('embedding', None)
         if emb is not None:
             emb = np.asarray(emb)
+            if emb.ndim > 1:
+                emb = emb.flatten()
+            emb_dim = emb.shape[0]
+            break
+    if emb_dim is None:
+        emb_dim = 32  # fallback default
+        import warnings
+        warnings.warn("No node in this graph has an 'embedding' attribute; using 32-dim zero vectors.")
+    for node in node_list:
+        attr = graph.nodes[node]
+        emb = attr.get('embedding', None)
+        if emb is not None:
+            emb = np.asarray(emb)
+            if emb.ndim > 1:
+                emb = emb.flatten()
+            if emb.shape[0] != emb_dim:
+                raise ValueError(f"Node {node} embedding shape {emb.shape} does not match expected {emb_dim}")
         else:
-            emb = np.zeros(32)  # Default size, adjust if needed
+            emb = np.zeros(emb_dim)
         embeddings.append(emb)
         labels.append(attr.get('label', None))
     x = torch.tensor(np.stack(embeddings), dtype=torch.float)
