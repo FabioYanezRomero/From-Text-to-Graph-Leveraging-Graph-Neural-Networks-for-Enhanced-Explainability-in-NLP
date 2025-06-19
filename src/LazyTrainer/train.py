@@ -29,7 +29,7 @@ from src.Clean_Code.GNN_Training.utils import (
     save_metrics,
     set_seed,
 )
-from Clean_Code.LazyTrainer.datasets import load_graph_data
+from src.Clean_Code.LazyTrainer.datasets import load_graph_data
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -42,11 +42,13 @@ from Clean_Code.LazyTrainer.datasets import load_graph_data
 default_args = [
     '--dataset_name', 'stanfordnlp/sst2',
     '--data_dir', '/app/src/Clean_Code/output/pyg_graphs/stanfordnlp/sst2',
-    '--module', 'GCNConv',
+    '--module', 'GATConv',
     '--batch_size', '32',
     '--num_epochs', '5',
     '--cuda',
-    '--graph_type', 'syntactic',
+    '--graph_type', 'constituency',
+    '--dropout', '0.5',
+    '--seed', '42'
     # Add or remove arguments as needed for your debugging
 ]
 
@@ -184,8 +186,8 @@ def main():
 
     # output folder
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Use output path: src/Clean_Code/output/output_lazy/{graph_type}/...
-    lazy_base = os.path.join("src", "Clean_Code", "output", "output_lazy", args.graph_type)
+    # Use absolute output path: /app/src/Clean_Code/output/output_lazy/{graph_type}/...
+    lazy_base = os.path.join("/app/src/Clean_Code/output/output_lazy", args.graph_type)
     os.makedirs(lazy_base, exist_ok=True)
     run_dir = os.path.join(lazy_base, f"{args.dataset_name.replace('/', '_')}_{args.module}_{timestamp}")
     os.makedirs(run_dir, exist_ok=True)
@@ -311,7 +313,7 @@ def main():
 
     # final save
     torch.save(model.state_dict(), os.path.join(run_dir, "final_model.pt"))
-    save_metrics(run_dir, **metrics)
+    save_metrics(metrics, run_dir)
     print("Training finished. Artifacts saved to", run_dir)
 
 

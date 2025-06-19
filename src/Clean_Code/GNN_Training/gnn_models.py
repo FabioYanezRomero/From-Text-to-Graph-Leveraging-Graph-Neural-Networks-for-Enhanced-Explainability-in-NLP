@@ -26,7 +26,10 @@ class GNN_Classifier(torch.nn.Module):
                  module='GCNConv', 
                  layer_norm=True, 
                  residual=True, 
-                 pooling='max'):
+                 pooling='max',
+                 gat_heads=1, # Default, but ignored if using per-layer logic
+                 gat_concat=True # Default, but ignored if using per-layer logic
+                 ):
         """
         Initialize the GNN classifier.
         
@@ -40,6 +43,8 @@ class GNN_Classifier(torch.nn.Module):
             layer_norm: Whether to use layer normalization
             residual: Whether to use residual connections
             pooling: Pooling strategy ('max', 'mean', 'add')
+            gat_heads: (legacy) Number of attention heads for GATConv (default=1)
+            gat_concat: (legacy) Whether to concatenate heads (True) or average (False)
         """
         super(GNN_Classifier, self).__init__()
         
@@ -62,25 +67,61 @@ class GNN_Classifier(torch.nn.Module):
         # Layer normalization
         self.layer_norms = nn.ModuleList() if layer_norm else None
         
-        # Initialize GNN layers based on the specified module type
+        # Track the current feature dimension
+        curr_dim = hidden_dim
+        # --- Per-layer GAT heads logic ---
+        if module == 'GATConv':
+            if num_layers == 1:
+                gat_heads_list = [8]
+                gat_concat_list = [True]
+            elif num_layers == 2:
+                gat_heads_list = [8, 1]
+                gat_concat_list = [True, False]
+            else:
+                # 8 heads in first, hidden_dim//2 in middle, 1 in last
+                middle_heads = max(2, hidden_dim // 2)
+                gat_heads_list = [8] + [middle_heads] * (num_layers - 2) + [1]
+                gat_concat_list = [True] * (num_layers - 1) + [False]
+        else:
+            gat_heads_list = [None] * num_layers
+            gat_concat_list = [None] * num_layers
         for i in range(num_layers):
             if module == 'GCNConv':
-                self.convs.append(GCNConv(hidden_dim, hidden_dim))
+                self.convs.append(GCNConv(curr_dim, hidden_dim))
+                curr_dim = hidden_dim
+                if self.layer_norms is not None:
+                    self.layer_norms.append(nn.LayerNorm(curr_dim))
             elif module == 'GATConv':
-                self.convs.append(GATConv(hidden_dim, hidden_dim))
+                heads = gat_heads_list[i]
+                concat = gat_concat_list[i]
+                if heads is not None and concat is not None:
+                    self.convs.append(GATConv(curr_dim, hidden_dim, heads=heads, concat=concat))
+                    if concat:
+                        curr_dim = hidden_dim * heads
+                    else:
+                        curr_dim = hidden_dim
+                    if self.layer_norms is not None:
+                        self.layer_norms.append(nn.LayerNorm(curr_dim))
+                else:
+                    # Should not happen, but skip if heads/concat are None
+                    pass
             elif module == 'GraphConv':
-                self.convs.append(GraphConv(hidden_dim, hidden_dim))
+                self.convs.append(GraphConv(curr_dim, hidden_dim))
+                curr_dim = hidden_dim
+                if self.layer_norms is not None:
+                    self.layer_norms.append(nn.LayerNorm(curr_dim))
             elif module == 'SAGEConv':
-                self.convs.append(SAGEConv(hidden_dim, hidden_dim))
+                self.convs.append(SAGEConv(curr_dim, hidden_dim))
+                curr_dim = hidden_dim
+                if self.layer_norms is not None:
+                    self.layer_norms.append(nn.LayerNorm(curr_dim))
             else:
                 raise ValueError(f"Unsupported GNN module: {module}")
-            
-            if layer_norm:
-                self.layer_norms.append(nn.LayerNorm(hidden_dim))
+
         
-        # Output classification layer
+        # Output classification layer (MLP after pooling)
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(curr_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, output_dim)
@@ -104,7 +145,8 @@ class GNN_Classifier(torch.nn.Module):
         # Apply GNN layers with optional residual connections and layer normalization
         for i in range(self.num_layers):
             h_new = self.convs[i](h, edge_index)
-            
+            # If GATConv with concat, output dim is hidden_dim * heads
+            # If not concat, output dim is hidden_dim
             if self.residual and h.shape == h_new.shape:
                 h = h_new + h
             else:
@@ -129,6 +171,7 @@ class GNN_Classifier(torch.nn.Module):
         
         # Classification
         return self.classifier(h)
+
 
 
 class RGNN_Classifier(torch.nn.Module):
