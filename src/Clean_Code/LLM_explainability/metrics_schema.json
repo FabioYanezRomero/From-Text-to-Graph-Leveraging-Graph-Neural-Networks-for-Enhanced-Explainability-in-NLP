@@ -1,0 +1,17 @@
+{
+  "explanation_time_per_instance": "float (seconds)",
+  "model_evaluations_per_explanation": "int",
+  "peak_memory_bytes": "int",
+  "hardware_utilization": {
+    "cpu_percent": "float",
+    "ram_percent": "float"
+  },
+  "scalability": {
+    "input_length": "int",
+    "explanation_time": "float (seconds)"
+  },
+  "accuracy_compute_tradeoff": {
+    "fidelity_score": "float",
+    "explanation_time": "float (seconds)"
+  }
+}

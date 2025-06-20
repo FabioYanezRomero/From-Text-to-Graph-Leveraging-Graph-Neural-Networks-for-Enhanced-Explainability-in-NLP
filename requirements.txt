@@ -17,6 +17,10 @@ stanza>=1.5.0
 datasets>=2.12.0
 peft
 
+
+# Explainability
+shap==0.48.0
+
 # Additional utilities
 pyyaml>=6.0
 joblib>=1.2.0
