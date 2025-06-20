@@ -43,8 +43,6 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=all
     networks:
       - app-network
-    depends_on:
-      - autogoal
     restart: unless-stopped
     deploy:
       resources:

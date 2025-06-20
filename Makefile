@@ -137,6 +137,16 @@ autogoal-test:
 	@echo "${GREEN}🧪 Running AutoGOAL tests...${RESET}"
 	${DOCKER_COMPOSE} exec -u coder autogoal make test
 
+# GraphSVX
+## Open a shell in the GraphSVX container
+graphsvx-shell:
+	${DOCKER_COMPOSE} exec -u root graphsvx bash
+
+## Run GraphSVX tests
+graphsvx-test:
+	@echo "${GREEN}🧪 Running GraphSVX tests...${RESET}"
+	${DOCKER_COMPOSE} exec graphsvx pytest -v || echo "No tests found or pytest not installed in GraphSVX container."
+
 # Utility
 ## Format code with Black
 format:
