@@ -57,39 +57,23 @@ services:
               count: 1
               capabilities: [gpu]
 
-  # AutoGOAL optimization service built from source
-  autogoal:
+  # GraphSVX explainability service
+  graphsvx:
     build:
       context: .
-      dockerfile: autogoal_repo/dockerfiles/core/dockerfile
-    container_name: autogoal-core-gpu
-    hostname: autogoal-core-gpu
-    user: 1000:1000
+      dockerfile: graphsvx.Dockerfile
+    container_name: graphsvx
     volumes:
-      - type: bind
-        source: ./autogoal_repo
-        target: /home/coder/autogoal
       - type: bind
         source: .
         target: /app
       - type: volume
         source: app-data
         target: /app/data
-      - type: volume
-        source: autogoal-data
-        target: /home/coder/autogoal-data
-      - type: volume
-        source: pip-cache
-        target: /home/coder/.cache/pip
-    working_dir: /home/coder/autogoal
-    ports:
-      - "8500:8501"
-      - "8000:8000"
+    working_dir: /graphsvx
     tty: true
     stdin_open: true
     environment:
-      - PYTHONPATH=/home/coder/autogoal:/app
-      - BUILD_ENVIRONMENT=development
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
       - NVIDIA_VISIBLE_DEVICES=all
@@ -100,8 +84,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '4'
-          memory: 8G
+          cpus: '2'
+          memory: 4G
         reservations:
           devices:
             - driver: nvidia
