@@ -1,12 +1,7 @@
 # Using Docker Compose V2 syntax (no version field needed)
 
-# Define volumes for data persistence
 volumes:
-  autogoal-data:
-    driver: local
   app-data:
-    driver: local
-  pip-cache:
     driver: local
 
 services:
@@ -14,31 +9,22 @@ services:
   app:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
     volumes:
       # Mount the main application code
       - type: bind
         source: .
         target: /app
-      # Mount the autogoal_repo
-      - type: bind
-        source: ./autogoal_repo
-        target: /autogoal_repo
-      # Shared data volumes
+      # Shared data volume
       - type: volume
         source: app-data
         target: /app/data
-      - type: volume
-        source: autogoal-data
-        target: /autogoal_data
     working_dir: /app/src
     tty: true
     stdin_open: true
     environment:
-      - PYTHONPATH=/app:/autogoal_repo
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
-      - BUILD_ENVIRONMENT=development
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
     networks:
@@ -59,7 +45,7 @@ services:
   graphsvx:
     build:
       context: .
-      dockerfile: graphsvx.Dockerfile
+      dockerfile: docker/graphsvx.Dockerfile
     container_name: graphsvx
     volumes:
       - type: bind
@@ -90,7 +76,62 @@ services:
               count: 1
               capabilities: [gpu]
 
-# Network configuration
+  # SHAP explainability service
+  shap:
+    build:
+      context: .
+      dockerfile: docker/shap.Dockerfile
+    container_name: shap
+    volumes:
+      - type: bind
+        source: .
+        target: /app
+      - type: volume
+        source: app-data
+        target: /app/data
+    working_dir: /shap
+    tty: true
+    stdin_open: true
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    networks:
+      - app-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
+  # TokenSHAP (token-level SHAP) explainability service
+  tokenshap:
+    build:
+      context: .
+      dockerfile: docker/tokenshap.Dockerfile
+    container_name: tokenshap
+    volumes:
+      - type: bind
+        source: .
+        target: /app
+      - type: volume
+        source: app-data
+        target: /app/data
+    working_dir: /tokenshap
+    tty: true
+    stdin_open: true
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    networks:
+      - app-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+
 networks:
   app-network:
     name: text-to-graph-network
