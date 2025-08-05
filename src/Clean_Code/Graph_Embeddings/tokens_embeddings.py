@@ -7,6 +7,7 @@ from tqdm import tqdm
 import torch
 from transformers import AutoModel, AutoTokenizer
 from datasets import load_dataset
+from torch_geometric.data import Data
 
 
 def load_sentences(dataset_name, split):
@@ -20,14 +21,14 @@ def load_sentences(dataset_name, split):
 
 
 def main():
+
+    
     for split in ['train', 'validation', 'test']:
-        dataset_name = 'stanfordnlp/sst2'
+        dataset_name = 'setfit/ag_news'
         model_name = 'bert-base-uncased'
         output_dir = f"/app/src/Clean_Code/output/gnn_embeddings/fully_connected/{dataset_name}/{split}"
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         batch_size = 128
-        
-        # Parse command line arguments
         parser = argparse.ArgumentParser(description="Generate constituency or syntactic graphs with node embeddings for GNN training.")
         parser.add_argument('--dataset_name', type=str, default=dataset_name)
         parser.add_argument('--split', type=str, default=split)
@@ -36,7 +37,6 @@ def main():
         parser.add_argument('--device', type=str, default=device)
         parser.add_argument('--batch_size', type=int, default=batch_size, help='Batch size for processing graphs and sentences')
         args = parser.parse_args()
-
         tokenizer = AutoTokenizer.from_pretrained(args.model_name)
         
         # Find the best model checkpoint based on weighted F1 score
@@ -45,44 +45,78 @@ def main():
         best_f1 = -1.0
         best_checkpoint = None
         
-        # Find all model directories for this dataset
-        model_dirs = glob.glob(f"{finetuned_models_dir}/*")
-        if not model_dirs:
-            raise FileNotFoundError(f"No model directories found in {finetuned_models_dir}")
-            
-        # Use the most recent model directory
-        model_dir = max(model_dirs, key=os.path.getmtime)
+        # For ag-news, the model files are directly in the dataset directory
+        model_dir = finetuned_models_dir
         
-        # Find all classification report files
+        # Check if we have model files directly in this directory
+        model_files = glob.glob(f"{model_dir}/model_epoch_*.pt") or glob.glob(f"{model_dir}/model_final.pt")
+        
+        # If no model files found, try to find model directories (for other datasets)
+        if not model_files:
+            model_dirs = glob.glob(f"{finetuned_models_dir}/*")
+            if model_dirs:
+                # Use the most recent model directory
+                model_dir = max(model_dirs, key=os.path.getmtime)
+                model_files = glob.glob(f"{model_dir}/model_epoch_*.pt") or glob.glob(f"{model_dir}/model_final.pt")
+        
+        if not model_files:
+            raise FileNotFoundError(f"No model files found in {finetuned_models_dir} or its subdirectories")
+        
+        # First, try to find the best model based on classification reports
         report_files = glob.glob(f"{model_dir}/classification_report_test_epoch*.json")
         
-        for report_file in report_files:
-            try:
-                with open(report_file, 'r') as f:
-                    report = json.load(f)
-                    f1 = report.get('weighted avg', {}).get('f1-score', -1)
-                    if f1 > best_f1:
-                        best_f1 = f1
-                        epoch = int(os.path.basename(report_file).split('_')[-1].replace('.json', '').replace('epoch', ''))
-                        best_epoch = epoch
-                        # Try both possible checkpoint filename patterns
-                        checkpoint_path = os.path.join(model_dir, f'model_epoch_{epoch}.pt')
-                        if not os.path.exists(checkpoint_path):
-                            checkpoint_path = os.path.join(model_dir, f'model_final.pt')
-                        best_checkpoint = checkpoint_path
-            except (json.JSONDecodeError, KeyError) as e:
-                print(f"Warning: Could not parse {report_file}: {e}")
-                continue
+        if report_files:  # If we have classification reports, use them to find the best model
+            for report_file in report_files:
+                try:
+                    with open(report_file, 'r') as f:
+                        report = json.load(f)
+                        f1 = report.get('weighted avg', {}).get('f1-score', -1)
+                        if f1 > best_f1:
+                            best_f1 = f1
+                            # Extract epoch number from filename
+                            epoch = int(report_file.split('_')[-1].split('.')[0][5:])
+                            best_epoch = epoch
+                            best_checkpoint = os.path.join(model_dir, f'model_epoch_{epoch}.pt')
+                except (json.JSONDecodeError, KeyError) as e:
+                    print(f"Warning: Could not parse {report_file}: {e}")
+                    continue
+        
+        # If no best checkpoint found via reports, try to find any model checkpoint
+        if best_checkpoint is None or not os.path.exists(best_checkpoint):
+            # Try to find the final model first
+            final_model_path = os.path.join(model_dir, 'model_final.pt')
+            if os.path.exists(final_model_path):
+                best_checkpoint = final_model_path
+                best_epoch = 'final'
+            else:
+                # Fall back to any model_epoch_X.pt file
+                model_files = glob.glob(f"{model_dir}/model_epoch_*.pt")
+                if model_files:
+                    # Sort by epoch number and take the last one
+                    model_files.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
+                    best_checkpoint = model_files[-1]
+                    best_epoch = int(best_checkpoint.split('_')[-1].split('.')[0])
         
         if best_checkpoint is None or not os.path.exists(best_checkpoint):
             raise FileNotFoundError(f"Could not find a valid model checkpoint in {model_dir}")
+        
+        print(f"Found model checkpoint: {best_checkpoint} (epoch: {best_epoch}, F1: {best_f1:.4f} if available)")
         
         print(f"Loading best model from {best_checkpoint} (epoch {best_epoch}, F1={best_f1:.4f})")
         
         # First load the base model, then load the state dict
         model = AutoModel.from_pretrained(args.model_name).to(args.device)
         checkpoint = torch.load(best_checkpoint, map_location=args.device)
-        model.load_state_dict(checkpoint)
+        
+        # Handle state dict key mismatch - remove 'bert.' prefix and ignore classifier weights
+        bert_state_dict = {}
+        for key, value in checkpoint.items():
+            if key.startswith('bert.'):
+                new_key = key[5:]  # Remove 'bert.' prefix
+                bert_state_dict[new_key] = value
+        
+        # Load only the BERT model weights, ignoring classifier weights
+        model.load_state_dict(bert_state_dict, strict=False)
         model = model.to(args.device)
 
         os.makedirs(args.output_dir, exist_ok=True)
@@ -123,15 +157,16 @@ def main():
             )
             
             # Move to device and get model outputs
-            inputs = {k: v.to(args.device) for k, v in inputs.items()}
+            # Remove offset_mapping as it's not expected by the model
+            model_inputs = {k: v.to(args.device) for k, v in inputs.items() if k != 'offset_mapping'}
             with torch.no_grad():
-                outputs = model(**inputs)
+                outputs = model(**model_inputs)
             
             batch_graphs = []
             # Process each sample in the batch
             for j in range(len(texts)):
                 # Get the actual tokens (excluding padding)
-                attention_mask = inputs['attention_mask'][j].bool()
+                attention_mask = model_inputs['attention_mask'][j].bool()
                 hidden = outputs.last_hidden_state[j, attention_mask]  # [seq_len, hidden_size]
                 
                 # Create fully connected graph for this sample
