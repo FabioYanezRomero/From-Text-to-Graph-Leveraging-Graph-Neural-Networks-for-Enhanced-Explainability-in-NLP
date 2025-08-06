@@ -22,6 +22,52 @@ from typing import List, Tuple, Dict, Any, Optional, Union
 from datetime import datetime
 from collections import OrderedDict
 from pathlib import Path
+import tracemalloc
+
+# Global variable to track memory snapshots
+snapshots = []
+
+def display_top(snapshot, key_type='lineno', limit=10):
+    """Display top memory usage."""
+    snapshot = snapshot.filter_traces((
+        tracemalloc.Filter(False, "<frozen importlib._bootstrap"),
+        tracemalloc.Filter(False, "<unknown>"),
+    ))
+    top_stats = snapshot.statistics(key_type)
+
+    result = []
+    result.append("Top %s lines" % limit)
+    for index, stat in enumerate(top_stats[:limit], 1):
+        frame = stat.traceback[0]
+        # replace "/path/to/module/file.py" with "module/file.py"
+        filename = os.sep.join(frame.filename.split(os.sep)[-2:])
+        result.append("#%s: %s:%s: %.1f KiB"
+                     % (index, filename, frame.lineno, stat.size / 1024))
+        line = linecache.getline(frame.filename, frame.lineno).strip()
+        if line:
+            result.append('    %s' % line)
+
+    other = top_stats[limit:]
+    if other:
+        size = sum(stat.size for stat in other)
+        result.append("%s other: %.1f KiB" % (len(other), size / 1024))
+    total = sum(stat.size for stat in top_stats)
+    result.append("Total allocated size: %.1f KiB" % (total / 1024))
+    return "\n".join(result)
+
+def take_memory_snapshot(label):
+    """Take and store a memory snapshot with a label."""
+    snapshot = tracemalloc.take_snapshot()
+    snapshots.append((label, snapshot))
+    if len(snapshots) > 1:
+        first = snapshots[0][1]
+        stats = first.compare_to(snapshot, 'lineno')
+        print(f"\n=== Memory comparison for {label} ===")
+        for stat in stats[:10]:  # Show top 10 differences
+            print(stat)
+    return snapshot
+
+tracemalloc.start()
 
 import torch
 import torch.nn as nn
@@ -39,6 +85,9 @@ from tqdm import tqdm
 import numpy as np
 import random
 import gc  # For explicit garbage collection
+import torch.multiprocessing
+import resource
+
 def get_memory_usage() -> Dict[str, float]:
     """Get current memory usage statistics."""
     process = psutil.Process()
@@ -50,7 +99,19 @@ def get_memory_usage() -> Dict[str, float]:
         'available_gb': psutil.virtual_memory().available / (1024 ** 3)
     }
 
-__all__ = ["CachedGraphDataset", "load_graph_data_optimized", "GNNClassifier", "GNNTrainer", "main"]
+def _free_memory():
+    """Helper function to free up memory."""
+    gc.collect()
+    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+def _log_memory_usage(prefix=""):
+    """Log current memory usage."""
+    mem = get_memory_usage()
+    print(f"{prefix}Memory usage: {mem['rss_gb']:.2f}GB RSS, {mem['vms_gb']:.2f}GB VMS ({mem['cpu_percent']:.1f}%)")
+
+__all__ = ["SimpleGraphDataset", "load_graph_data", "GNNClassifier", "GNNTrainer", "main"]
 
 
 class LRUCache:
@@ -85,21 +146,17 @@ class LRUCache:
                 self.cache[key] = value
 
 
-class CachedGraphDataset(Dataset):
-    """Memory-efficient dataset with intelligent caching for large batch files."""
+class SimpleGraphDataset(Dataset):
+    """Standard PyTorch Geometric dataset for graph data."""
 
-    def __init__(self, root_dir: str, cache_size: int = 5, use_metadata_cache: bool = True):
+    def __init__(self, root_dir: str):
         super().__init__(root=root_dir)
         self.root_dir = root_dir
-        self.cache_size = cache_size
-        self.use_metadata_cache = use_metadata_cache
-        
-        # Initialize LRU cache for batch files
-        self.batch_cache = LRUCache(max_size=cache_size)
         
         # Find graph files
         pt_files = sorted(glob.glob(os.path.join(root_dir, "*.pt")))
         pkl_files = sorted(glob.glob(os.path.join(root_dir, "*.pkl")))
+        
         if pt_files:
             self.file_paths = pt_files
             self.file_type = "pt"
@@ -107,84 +164,80 @@ class CachedGraphDataset(Dataset):
             self.file_paths = pkl_files
             self.file_type = "pkl"
         else:
-            raise RuntimeError(f"No .pt or .pkl graphs found in {root_dir}")
-
-        print(f"Found {len(self.file_paths)} batch files")
+            raise ValueError(f"No .pt or .pkl files found in {root_dir}")
         
-        # Try to load metadata from cache
-        metadata_path = os.path.join(root_dir, ".dataset_metadata.json")
-        metadata_loaded = False
+        # Initialize index
+        self.index = []
+        self._build_index()
         
-        if use_metadata_cache and os.path.exists(metadata_path):
-            try:
-                metadata_loaded = self._load_metadata(metadata_path)
-            except Exception as e:
-                print(f"Failed to load metadata cache: {e}")
-                metadata_loaded = False
-        
-        if not metadata_loaded:
-            print("Building dataset index (this may take a while for the first time)...")
-            self._build_index()
-            if use_metadata_cache:
-                self._save_metadata(metadata_path)
-        
-        print(f"CachedGraphDataset initialized with {len(self)} graphs, "
-              f"{self._num_node_features} node features, {self._num_classes} classes")
+        print(f"SimpleGraphDataset initialized with {len(self)} graphs, "
+              f"{self.num_node_features} node features, {self.num_classes} classes")
 
     def _build_index(self):
-        """Build index by scanning all files."""
-        self.index: List[Tuple[int, int]] = []
-        all_labels = []
+        """Build index by scanning all files and all graphs within each file."""
+        self.index = []
+        all_labels = set()
         
         for file_idx, fp in enumerate(tqdm(self.file_paths, desc="Scanning files")):
-            batch = self._load_file_direct(fp)
-            if isinstance(batch, list):
-                n_graphs = len(batch)
-                # Sample for metadata
-                if n_graphs > 0:
-                    graph = batch[0]
-                    if file_idx == 0:
-                        self._num_node_features = graph.num_node_features
-                    if hasattr(graph, "y"):
-                        if isinstance(graph.y, torch.Tensor):
-                            if graph.y.dim() == 0:
-                                all_labels.append(graph.y.item())
-                            else:
-                                all_labels.extend(graph.y.tolist())
-                        else:
-                            all_labels.append(graph.y)
-            else:
-                n_graphs = 1
-                if file_idx == 0:
-                    self._num_node_features = batch.num_node_features
-                if hasattr(batch, "y"):
-                    if isinstance(batch.y, torch.Tensor):
-                        if batch.y.dim() == 0:
-                            all_labels.append(batch.y.item())
-                        else:
-                            all_labels.extend(batch.y.tolist())
-                    else:
-                        all_labels.append(batch.y)
-            
-            self.index.extend([(file_idx, i) for i in range(n_graphs)])
-            del batch
-            
-            if file_idx % 10 == 0:
-                gc.collect()
+            try:
+                # Load file to get number of graphs
+                if self.file_type == "pt":
+                    batch = torch.load(fp, map_location='cpu')
+                else:
+                    with open(fp, 'rb') as f:
+                        batch = pickle.load(f)
+                
+                # Handle batch vs single graph
+                if isinstance(batch, list):
+                    n_graphs = len(batch)
+                    # Get metadata from all graphs
+                    for graph in batch:
+                        if hasattr(graph, 'x') and graph.x is not None and hasattr(graph.x, 'size') and len(graph.x.size()) > 1:
+                            self._num_node_features = graph.x.size(1)
+                        if hasattr(graph, 'y'):
+                            label = graph.y.item() if hasattr(graph.y, 'item') else graph.y
+                            if isinstance(label, (int, float)) or (hasattr(label, 'dim') and label.dim() == 0):
+                                all_labels.add(int(label))
+                else:
+                    n_graphs = 1
+                    if hasattr(batch, 'x') and batch.x is not None and hasattr(batch.x, 'size') and len(batch.x.size()) > 1:
+                        self._num_node_features = batch.x.size(1)
+                    if hasattr(batch, 'y'):
+                        label = batch.y.item() if hasattr(batch.y, 'item') else batch.y
+                        if isinstance(label, (int, float)) or (hasattr(label, 'dim') and label.dim() == 0):
+                            all_labels.add(int(label))
+                
+                # Add each graph in this file to the index
+                for local_idx in range(n_graphs):
+                    self.index.append((file_idx, local_idx))
+                
+                # Print progress
+                print(f"  Found {n_graphs} graphs in {os.path.basename(fp)}")
+                
+            except Exception as e:
+                print(f"Error processing file {fp}: {e}")
+                raise
+            finally:
+                # Clean up
+                if 'batch' in locals():
+                    del batch
+                if file_idx % 10 == 0:
+                    gc.collect()
         
-        # Determine number of classes
+        # Set number of classes
         if all_labels:
-            unique_labels = set(all_labels)
-            self._num_classes = len(unique_labels)
-            print(f"Detected labels: {sorted(unique_labels)}")
-            
-            if 'ag_news' in str(self.root_dir).lower():
-                expected_labels = {0, 1, 2, 3}
-                if unique_labels != expected_labels:
-                    print(f"Warning: AG News dataset should have labels {expected_labels}, but found {unique_labels}")
-                    self._num_classes = 4
+            self._num_classes = len(all_labels)
+            print(f"Detected {self._num_classes} unique labels: {sorted(all_labels)}")
         else:
-            self._num_classes = 1
+            self._num_classes = 2  # Default for binary classification
+            print("Warning: No labels found, defaulting to binary classification")
+            
+        # If we couldn't determine num_node_features, set a default
+        if not hasattr(self, '_num_node_features'):
+            self._num_node_features = 768  # Common default for BERT-based features
+            print(f"Warning: Could not determine num_node_features, using default: {self._num_node_features}")
+            
+        print(f"Total graphs indexed: {len(self.index)}")
 
     def _load_metadata(self, metadata_path: str) -> bool:
         """Load metadata from cache file."""
@@ -294,63 +347,44 @@ class CachedGraphDataset(Dataset):
         return len(self.index)
 
     def get(self, idx: int) -> Data:
+        """Get a single graph by index."""
         if idx < 0 or idx >= len(self):
             raise IndexError(f"Index {idx} out of range for dataset with {len(self)} items")
-            
+        
+        # Get the file index and local graph index from our pre-built index
         file_idx, local_idx = self.index[idx]
         file_path = self.file_paths[file_idx]
         
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Batch file not found: {file_path}")
-        
         try:
-            # Debug: Print progress
-            # if idx % 1000 == 0:
-            #     print(f"\nLoading item {idx}/{len(self)} from {os.path.basename(file_path)} (local_idx={local_idx})")
+            # Load the file
+            if self.file_type == 'pt':
+                batch = torch.load(file_path, map_location='cpu')
+            else:
+                with open(file_path, 'rb') as f:
+                    batch = pickle.load(f)
             
-            # Try to get from cache first
-            batch = self.batch_cache.get(file_path)
-            
-            # If not in cache, load from disk
-            if batch is None:
-                try:
-                    batch = self._load_file(file_path)
-                    if batch is None:
-                        raise RuntimeError(f"Failed to load batch from {file_path}")
-                    
-                    # Add to cache if caching is enabled
-                    if self.batch_cache.max_size > 0:
-                        self.batch_cache.put(file_path, batch)
-                except Exception as e:
-                    print(f"Error loading file {file_path}: {str(e)}")
-                    raise
-            
-            # If batch is a list, index into it
+            # Get the specific graph
             if isinstance(batch, list):
-                if local_idx >= len(batch):
-                    raise IndexError(f"Local index {local_idx} out of range for batch of size {len(batch)} in {file_path}")
                 graph = batch[local_idx]
             else:
-                # If it's a single graph, verify local_idx is 0
-                if local_idx != 0:
-                    # If we get here, it means we have a single graph but are trying to access it with local_idx > 0
-                    # This can happen if the metadata cache is out of sync with the actual data
-                    # In this case, we'll treat it as a single-graph file and return the graph
-                    # but we'll log a warning
-                    print(f"Warning: Expected local_idx=0 for non-list batch, got {local_idx} in {file_path}")
-                    print(f"This could indicate a metadata cache inconsistency. The file contains a single graph.")
                 graph = batch
-            
-            # Validate the graph
-            self._validate_graph(graph, idx, file_path)
+                
+            # Ensure we have a valid graph with required attributes
+            if not hasattr(graph, 'x') or graph.x is None:
+                raise ValueError(f"Graph at index {idx} (file: {os.path.basename(file_path)}, position: {local_idx}) has no node features")
+                
+            if not hasattr(graph, 'edge_index') or graph.edge_index is None:
+                raise ValueError(f"Graph at index {idx} (file: {os.path.basename(file_path)}, position: {local_idx}) has no edge indices")
+                
+            # Labels are optional during inference, but we'll warn if they're missing
+            if not hasattr(graph, 'y'):
+                print(f"Warning: Graph at index {idx} (file: {os.path.basename(file_path)}, position: {local_idx}) has no label (y)")
             
             return graph
             
         except Exception as e:
-            print(f"\nError loading item {idx} from {file_path} (local_idx={local_idx}): {str(e)}")
+            print(f"Error loading graph {idx} from {os.path.basename(file_path)}[{local_idx}]: {e}")
             print(f"File size: {os.path.getsize(file_path) / (1024*1024):.2f} MB")
-            import traceback
-            traceback.print_exc()
             raise
             
     def _validate_graph(self, graph, idx: int, file_path: str):
@@ -373,10 +407,12 @@ class CachedGraphDataset(Dataset):
 
     @property
     def num_node_features(self) -> int:
+        """Return the number of node features."""
         return self._num_node_features
-
+        
     @property
     def num_classes(self) -> int:
+        """Return the number of classes."""
         return self._num_classes
 
 
@@ -496,147 +532,71 @@ class GNNClassifier(nn.Module):
         x = apply_pooling(x, self.pooling, batch)
         
         # Apply classification head
-        x = self.classifier(x)
-        
-        return x
+        return self.classifier(x)
 
 
-def load_graph_data_optimized(
+def load_graph_data(
     data_dir: str,
     batch_size: int = 32,
     shuffle: bool = True,
     num_workers: int = 4,
-    cache_size: int = 0,
-    precomputed: bool = False,
-    max_files: Optional[int] = None,
-) -> Tuple[Any, PyGDataLoader]:
+    **kwargs
+) -> Tuple[Dataset, DataLoader]:
     """
-    Return (dataset, dataloader) with optimized caching.
+    Load graph data using standard PyTorch Geometric dataset and dataloader.
     
     Args:
-        data_dir: Directory containing graph data
+        data_dir: Directory containing graph data files (.pt or .pkl)
         batch_size: Number of graphs per batch
         shuffle: Whether to shuffle the data
         num_workers: Number of worker processes for data loading
-        cache_size: Number of batch files to keep in memory
-        precomputed: If True, use precomputed graphs (k-NN or windowed)
-        max_files: Maximum number of batch files to load (for testing)
+        **kwargs: Additional arguments passed to DataLoader
+    
+    Returns:
+        Tuple of (dataset, dataloader)
     """
-    # print(f"\n{'='*50}\nLoading data from: {data_dir}")
-    # print(f"Batch size: {batch_size}, Shuffle: {shuffle}, Workers: {num_workers}")
+    print(f"\n{'='*50}")
+    print(f"Loading graph data from: {data_dir}")
+    print(f"Batch size: {batch_size}, Shuffle: {shuffle}, Workers: {num_workers}")
+    print(f"{'='*50}")
     
-    # Check if directory exists
-    if not os.path.exists(data_dir):
-        raise FileNotFoundError(f"Data directory not found: {data_dir}")
+    # Initialize dataset
+    dataset = SimpleGraphDataset(root_dir=data_dir)
     
-    # Check for graph files
-    pt_files = sorted(glob.glob(os.path.join(data_dir, "*.pt")))
-    pkl_files = sorted(glob.glob(os.path.join(data_dir, "*.pkl")))
+    # Create dataloader
+    loader = PyGDataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=False,
+        **kwargs
+    )
     
-    if not (pt_files or pkl_files):
-        raise RuntimeError(f"No .pt or .pkl graph files found in {data_dir}")
+    # Print dataset info
+    print(f"\nDataset loaded successfully with {len(dataset)} graphs")
+    print(f"Number of node features: {dataset.num_node_features}")
+    print(f"Number of classes: {dataset.num_classes}")
     
-    print(f"Found {len(pt_files) + len(pkl_files)} graph files")
-    
+    # Check first batch
     try:
-        # Initialize dataset with caching disabled
-        print("Initializing CachedGraphDataset...")
-        dataset = CachedGraphDataset(
-            root_dir=data_dir,
-            cache_size=cache_size,
-            use_metadata_cache=True
-        )
+        first_batch = next(iter(loader))
+        print(f"\nFirst batch info:")
+        print(f"  Type: {type(first_batch)}")
+        print(f"  Number of graphs: {first_batch.num_graphs if hasattr(first_batch, 'num_graphs') else 'N/A'}")
+        print(f"  Batch tensor: {first_batch.batch if hasattr(first_batch, 'batch') else 'N/A'}")
+        print(f"  Node features shape: {first_batch.x.shape if hasattr(first_batch.x, 'shape') else 'N/A'}")
+        print(f"  Edge indices shape: {first_batch.edge_index.shape if hasattr(first_batch.edge_index, 'shape') else 'N/A'}")
+        print(f"  Labels shape: {first_batch.y.shape if hasattr(first_batch.y, 'shape') else 'N/A'}")
         
-        # Print dataset statistics
-        print(f"\nDataset Info:")
-        print(f"  Number of graphs: {len(dataset)}")
-        print(f"  Node features: {dataset.num_node_features}")
-        print(f"  Number of classes: {dataset.num_classes}")
-        
-        # Check if we have any samples
-        if len(dataset) == 0:
-            raise RuntimeError("Dataset is empty!")
-            
-        # Try to load the first sample to verify data integrity
-        try:
-            sample = dataset[0]
-            print("\nSample data check:")
-            print(f"  Sample type: {type(sample)}")
-            print(f"  Sample attributes: {[attr for attr in dir(sample) if not attr.startswith('_')]}")
-            if hasattr(sample, 'y'):
-                print(f"  Label shape: {sample.y.shape if hasattr(sample.y, 'shape') else 'N/A'}")
-                print(f"  Label values: {torch.unique(sample.y) if hasattr(sample.y, 'shape') else 'N/A'}")
-            if hasattr(sample, 'x'):
-                print(f"  Node features shape: {sample.x.shape if hasattr(sample.x, 'shape') else 'N/A'}")
-        except Exception as e:
-            print(f"\nWarning: Failed to load sample - {str(e)}")
-        
-        # Set up PyG DataLoader with optimized settings
-        loader = PyGDataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            pin_memory=False,  # Disable pin_memory to avoid memory issues
-            persistent_workers=False,  # Disable persistent workers
-            drop_last=True,  # Drop last incomplete batch
-            worker_init_fn=lambda _: np.random.seed(int(torch.initial_seed()) % (2**32 - 1))
-        )
-        
-        # Test the first batch
-        print("\nTesting first batch...")
-        try:
-            first_batch = next(iter(loader))
-            print(f"First batch loaded successfully!")
-            print(f"  Batch type: {type(first_batch)}")
-            print(f"  Batch attributes: {[attr for attr in dir(first_batch) if not attr.startswith('_')]}")
-            if hasattr(first_batch, 'y'):
-                print(f"  Labels shape: {first_batch.y.shape if hasattr(first_batch.y, 'shape') else 'N/A'}")
-                print(f"  Unique labels: {torch.unique(first_batch.y) if hasattr(first_batch.y, 'shape') else 'N/A'}")
-        except Exception as e:
-            print(f"\nError loading first batch: {str(e)}")
-            import traceback
-            traceback.print_exc()
-        
-        print(f"{'='*50}\n")
         return dataset, loader
         
     except Exception as e:
-        print(f"\nError in load_graph_data_optimized: {str(e)}")
+        print(f"\nError in load_graph_data: {str(e)}")
         import traceback
         traceback.print_exc()
         raise
-
-    if precomputed:
-        from precomputed_dataset import PrecomputedGraphDataset, load_precomputed_data
-        print("Loading precomputed graphs...")
-        return load_precomputed_data(
-            data_dir, 
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=min(4, num_workers),  # Use fewer workers for precomputed data
-            max_files=max_files
-        )
-    else:
-        print("Loading raw graphs (will be processed on-the-fly)...")
-        dataset = CachedGraphDataset(data_dir, cache_size=cache_size)
-        
-        def worker_init_fn(worker_id):
-            worker_seed = torch.initial_seed() % 2**32
-            np.random.seed(worker_seed)
-            random.seed(worker_seed)
-
-        dataloader = DataLoader(
-            dataset, 
-            batch_size=batch_size, 
-            shuffle=True,  
-            num_workers=min(2, num_workers),  
-            pin_memory=False,  # Disable pin_memory
-            drop_last=True,  
-            worker_init_fn=worker_init_fn,  
-            persistent_workers=False  # Disable persistent_workers
-        )
-        return dataset, dataloader
 
 
 class GNNTrainer:
@@ -646,6 +606,18 @@ class GNNTrainer:
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.start_time = time.time()
+        self.patience_counter = 0
+        self.peak_memory = 0
+        self.current_epoch = 0  # Initialize current_epoch counter
+        
+        # Initialize gradient scaler for mixed precision training
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.device.type == 'cuda')
+        
+        # Gradient accumulation steps (process smaller batches but update less frequently)
+        self.gradient_accumulation_steps = max(1, config.get('gradient_accumulation_steps', 1))
+        
+        # Track peak memory usage
+        self.peak_memory = 0
         
         # Print system info
         print("\n" + "="*50)
@@ -657,11 +629,6 @@ class GNNTrainer:
         
         # Memory usage before loading data
         mem_before = get_memory_usage()
-        
-        # Load datasets with optimized caching
-        cache_size = config.get('cache_size', 3)
-        precomputed = config.get('precomputed', False)
-        max_files = config.get('max_files')
         
         # Print config
         print("\nTraining Configuration:")
@@ -676,27 +643,21 @@ class GNNTrainer:
             raise ValueError("train_data_dir must be specified in config")
             
         print("\n[1/3] Loading training data...")
-        self.train_dataset, self.train_loader = load_graph_data_optimized(
-            config['train_data_dir'], 
+        self.train_dataset, self.train_loader = load_graph_data(
+            data_dir=config['train_data_dir'], 
             batch_size=config['batch_size'], 
             shuffle=True, 
-            num_workers=config['num_workers'],
-            cache_size=cache_size,
-            precomputed=precomputed,
-            max_files=max_files
+            num_workers=config['num_workers']
         )
         
         # Validation data (optional but recommended)
         if config.get('val_data_dir'):
             print("\n[2/3] Loading validation data...")
-            self.val_dataset, self.val_loader = load_graph_data_optimized(
-                config['val_data_dir'], 
+            self.val_dataset, self.val_loader = load_graph_data(
+                data_dir=config['val_data_dir'], 
                 batch_size=config['batch_size'], 
                 shuffle=False, 
-                num_workers=config['num_workers'],
-                cache_size=cache_size,
-                precomputed=precomputed,
-                max_files=max_files
+                num_workers=config['num_workers']
             )
             self.use_validation = True
         else:
@@ -708,14 +669,11 @@ class GNNTrainer:
         # Test data (optional)
         if config.get('test_data_dir'):
             print("\n[3/3] Loading test data...")
-            self.test_dataset, self.test_loader = load_graph_data_optimized(
-                config['test_data_dir'], 
+            self.test_dataset, self.test_loader = load_graph_data(
+                data_dir=config['test_data_dir'], 
                 batch_size=config['batch_size'], 
                 shuffle=False, 
-                num_workers=config['num_workers'],
-                cache_size=cache_size,
-                precomputed=precomputed,
-                max_files=max_files
+                num_workers=config['num_workers']
             )
             self.use_test = True
         else:
@@ -771,90 +729,129 @@ class GNNTrainer:
         
         print(f"Model initialized with {sum(p.numel() for p in self.model.parameters())} parameters")
 
-    def train_epoch(self):
-        """Train for one epoch with gradient clipping and better memory management."""
+    def _free_memory(self):
+        """Simple memory cleanup."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    def save_model(self, path: str, epoch: int, val_loss: float, val_acc: float):
+        """Save model checkpoint."""
+        try:
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'best_val_loss': self.best_val_loss,
+                'best_val_acc': self.best_val_acc,
+                'config': self.config
+            }
+            if self.scheduler is not None:
+                checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
+            
+            # Create directory if it doesn't exist
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            
+            # Save the checkpoint
+            torch.save(checkpoint, path)
+            print(f"Model saved to {path}")
+            return True
+        except Exception as e:
+            print(f"Error saving model: {str(e)}")
+            return False
+
+    def _check_memory_leak(self):
+        """Check for memory leaks by comparing current memory usage to baseline."""
+        if not hasattr(self, '_baseline_memory'):
+            self._baseline_memory = tracemalloc.take_snapshot()
+            return
+            
+        current_snapshot = tracemalloc.take_snapshot()
+        top_stats = current_snapshot.compare_to(self._baseline_memory, 'lineno')
+        
+        print("\n" + "="*50)
+        print("Memory Leak Analysis:")
+        print("Top 10 memory increases:")
+        for stat in top_stats[:10]:
+            if stat.size_diff > 0:  # Only show increases
+                print(stat)
+        print("="*50 + "\n")
+        
+        # Update baseline for next check
+        self._baseline_memory = current_snapshot
+        
+    def _log_memory_usage(self, prefix=""):
+        """Log current memory usage."""
+        if not hasattr(self, 'peak_memory'):
+            self.peak_memory = 0
+            
+        process = psutil.Process()
+        mem_info = process.memory_info()
+        rss_mb = mem_info.rss / (1024 * 1024)  # Convert to MB
+        
+        self.peak_memory = max(self.peak_memory, rss_mb)
+        
+        gpu_mem = 0
+        if torch.cuda.is_available():
+            gpu_mem = torch.cuda.memory_allocated() / (1024 * 1024)  # MB
+            torch.cuda.reset_peak_memory_stats()
+            
+        print(f"{prefix} Memory - RSS: {rss_mb:.2f}MB (Peak: {self.peak_memory:.2f}MB), "
+              f"GPU: {gpu_mem:.2f}MB")
+              
+    def train_epoch(self) -> Tuple[float, float]:
+        """Standard PyTorch Geometric training epoch."""
         self.model.train()
-        total_loss = 0
+        total_loss = 0.0
         total_correct = 0
         total_samples = 0
         
-        # Initialize tqdm progress bar
-        pbar = tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc="Training")
+        # Initialize progress bar
+        pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch + 1}/{self.config['epochs']}")
         
-        for batch_idx, batch in pbar:
+        for batch in pbar:
             try:
-                # Move batch to device
+                # Move data to device
                 batch = batch.to(self.device)
-                    
+                
                 # Forward pass
-                out = self.model(batch)
-                
-                # Calculate loss
-                loss = F.cross_entropy(out, batch.y, reduction='mean')
-                
-                if torch.isnan(loss) or torch.isinf(loss):
-                    print(f"\nWarning: Invalid loss value in batch {batch_idx}")
-                    print(f"  Loss: {loss.item()}")
-                    continue
-                
-                # Backward pass with gradient clipping
                 self.optimizer.zero_grad()
+                out = self.model(batch)
+                loss = F.cross_entropy(out, batch.y)
+                
+                # Backward pass and optimize
                 loss.backward()
+                self.optimizer.step()
                 
-                # Gradient clipping to prevent exploding gradients
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                
-                # Check for invalid gradients
-                valid_gradients = True
-                for name, param in self.model.named_parameters():
-                    if param.grad is not None:
-                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                            print(f"\nWarning: Invalid gradients in {name}")
-                            valid_gradients = False
-                            break
-                
-                if valid_gradients:
-                    self.optimizer.step()
-                
-                # Calculate accuracy
-                with torch.no_grad():
-                    pred = out.argmax(dim=1)
-                    correct = (pred == batch.y).sum().item()
-                    batch_size = len(batch.y)
-                    
-                    # Update metrics
-                    total_loss += loss.item() * batch_size
-                    total_correct += correct
-                    total_samples += batch_size
+                # Calculate metrics
+                pred = out.argmax(dim=1)
+                correct = (pred == batch.y).sum().item()
+                total_correct += correct
+                total_samples += batch.y.size(0)
+                total_loss += loss.item() * batch.y.size(0)
                 
                 # Update progress bar
-                if total_samples > 0:
-                    pbar.set_postfix({
-                        'Loss': f"{total_loss/total_samples:.4f}",
-                        'Acc': f"{total_correct/total_samples:.4f}"
-                    })
-                
-                # Clear memory
-                del out, loss, pred
-                if batch_idx % 10 == 0:
-                    gc.collect()
-                    if self.device.type == 'cuda':
-                        torch.cuda.empty_cache()
+                avg_loss = total_loss / total_samples
+                accuracy = 100.0 * total_correct / total_samples
+                pbar.set_postfix(loss=avg_loss, acc=f"{accuracy:.2f}%")
                 
             except RuntimeError as e:
                 if 'out of memory' in str(e).lower():
-                    print(f"\nOOM on batch {batch_idx}, skipping batch...")
-                    torch.cuda.empty_cache()
-                    gc.collect()
+                    print("\nOut of memory, skipping batch...")
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     continue
-                else:
-                    print(f"\nError on batch {batch_idx}: {str(e)}")
-                    raise
-            except Exception as e:
-                print(f"\nUnexpected error on batch {batch_idx}: {str(e)}")
-                import traceback
-                traceback.print_exc()
                 raise
+                
+        # Calculate epoch metrics
+        avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
+        accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+        
+        print(f"\nEpoch {self.current_epoch + 1} - Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f}")
+        
+        # Update epoch counter
+        self.current_epoch += 1
+        
+        return avg_loss, accuracy
         
         pbar.close()
         
@@ -876,250 +873,152 @@ class GNNTrainer:
         print(f"Average Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f}")
         print(f"{'='*50}\n")
         
+        # Update current epoch counter
+        self.current_epoch += 1
+        
         return avg_loss, accuracy
-
-    def validate(self):
-        """
-        Validate the model.
-        
-        Returns:
-            tuple: (avg_loss, accuracy) if validation data is available, None otherwise
-        """
-        if not self.use_validation or self.val_loader is None:
-            print("No validation data provided, skipping validation")
-            return None
-            
-        self.model.eval()
-        total_loss = 0
-        total_correct = 0
-        total_samples = 0
-        processed_batches = 0
-        
-        print(f"\n{'='*50}\nStarting validation")
-        print(f"Number of validation batches: {len(self.val_loader)}")
-        
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(tqdm(self.val_loader, desc='Validation')):
-                try:
-                    # Debug: Print first batch info
-                    # if batch_idx == 0:
-                    #     print(f"\nFirst validation batch info:")
-                    #     print(f"  Batch type: {type(batch)}")
-                    #     print(f"  Batch keys: {getattr(batch, 'keys', 'N/A')}")
-                    #     print(f"  Batch size: {getattr(batch, 'y', None).shape if hasattr(batch, 'y') else 'N/A'}")
-                    
-                    # Skip batches without labels
-                    if not hasattr(batch, 'y') or batch.y is None:
-                        print(f"\nWarning: Validation batch {batch_idx} has no labels (batch.y is None)")
-                        continue
-                    
-                    # Move to device
-                    batch = batch.to(self.device)
-                    
-                    # Forward pass
-                    out = self.model(batch)
-                    
-                    # Check for invalid outputs
-                    if torch.isnan(out).any() or torch.isinf(out).any():
-                        print(f"\nWarning: Invalid model outputs in validation batch {batch_idx}")
-                        print(f"  Output min: {out.min().item()}, max: {out.max().item()}")
-                        print(f"  Output contains NaN: {torch.isnan(out).any().item()}")
-                        print(f"  Output contains Inf: {torch.isinf(out).any().item()}")
-                        continue
-                    
-                    # Calculate loss
-                    loss = F.cross_entropy(out, batch.y, reduction='mean')
-                    
-                    if torch.isnan(loss) or torch.isinf(loss):
-                        print(f"\nWarning: Invalid loss in validation batch {batch_idx}")
-                        print(f"  Loss: {loss.item()}")
-                        continue
-                    
-                    # Calculate accuracy
-                    pred = out.argmax(dim=1)
-                    correct = (pred == batch.y).sum().item()
-                    batch_size = batch.y.size(0)
-                    
-                    # Update metrics
-                    total_loss += loss.item() * batch_size
-                    total_correct += correct
-                    total_samples += batch_size
-                    processed_batches += 1
-                    
-                    # Clean up
-                    del out, loss, pred, batch
-                    
-                except Exception as e:
-                    print(f"\nError processing validation batch {batch_idx}: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-                    continue
-                
-                # Clear cache every 10 batches
-                if batch_idx % 10 == 0 and self.device.type == 'cuda':
-                    torch.cuda.empty_cache()
-        
-        # Calculate final metrics
-        if total_samples > 0:
-            avg_loss = total_loss / total_samples
-            accuracy = total_correct / total_samples
-            print(f"\nValidation complete - Processed {total_samples} samples")
-            print(f"Average Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f}")
-            print(f"Processed {processed_batches}/{len(self.val_loader)} batches")
-        else:
-            print("\nWarning: No valid validation samples processed")
-            avg_loss = float('inf')
-            accuracy = 0.0
-        
-        print(f"{'='*50}\n")
-        return avg_loss, accuracy
-
-    def test(self):
-        """
-        Test the model on test set.
-        
-        Returns:
-            dict: Dictionary containing test metrics if test data is available, None otherwise
-        """
-        if not self.use_test or self.test_loader is None:
-            print("No test data provided, skipping testing")
-            return None
-            
-        self.model.eval()
-        all_preds = []
-        all_labels = []
-        total_loss = 0
-        total_samples = 0
-        
-        with torch.no_grad():
-            for batch in tqdm(self.test_loader, desc='Testing'):
-                batch = batch.to(self.device)
-                out = self.model(batch)
-                loss = F.cross_entropy(out, batch.y, reduction='sum')
-                
-                total_loss += loss.item()
-                pred = out.argmax(dim=1)
-                all_preds.extend(pred.cpu().numpy())
-                all_labels.extend(batch.y.cpu().numpy())
-                total_samples += len(batch.y)
-                del out, loss, pred, batch
-                gc.collect()
-        
-        # Handle case where no samples were processed
-        if total_samples == 0:
-            print("Warning: No test samples processed")
-            return {
-                'loss': float('inf'),
-                'accuracy': 0.0,
-                'precision': 0.0,
-                'recall': 0.0,
-                'f1': 0.0,
-                'classification_report': 'No test samples available'
-            }
-        
-        # Calculate metrics
-        avg_loss = total_loss / total_samples  # Average over samples, not batches
-        accuracy = accuracy_score(all_labels, all_preds)
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            all_labels, all_preds, average='weighted', zero_division=0
-        )
-        
-        # Generate classification report
-        report = classification_report(all_labels, all_preds, zero_division=0)
-        
-        # Print summary
-        print("\nTest Results:")
-        print(f"  Loss: {avg_loss:.4f}")
-        print(f"  Accuracy: {accuracy:.4f}")
-        print(f"  Precision: {precision:.4f}")
-        print(f"  Recall: {recall:.4f}")
-        print(f"  F1 Score: {f1:.4f}")
-        print("\nClassification Report:")
-        print(report)
-        
-        return {
-            'loss': avg_loss,
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1,
-            'classification_report': report
-        }
-
-    def save_model(self, path: str, epoch: int, val_loss: float, val_acc: float):
-        """Save model checkpoint."""
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'val_loss': val_loss,
-            'val_acc': val_acc,
-            'config': self.config
-        }, path)
-
-    def load_model(self, path: str):
-        """Load model checkpoint."""
-        checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        return checkpoint['epoch'], checkpoint['val_loss'], checkpoint['val_acc']
 
     def train(self):
-        """Complete training loop with early stopping."""
-        print(f"Starting training for {self.config['epochs']} epochs...")
+        """Complete training loop with early stopping and memory optimization."""
+        best_model_path = os.path.join(os.getcwd(), 'best_model.pt')
+        start_epoch = 0
+        
+        # Start memory tracking
+        tracemalloc.start()
+        snapshot1 = tracemalloc.take_snapshot()
+        print("Initial memory snapshot taken")
+        
+        # Load checkpoint if exists
+        if os.path.exists(best_model_path):
+            print("Loading checkpoint...")
+            # Take memory snapshot before loading checkpoint
+            snapshot_before = tracemalloc.take_snapshot()
+            
+            checkpoint = torch.load(best_model_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            if self.scheduler and 'scheduler_state_dict' in checkpoint:
+                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1
+            self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+            self.best_val_acc = checkpoint.get('best_val_acc', 0.0)
+            print(f"Resuming training from epoch {start_epoch}")
+            
+            # Log memory usage after loading checkpoint
+            snapshot_after = tracemalloc.take_snapshot()
+            print("\nMemory usage after loading checkpoint:")
+            display_top(snapshot_after.compare_to(snapshot_before, 'lineno'), limit=5)
+        
+        print(f"\nStarting training for {self.config['epochs']} epochs...")
+        print(f"Batch size: {self.config['batch_size']}, Gradient accumulation steps: {self.gradient_accumulation_steps}")
+        print(f"Effective batch size: {self.config['batch_size'] * self.gradient_accumulation_steps}\n")
+        
+        try:
+            for epoch in range(start_epoch, self.config['epochs']):
+                epoch_start_time = time.time()
+                print(f"\nEpoch {epoch + 1}/{self.config['epochs']}")
+                
+                # Take memory snapshot before epoch
+                if epoch % 2 == 0:  # Only track every 2nd epoch to reduce overhead
+                    snapshot_before = tracemalloc.take_snapshot()
+            
+                # Train for one epoch
+                train_loss, train_acc = self.train_epoch()
+                
+                # Free up memory before validation
+                self._free_memory()
+                
+                # Validate
+                val_metrics = self.validate()
+                val_loss = val_metrics[0] if val_metrics else float('inf')
+                val_acc = val_metrics[1] if val_metrics else 0.0
+                
+                # Update learning rate
+                if self.scheduler:
+                    if isinstance(self.scheduler, ReduceLROnPlateau):
+                        self.scheduler.step(val_loss)
+                    else:
+                        self.scheduler.step()
+                
+                # Save model if validation loss improved
+                if val_loss < self.best_val_loss:
+                    self.best_val_loss = val_loss
+                    self.best_val_acc = val_acc
+                    self.patience_counter = 0
+                    self.save_model(
+                        best_model_path,
+                        epoch,
+                        val_loss,
+                        val_acc
+                    )
+                    print(f"Saved best model with val_loss: {val_loss:.4f}, val_acc: {val_acc:.4f}")
+                
+                # Log memory usage after epoch
+                if epoch % 2 == 0:  # Only track every 2nd epoch to reduce overhead
+                    snapshot_after = tracemalloc.take_snapshot()
+                    print("\nMemory usage after epoch {}:".format(epoch + 1))
+                    display_top(snapshot_after.compare_to(snapshot_before, 'lineno'), limit=5)
+                
+                # Log memory usage
+                self._log_memory_usage(f"After epoch {epoch + 1}:")
+                
+                # Check for memory leaks
+                if epoch > 0 and epoch % 5 == 0:  # Check every 5 epochs
+                    self._check_memory_leak()
+                
+                # Early stopping
+                if self.patience_counter >= self.config['patience']:
+                    print(f"\nEarly stopping at epoch {epoch + 1} - No improvement for {self.config['patience']} epochs")
+                    break
+                
+                # Log epoch time and memory usage
+                epoch_time = time.time() - epoch_start_time
+                self._log_memory_usage(f"After epoch {epoch + 1}: ")
+                print(f"Epoch {epoch + 1} completed in {epoch_time:.2f} seconds")
+                print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, "
+                      f"Train Acc: {train_acc:.2f}%, Val Acc: {val_acc:.2f}%")
+                
+                # Force garbage collection between epochs
+                self._free_memory()
+            
+            print("\nTraining completed!")
+            
+        except RuntimeError as e:
+            print(f"\nTraining interrupted due to error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        
+        # Load best model for testing
+        if os.path.exists(best_model_path):
+            checkpoint = torch.load(best_model_path, map_location=self.device)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            print(f"\nLoaded best model from epoch {checkpoint['epoch'] + 1} with val_loss {checkpoint['val_loss']:.4f}")
+        
+        # Test if test data is available
+        if self.use_test and self.test_loader is not None:
+            print("\nTesting on test set...")
+            test_metrics = self.test()
+            if test_metrics:
+                print(f"Test Loss: {test_metrics['loss']:.4f}, Test Acc: {test_metrics['accuracy']:.4f}")
         
         # Create output directory
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = f"gnn_training_{timestamp}"
         os.makedirs(output_dir, exist_ok=True)
         
-        # Save config
-        with open(os.path.join(output_dir, 'config.json'), 'w') as f:
-            json.dump(self.config, f, indent=2)
-        
-        # Initialize test_results to None
-        test_results = None
-        
         try:
-            for epoch in range(self.config['epochs']):
-                print(f"\nEpoch {epoch+1}/{self.config['epochs']}")
-                
-                # Training
-                train_loss, train_acc = self.train_epoch()
-                print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
-                
-                # Validation (if available)
-                if self.use_validation and self.val_loader is not None:
-                    val_results = self.validate()
-                    if val_results is not None:
-                        val_loss, val_acc = val_results
-                        print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
-                        
-                        # Update learning rate scheduler
-                        if self.scheduler is not None:
-                            if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                                self.scheduler.step(val_loss)
-                            else:
-                                self.scheduler.step()
-                        
-                        # Save best model based on validation loss
-                        if val_loss < self.best_val_loss:
-                            self.best_val_loss = val_loss
-                            self.best_val_acc = val_acc
-                            best_model_path = os.path.join(output_dir, 'best_model.pth')
-                            self.save_model(best_model_path, epoch, val_loss, val_acc)
-                            print(f"Saved best model to {best_model_path}")
-                            
-                        # Early stopping
-                        self.patience_counter += 1
-                        if self.patience_counter >= self.config['patience']:
-                            print(f"Early stopping triggered after {epoch+1} epochs")
-                            break
-                else:
-                    # If no validation, save model every epoch
-                    checkpoint_path = os.path.join(output_dir, f'model_epoch_{epoch+1}.pth')
-                    self.save_model(checkpoint_path, epoch, train_loss, train_acc)
-                    print(f"Model checkpoint saved to {checkpoint_path}")
+            # Save config
+            with open(os.path.join(output_dir, 'config.json'), 'w') as f:
+                json.dump(self.config, f, indent=2)
+            
+            # Save the final model
+            final_model_path = os.path.join(output_dir, 'final_model.pth')
+            self.save_model(final_model_path, epoch, val_loss, val_acc)
+            print(f"Final model saved to {final_model_path}")
+            
+            # If using validation, also save the best model
+            if self.use_validation and hasattr(self, 'best_model_path'):
+                print(f"Best model saved to {self.best_model_path}")
         
         except Exception as e:
             print(f"\nError during training: {str(e)}")
@@ -1200,7 +1099,7 @@ def main():
     parser.add_argument('--optimizer', type=str, default='Adam')
     parser.add_argument('--scheduler', type=str, default='ReduceLROnPlateau')
     parser.add_argument('--patience', type=int, default=5)
-    parser.add_argument('--num_workers', type=int, default=0)
+    parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--cache_size', type=int, default=0, help='Set to 0 to disable caching')
     
     args = parser.parse_args()

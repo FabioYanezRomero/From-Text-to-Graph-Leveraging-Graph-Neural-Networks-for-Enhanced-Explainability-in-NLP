@@ -6,7 +6,7 @@ transformers
 datasets
 networkx
 pandas
-numpy>=1.21.0,<2.0.0  # Pinning to 1.x for compatibility
+numpy
 scipy
 matplotlib
 seaborn
