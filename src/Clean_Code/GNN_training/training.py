@@ -22,53 +22,6 @@ from typing import List, Tuple, Dict, Any, Optional, Union
 from datetime import datetime
 from collections import OrderedDict
 from pathlib import Path
-import tracemalloc
-
-# Global variable to track memory snapshots
-snapshots = []
-
-def display_top(snapshot, key_type='lineno', limit=10):
-    """Display top memory usage."""
-    snapshot = snapshot.filter_traces((
-        tracemalloc.Filter(False, "<frozen importlib._bootstrap"),
-        tracemalloc.Filter(False, "<unknown>"),
-    ))
-    top_stats = snapshot.statistics(key_type)
-
-    result = []
-    result.append("Top %s lines" % limit)
-    for index, stat in enumerate(top_stats[:limit], 1):
-        frame = stat.traceback[0]
-        # replace "/path/to/module/file.py" with "module/file.py"
-        filename = os.sep.join(frame.filename.split(os.sep)[-2:])
-        result.append("#%s: %s:%s: %.1f KiB"
-                     % (index, filename, frame.lineno, stat.size / 1024))
-        line = linecache.getline(frame.filename, frame.lineno).strip()
-        if line:
-            result.append('    %s' % line)
-
-    other = top_stats[limit:]
-    if other:
-        size = sum(stat.size for stat in other)
-        result.append("%s other: %.1f KiB" % (len(other), size / 1024))
-    total = sum(stat.size for stat in top_stats)
-    result.append("Total allocated size: %.1f KiB" % (total / 1024))
-    return "\n".join(result)
-
-def take_memory_snapshot(label):
-    """Take and store a memory snapshot with a label."""
-    snapshot = tracemalloc.take_snapshot()
-    snapshots.append((label, snapshot))
-    if len(snapshots) > 1:
-        first = snapshots[0][1]
-        stats = first.compare_to(snapshot, 'lineno')
-        print(f"\n=== Memory comparison for {label} ===")
-        for stat in stats[:10]:  # Show top 10 differences
-            print(stat)
-    return snapshot
-
-tracemalloc.start()
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -112,39 +65,6 @@ def _log_memory_usage(prefix=""):
     print(f"{prefix}Memory usage: {mem['rss_gb']:.2f}GB RSS, {mem['vms_gb']:.2f}GB VMS ({mem['cpu_percent']:.1f}%)")
 
 __all__ = ["SimpleGraphDataset", "load_graph_data", "GNNClassifier", "GNNTrainer", "main"]
-
-
-class LRUCache:
-    """Simple LRU cache for batch files."""
-    
-    def __init__(self, max_size: int = 10):
-        self.max_size = max_size
-        self.cache = OrderedDict()
-        self.lock = threading.Lock()
-    
-    def get(self, key: str) -> Optional[Any]:
-        with self.lock:
-            if key in self.cache:
-                self.cache.move_to_end(key)
-                return self.cache[key]
-            return None
-    
-    def put(self, key: str, value: Any) -> None:
-        with self.lock:
-            # If max_size is 0, don't cache anything
-            if self.max_size <= 0:
-                return
-                
-            if key in self.cache:
-                self.cache.move_to_end(key)
-            else:
-                # Only remove oldest item if we've reached max size
-                if len(self.cache) >= self.max_size and self.cache:
-                    oldest_key = next(iter(self.cache))
-                    del self.cache[oldest_key]
-                    gc.collect()
-                self.cache[key] = value
-
 
 class SimpleGraphDataset(Dataset):
     """Standard PyTorch Geometric dataset for graph data."""
@@ -315,25 +235,6 @@ class SimpleGraphDataset(Dataset):
             if isinstance(data, list):
                 if not data:
                     raise ValueError(f"Empty batch list in {path}")
-                # print(f"  Loaded batch of {len(data)} graphs")
-                
-                # Print info about first graph
-                # if len(data) > 0:
-                #     first = data[0]
-                #     print(f"  First graph info:")
-                #     print(f"    Type: {type(first)}")
-                #     print(f"    Attributes: {[attr for attr in dir(first) if not attr.startswith('_')]}")
-                #     if hasattr(first, 'x'):
-                #         print(f"    Node features: {first.x.shape if hasattr(first.x, 'shape') else 'N/A'}")
-                #     if hasattr(first, 'y'):
-                #         print(f"    Label: {first.y}")
-                        
-            # If it's a single graph
-            #elif hasattr(data, 'x'):
-                # print(f"  Single graph with {data.num_nodes} nodes, {data.num_edges} edges")
-                #if hasattr(data, 'y'):
-                    # print(f"  Label: {data.y}")
-            
             return data
             
         except Exception as e:
@@ -463,8 +364,14 @@ class GNNClassifier(nn.Module):
         # Build GNN layers
         self.gnn_layers = self._build_gnn_layers(input_dim, hidden_dim, num_layers, module, layer_norm, heads)
         
-        # Classification head
-        self.classifier = MLP([hidden_dim, hidden_dim // 2, output_dim], dropout=dropout)
+        # Adjust classifier input dimension based on whether we're using attention heads
+        self.head_proj = None
+        if module in ['TransformerConv', 'GATConv', 'GATv2Conv'] and heads > 1:
+            # Add a projection layer to handle the concatenated heads
+            self.head_proj = nn.Linear(hidden_dim * heads, hidden_dim)
+            self.classifier = MLP([hidden_dim, hidden_dim // 2, output_dim], dropout=dropout)
+        else:
+            self.classifier = MLP([hidden_dim, hidden_dim // 2, output_dim], dropout=dropout)
 
     def _build_gnn_layers(self, input_dim, hidden_dim, num_layers, module, layer_norm, heads):
         """Build GNN layers based on the specified module type."""
@@ -506,26 +413,32 @@ class GNNClassifier(nn.Module):
         # Process through GNN layers
         for i, conv in enumerate(self.gnn_layers):
             if self.residual and i > 0:
-                prev_x = x.clone()
+                prev_x = x
                 
+            # For TransformerConv, ensure input dimension matches expected dimension
+            if self.module == 'TransformerConv' and hasattr(conv, 'in_channels'):
+                if x.size(-1) != conv.in_channels:
+                    # Project input to expected dimension
+                    x = F.linear(x, torch.eye(conv.in_channels, x.size(-1), device=x.device))
+            
             x = conv(x, edge_index)
             
             # Handle multi-head attention outputs for TransformerConv and GAT layers
-            if self.module in ['GATConv', 'GATv2Conv', 'TransformerConv'] and self.heads > 1:
-                # For the last layer, average the heads
-                if i == len(self.gnn_layers) - 1:
-                    x = x.mean(dim=1)  # Average over heads
-        
-            if self.residual and i > 0:
-                if x.size() == prev_x.size():
-                    x = x + prev_x
+            if (self.module in ['TransformerConv', 'GATConv', 'GATv2Conv'] and self.heads > 1):
+                # For the last layer, keep all heads and project if needed
+                if i == len(self.gnn_layers) - 1 and self.head_proj is not None:
+                    # Project the concatenated heads to hidden_dim
+                    x = self.head_proj(x)
+    
+            if self.residual and i > 0 and prev_x.size() == x.size():
+                x = x + prev_x
                     
             x = F.relu(x)
             
             if i < self.num_layers - 1:
                 x = F.dropout(x, p=self.dropout, training=self.training)
                 
-            if self.layer_norm and self.layer_norms is not None:
+            if self.layer_norm and self.layer_norms is not None and i < len(self.layer_norms):
                 x = self.layer_norms[i](x)
                 
         # Apply graph-level pooling
@@ -729,6 +642,56 @@ class GNNTrainer:
         
         print(f"Model initialized with {sum(p.numel() for p in self.model.parameters())} parameters")
 
+    def validate(self) -> Tuple[float, float]:
+        """Validate the model on the validation set.
+        
+        Returns:
+            Tuple of (average loss, accuracy)
+        """
+        if not self.use_validation or self.val_loader is None:
+            print("No validation data provided, skipping validation")
+            return float('inf'), 0.0
+            
+        self.model.eval()
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+        
+        with torch.no_grad():
+            for batch in tqdm(self.val_loader, desc="Validating"):
+                try:
+                    # Move data to device
+                    batch = batch.to(self.device)
+                    
+                    # Forward pass
+                    out = self.model(batch)
+                    loss = F.cross_entropy(out, batch.y)
+                    
+                    # Calculate accuracy
+                    pred = out.argmax(dim=1)
+                    correct = (pred == batch.y).sum().item()
+                    
+                    # Update metrics
+                    total_loss += loss.item() * batch.num_graphs
+                    total_correct += correct
+                    total_samples += batch.num_graphs
+                    
+                except Exception as e:
+                    print(f"Error during validation batch: {str(e)}")
+                    continue
+        
+        # Calculate metrics
+        avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
+        accuracy = 100.0 * total_correct / total_samples if total_samples > 0 else 0.0
+        
+        # Update training history
+        self.training_history['val_loss'].append(avg_loss)
+        self.training_history['val_acc'].append(accuracy)
+        
+        print(f"\nValidation - Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%")
+        
+        return avg_loss, accuracy
+        
     def _free_memory(self):
         """Simple memory cleanup."""
         if torch.cuda.is_available():
@@ -758,26 +721,6 @@ class GNNTrainer:
         except Exception as e:
             print(f"Error saving model: {str(e)}")
             return False
-
-    def _check_memory_leak(self):
-        """Check for memory leaks by comparing current memory usage to baseline."""
-        if not hasattr(self, '_baseline_memory'):
-            self._baseline_memory = tracemalloc.take_snapshot()
-            return
-            
-        current_snapshot = tracemalloc.take_snapshot()
-        top_stats = current_snapshot.compare_to(self._baseline_memory, 'lineno')
-        
-        print("\n" + "="*50)
-        print("Memory Leak Analysis:")
-        print("Top 10 memory increases:")
-        for stat in top_stats[:10]:
-            if stat.size_diff > 0:  # Only show increases
-                print(stat)
-        print("="*50 + "\n")
-        
-        # Update baseline for next check
-        self._baseline_memory = current_snapshot
         
     def _log_memory_usage(self, prefix=""):
         """Log current memory usage."""
@@ -883,45 +826,26 @@ class GNNTrainer:
         best_model_path = os.path.join(os.getcwd(), 'best_model.pt')
         start_epoch = 0
         
-        # Start memory tracking
-        tracemalloc.start()
-        snapshot1 = tracemalloc.take_snapshot()
-        print("Initial memory snapshot taken")
-        
-        # Load checkpoint if exists
+        # Always start fresh - remove any existing checkpoints
         if os.path.exists(best_model_path):
-            print("Loading checkpoint...")
-            # Take memory snapshot before loading checkpoint
-            snapshot_before = tracemalloc.take_snapshot()
-            
-            checkpoint = torch.load(best_model_path, map_location=self.device)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            if self.scheduler and 'scheduler_state_dict' in checkpoint:
-                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            start_epoch = checkpoint['epoch'] + 1
-            self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-            self.best_val_acc = checkpoint.get('best_val_acc', 0.0)
-            print(f"Resuming training from epoch {start_epoch}")
-            
-            # Log memory usage after loading checkpoint
-            snapshot_after = tracemalloc.take_snapshot()
-            print("\nMemory usage after loading checkpoint:")
-            display_top(snapshot_after.compare_to(snapshot_before, 'lineno'), limit=5)
+            print("Removing existing checkpoint to start fresh...")
+            os.remove(best_model_path)
+        start_epoch = 0
+        print("Starting fresh training from epoch 0")
         
         print(f"\nStarting training for {self.config['epochs']} epochs...")
         print(f"Batch size: {self.config['batch_size']}, Gradient accumulation steps: {self.gradient_accumulation_steps}")
         print(f"Effective batch size: {self.config['batch_size'] * self.gradient_accumulation_steps}\n")
+        
+        # Initialize variables for error handling
+        val_loss = float('inf')
+        val_acc = 0.0
         
         try:
             for epoch in range(start_epoch, self.config['epochs']):
                 epoch_start_time = time.time()
                 print(f"\nEpoch {epoch + 1}/{self.config['epochs']}")
                 
-                # Take memory snapshot before epoch
-                if epoch % 2 == 0:  # Only track every 2nd epoch to reduce overhead
-                    snapshot_before = tracemalloc.take_snapshot()
-            
                 # Train for one epoch
                 train_loss, train_acc = self.train_epoch()
                 
@@ -953,19 +877,6 @@ class GNNTrainer:
                     )
                     print(f"Saved best model with val_loss: {val_loss:.4f}, val_acc: {val_acc:.4f}")
                 
-                # Log memory usage after epoch
-                if epoch % 2 == 0:  # Only track every 2nd epoch to reduce overhead
-                    snapshot_after = tracemalloc.take_snapshot()
-                    print("\nMemory usage after epoch {}:".format(epoch + 1))
-                    display_top(snapshot_after.compare_to(snapshot_before, 'lineno'), limit=5)
-                
-                # Log memory usage
-                self._log_memory_usage(f"After epoch {epoch + 1}:")
-                
-                # Check for memory leaks
-                if epoch > 0 and epoch % 5 == 0:  # Check every 5 epochs
-                    self._check_memory_leak()
-                
                 # Early stopping
                 if self.patience_counter >= self.config['patience']:
                     print(f"\nEarly stopping at epoch {epoch + 1} - No improvement for {self.config['patience']} epochs")
@@ -973,7 +884,6 @@ class GNNTrainer:
                 
                 # Log epoch time and memory usage
                 epoch_time = time.time() - epoch_start_time
-                self._log_memory_usage(f"After epoch {epoch + 1}: ")
                 print(f"Epoch {epoch + 1} completed in {epoch_time:.2f} seconds")
                 print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, "
                       f"Train Acc: {train_acc:.2f}%, Val Acc: {val_acc:.2f}%")
@@ -991,8 +901,12 @@ class GNNTrainer:
         # Load best model for testing
         if os.path.exists(best_model_path):
             checkpoint = torch.load(best_model_path, map_location=self.device)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-            print(f"\nLoaded best model from epoch {checkpoint['epoch'] + 1} with val_loss {checkpoint['val_loss']:.4f}")
+            self.model.load_state_dict(checkpoint.get('model_state_dict', checkpoint))
+            
+            # Safely get values with defaults
+            epoch = checkpoint.get('epoch', 0)
+            val_loss = checkpoint.get('val_loss', 0.0)
+            print(f"\nLoaded best model from epoch {epoch + 1} with val_loss {val_loss:.4f}")
         
         # Test if test data is available
         if self.use_test and self.test_loader is not None:
@@ -1077,12 +991,12 @@ def main():
     
     # Data paths
     parser.add_argument('--train_data_dir', type=str, 
-                       default="/app/src/Clean_Code/output/gnn_embeddings/knn8/stanfordnlp/sst2/train/train")
+                       default="/app/src/Clean_Code/output/gnn_embeddings/fully_connected/stanfordnlp/sst2/train/train")
     parser.add_argument('--val_data_dir', type=str, 
-                       default="/app/src/Clean_Code/output/gnn_embeddings/knn8/stanfordnlp/sst2/validation/validation")
+                       default="/app/src/Clean_Code/output/gnn_embeddings/fully_connected/stanfordnlp/sst2/validation/validation")
     
     # Model architecture
-    parser.add_argument('--module', type=str, default='GCNConv')
+    parser.add_argument('--module', type=str, default='TransformerConv')
     parser.add_argument('--hidden_dim', type=int, default=128)
     parser.add_argument('--num_layers', type=int, default=2)
     parser.add_argument('--heads', type=int, default=4)

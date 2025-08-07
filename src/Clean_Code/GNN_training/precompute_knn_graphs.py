@@ -109,11 +109,11 @@ def process_batch_file(input_path: str, output_path: str, k: int):
 
 def main():
     parser = argparse.ArgumentParser(description='Precompute k-NN sparsified graphs')
-    parser.add_argument('--input_dir', type=str, default="/app/src/Clean_Code/output/gnn_embeddings/fully_connected/stanfordnlp/sst2/validation/validation",
+    parser.add_argument('--input_dir', type=str, default="/app/src/Clean_Code/output/gnn_embeddings/fully_connected/stanfordnlp/sst2/train/train",
                        help='Directory containing fully connected graph batch files')
-    parser.add_argument('--output_dir', type=str, default="/app/src/Clean_Code/output/gnn_embeddings/knn/stanfordnlp/sst2/validation/validation",
+    parser.add_argument('--output_dir', type=str, default="/app/src/Clean_Code/output/gnn_embeddings/knn/stanfordnlp/sst2/train/train",
                        help='Directory to save k-NN sparsified graph batch files')
-    parser.add_argument('--k', type=int, default=8,
+    parser.add_argument('--k', type=int, default=4,
                        help='Number of nearest neighbors for k-NN sparsification')
     parser.add_argument('--max_files', type=int, default=None,
                        help='Maximum number of batch files to process (for testing)')
