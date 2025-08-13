@@ -110,6 +110,14 @@ services:
       context: .
       dockerfile: docker/tokenshap.Dockerfile
     container_name: tokenshap
+    gpus: all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     volumes:
       - type: bind
         source: .
@@ -123,14 +131,12 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     networks:
       - app-network
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 4G
+    ipc: host
 
 networks:
   app-network:

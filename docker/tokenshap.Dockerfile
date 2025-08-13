@@ -1,11 +1,15 @@
-# Dedicated Dockerfile for TokenSHAP (token-level SHAP for LLMs)
-FROM ubuntu:22.04
+# Dedicated Dockerfile for TokenSHAP (token-level SHAP for LLMs) with GPU support
+FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=on
+    PIP_DISABLE_PIP_VERSION_CHECK=on \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    HF_HOME=/opt/hf_cache \
+    TRANSFORMERS_CACHE=/opt/hf_cache/transformers
 
 # Install system dependencies and Python 3.10
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -19,21 +23,34 @@ RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
 
 WORKDIR /tokenshap
 
-# ============================
-# OPTION 1: Install from PyPI
-# ============================
-RUN python3 -m pip install --upgrade pip && \
-    python3 -m pip install tokenshap
+# Upgrade pip/setuptools/wheel first
+RUN python -m pip install --upgrade pip setuptools wheel
 
-# (If PyPI install is not available in your region, or you want the bleeding edge, use Option 2 instead.)
+# Install PyTorch (CUDA 12.8 build) + torchvision + torchaudio
+# Reference: https://pytorch.org
+RUN pip install --no-cache-dir \
+    torch==2.8.0+cu128 \
+    torchvision==0.23.0+cu128 \
+    torchaudio==2.8.0+cu128 \
+    --index-url https://download.pytorch.org/whl/cu128
 
-# ============================
-# # OPTION 2: Install from source (most up-to-date)
-# ============================
-# RUN git clone https://github.com/ronigold/TokenSHAP.git .
-# RUN python3 -m pip install -r requirements.txt
+# Install Transformers, Datasets, and related NLP utilities
+RUN pip install --no-cache-dir \
+    transformers \
+    datasets \
+    tokenizers \
+    accelerate \
+    huggingface_hub \
+    sentencepiece
 
-# Optional: install Jupyter for interactive development
-RUN python3 -m pip install jupyter
+# Install TokenSHAP from PyPI
+RUN pip install --no-cache-dir tokenshap
+
+# Optional: Jupyter for interactive development
+RUN pip install --no-cache-dir jupyter
+
+# Pre-create cache directories and set permissions
+RUN mkdir -p /opt/hf_cache && chmod -R 777 /opt/hf_cache
+
 
 ENTRYPOINT ["/bin/bash"]
