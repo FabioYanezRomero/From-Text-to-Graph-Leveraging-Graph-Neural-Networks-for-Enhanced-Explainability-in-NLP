@@ -27,14 +27,21 @@ def _auto_discover_builders():
     or any new builder added in the future.
     """
     pkg_dir = _os.path.dirname(__file__)
-    pkg_name = __name__.rsplit('.', 1)[0]
-    exclude = {"__init__", "__main__", "tree_generator", "base_generator", "registry"}
+    # When executed as a module (__name__ == "__main__"), __package__ holds the package name
+    pkg_name = __package__ or 'src.graph_builders'
+    exclude = {"__init__", "__main__", "tree_generator", "base_generator", "registry", "semantic"}
     for m in pkgutil.iter_modules([pkg_dir]):
         if m.ispkg:
             continue
         if m.name in exclude:
             continue
-        importlib.import_module(f"{pkg_name}.{m.name}")
+        modname = f"{pkg_name}.{m.name}"
+        try:
+            importlib.import_module(modname)
+        except ModuleNotFoundError as e:
+            print(f"[warn] Skipping builder module '{modname}' due to missing dependency: {e}")
+        except Exception as e:
+            print(f"[warn] Skipping builder module '{modname}' due to import error: {e}")
 
 
 def _parse_graph_type(graph_type: str):

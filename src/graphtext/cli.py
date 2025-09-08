@@ -204,7 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # embed
     s = sub.add_parser("embed", help="Attach LLM embeddings to nodes in graphs")
-    s.add_argument("--graph_type", choices=["constituency", "syntactic"], default="syntactic")
+    s.add_argument("--graph_type", default="syntactic")
     s.add_argument("--dataset_name", default="stanfordnlp/sst2")
     s.add_argument("--split", default="validation")
     s.add_argument("--tree_dir", required=True)

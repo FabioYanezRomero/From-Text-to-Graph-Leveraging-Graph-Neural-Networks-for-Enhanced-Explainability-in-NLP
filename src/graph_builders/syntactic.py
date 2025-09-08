@@ -72,7 +72,7 @@ class SyntacticTreeGenerator(BaseTreeGenerator):
             use_gpu=stanza_device == 'gpu',
             download_method=stanza.DownloadMethod.NONE,  # We already downloaded the models
             tokenize_pretokenized=False,
-            tokenize_no_ssplit=True,
+            tokenize_no_ssplit=False,  # allow sentence splitting to batch multiple inputs
             pos_batch_size=1000,
             depparse_batch_size=1000,
             depparse_pretagged=True,  # Use POS tags from the POS tagger
@@ -90,10 +90,11 @@ class SyntacticTreeGenerator(BaseTreeGenerator):
         Returns:
             List: List of parsed syntactic trees, one per input sentence.
         """
-        results = []
-        for s in sentences:
-            results.append(self.nlp(str(s)))
-        return results
+        # Process the whole batch at once by concatenating with newlines.
+        # This drastically reduces pipeline overhead vs per-sentence calls.
+        text = "\n".join(str(s) for s in sentences)
+        doc = self.nlp(text)
+        return [doc]
 
     def _build_graph(self, parsed_results: stanza.Document) -> List[nx.DiGraph]:
         """
