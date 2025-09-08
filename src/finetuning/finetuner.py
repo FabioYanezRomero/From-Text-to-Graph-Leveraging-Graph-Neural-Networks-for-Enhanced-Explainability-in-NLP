@@ -36,6 +36,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Default configuration
+_BASE_OUT = os.environ.get('GRAPHTEXT_OUTPUT_DIR', 'outputs')
 DEFAULT_CONFIG = {
     'num_epochs': 5,
     'learning_rate': 1e-6,
@@ -49,7 +50,7 @@ DEFAULT_CONFIG = {
     'lr_scheduler': 'linear',
     'warmup_steps': 0,
     'warmup_proportion': 0.1,
-    'output_dir': 'output/finetuned_models',
+    'output_dir': os.path.join(_BASE_OUT, 'llm'),
     'cuda': True,
     'seed': 42
 }

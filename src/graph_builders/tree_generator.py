@@ -9,15 +9,65 @@ It leverages the Graph_Generation package to create constituency parse trees.
 import os
 import argparse
 import torch
+import inspect
 from tqdm import tqdm
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 import pickle as pkl
-from src.Clean_Code.Tree_Generation.constituency import ConstituencyTreeGenerator
-from src.Clean_Code.Tree_Generation.syntactic import SyntacticTreeGenerator
+import importlib
+import os as _os
+import pkgutil
+from .registry import GENERATORS
 
 
-def build_trees(graph_type, dataset_name, subset, batch_size, device, output_dir):
+def _auto_discover_builders():
+    """Import all modules in this package except known non-builder files.
+
+    This triggers registration decorators in modules like constituency.py, syntactic.py,
+    or any new builder added in the future.
+    """
+    pkg_dir = _os.path.dirname(__file__)
+    pkg_name = __name__.rsplit('.', 1)[0]
+    exclude = {"__init__", "__main__", "tree_generator", "base_generator", "registry"}
+    for m in pkgutil.iter_modules([pkg_dir]):
+        if m.ispkg:
+            continue
+        if m.name in exclude:
+            continue
+        importlib.import_module(f"{pkg_name}.{m.name}")
+
+
+def _parse_graph_type(graph_type: str):
+    """Parse graph type strings like:
+    - "constituency", "syntactic"
+    - "window.word.k5", "window.token.k3"
+    - "ngrams.word.n3", "skipgrams.word.k2", "skipgrams.token.k2"
+    Returns (name_for_registry, kwargs_dict)
+    """
+    parts = graph_type.split('.')
+    base = parts[0]
+    unit = None
+    params = {}
+    for p in parts[1:]:
+        if p in ("word", "token"):
+            unit = p
+        elif p and p[0].isalpha():
+            # like k5, n3
+            key = p[0]
+            val = p[1:]
+            if val.isdigit():
+                params[key] = int(val)
+            else:
+                params[key] = val
+    if base in ("constituency", "syntactic"):
+        return base, {}
+    # registry keys are base.unit (default unit=word)
+    if unit is None:
+        unit = 'word'
+    return f"{base}.{unit}", params
+
+
+def build_trees(graph_type, dataset_name, subset, batch_size, device, output_dir, model_name=None):
     """
     Build trees from a dataset
     
@@ -28,13 +78,22 @@ def build_trees(graph_type, dataset_name, subset, batch_size, device, output_dir
         batch_size (int, optional): Batch size for processing. Defaults to DEFAULT_BATCH_SIZE
         device (str, optional): Device to run on. Defaults to DEFAULT_DEVICE
     """
-    # Create appropriate tree generator
-    if graph_type == 'constituency':
-        generator = ConstituencyTreeGenerator(device=device)
-    elif graph_type == 'syntactic':
-        generator = SyntacticTreeGenerator(device=device)
-    else:
-        raise NotImplementedError(f"Graph type {graph_type} is not supported.")
+    # Create appropriate tree generator via registry
+    _auto_discover_builders()
+    reg_name, params = _parse_graph_type(graph_type)
+    try:
+        GenCls = GENERATORS.get(reg_name)
+    except KeyError as e:
+        available = ", ".join(sorted(GENERATORS.names()))
+        raise NotImplementedError(f"Graph type '{graph_type}' is not supported. Available: {available}") from e
+    # Instantiate with supported kwargs (device, k, n, model_name, etc.)
+    init_params = {k: v for k, v in params.items()}
+    sig = inspect.signature(GenCls.__init__)
+    if 'device' in sig.parameters:
+        init_params['device'] = device
+    if model_name is not None and 'model_name' in sig.parameters:
+        init_params['model_name'] = model_name
+    generator = GenCls(**init_params)
     # Load dataset
     instance = load_dataset(dataset_name, split=subset)
     instance.set_format(type='torch')
@@ -65,7 +124,7 @@ def build_trees(graph_type, dataset_name, subset, batch_size, device, output_dir
         iterator += 1
 
 
-def process_dataset(graph_type, dataset, subsets, batch_size, device, output_dir):
+def process_dataset(graph_type, dataset, subsets, batch_size, device, output_dir, model_name=None):
     """
     Process multiple datasets to generate constituency trees
     
@@ -99,7 +158,8 @@ def process_dataset(graph_type, dataset, subsets, batch_size, device, output_dir
                 subset=subset,
                 batch_size=batch_size,
                 device=device,
-                output_dir=output_dir
+                output_dir=output_dir,
+                model_name=model_name,
             )
         
         # Clear GPU memory again
@@ -125,7 +185,8 @@ def main(args):
         subsets=args.subsets,
         batch_size=args.batch_size,
         device=args.device,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        model_name=args.model_name,
     )
 
 
@@ -136,6 +197,9 @@ if __name__ == "__main__":
     parser.add_argument("--subsets", nargs='+', type=str, default=["train", "validation", "test"])
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--output_dir", type=str, default="/app/src/Clean_Code/output")
+    import os as _os
+    _base = _os.environ.get('GRAPHTEXT_OUTPUT_DIR', 'outputs')
+    parser.add_argument("--output_dir", type=str, default=f"{_base}/graphs")
+    parser.add_argument("--model_name", type=str, required=True, help="HF model or checkpoint path for tokenization/embeddings where required")
     args = parser.parse_args()
     main(args)

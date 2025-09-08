@@ -275,13 +275,13 @@ def train_window(window_size=7, max_epochs=50, patience=10, gnn_type='GCNConv', 
     print("Loading datasets...")
     
     train_dataset = WindowGraphDataset(
-        "/app/src/Clean_Code/output/gnn_embeddings/fully_connected/setfit/ag_news/train/train",
+        "outputs/embeddings/fully_connected/setfit/ag_news/train/train",
         window_size=window_size,
         max_files=10  # Use subset for faster training
     )
     
     val_dataset = WindowGraphDataset(
-        "/app/src/Clean_Code/output/gnn_embeddings/fully_connected/setfit/ag_news/validation/validation",
+        "outputs/embeddings/fully_connected/setfit/ag_news/validation/validation",
         window_size=window_size
     )
     

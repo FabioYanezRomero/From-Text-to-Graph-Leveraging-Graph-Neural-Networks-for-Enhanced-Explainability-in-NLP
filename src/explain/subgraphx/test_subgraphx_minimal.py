@@ -6,7 +6,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../.
 import torch
 from dig.xgraph.method import SubgraphX
 
-from src.Clean_Code.GNN_Training.gnn_models import GNN_Classifier
+from src.gnn_training.training import GNN_Classifier
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
 

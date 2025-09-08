@@ -3,10 +3,10 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))  # Add project root to path
 
 from torch.utils.data import DataLoader
-from src.Clean_Code.GNN_training.training import CachedGraphDataset
+from src.gnn_training.training import CachedGraphDataset
 
 print("Loading dataset...")
-ds = CachedGraphDataset("/app/src/Clean_Code/output/gnn_embeddings/knn8/stanfordnlp/sst2/train/train")
+ds = CachedGraphDataset("outputs/embeddings/knn8/stanfordnlp/sst2/train/train")
 print(f"Successfully loaded dataset with {len(ds)} samples")
 
 print("\nChecking dataset integrity...")

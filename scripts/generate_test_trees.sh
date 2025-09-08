@@ -8,7 +8,7 @@ DATASET="SetFit/sst2"      # Use a small or demo dataset; change if needed
 SUBSETS=("validation")           # Use the test subset (usually small)
 BATCH_SIZE=2
 DEVICE="cpu"               # Use CPU for portability
-OUTPUT_DIR="/app/src/Clean_Code/output/test_text_trees"
+OUTPUT_DIR="outputs/test_text_trees"
 
 SCRIPT_DIR="$(dirname "$0")"
 

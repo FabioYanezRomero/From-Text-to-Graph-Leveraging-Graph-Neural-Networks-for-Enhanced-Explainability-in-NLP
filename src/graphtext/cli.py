@@ -49,6 +49,8 @@ def cmd_build(args: argparse.Namespace):
         batch_size=args.batch_size,
         device=args.device,
         output_dir=args.output_dir,
+        window_size=getattr(args, 'window_size', 5),
+        model_name=getattr(args, 'model_name', None),
     )
     builder.process_dataset(bargs)
     log_step(
@@ -196,6 +198,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--batch_size", type=int, default=256)
     s.add_argument("--device", default="cuda:0")
     s.add_argument("--output_dir", default="./outputs/graphs")
+    s.add_argument("--window_size", type=int, default=5, help="Window size (only for graph_type=window)")
+    s.add_argument("--model_name", required=True, help="HF model or checkpoint directory for builders needing tokenization/embeddings")
     s.set_defaults(func=cmd_build)
 
     # embed

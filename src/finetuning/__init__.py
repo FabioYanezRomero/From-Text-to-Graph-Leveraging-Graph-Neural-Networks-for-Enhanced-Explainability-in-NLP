@@ -1,3 +1,8 @@
-"""Intuitive alias for fine-tuning utilities."""
-from src.Clean_Code.Model_Finetuning.finetuner import fine_tune  # re-export
+"""
+Fine-tuning utilities.
+"""
 
+__version__ = '0.1.0'
+
+# Re-export helper for convenience
+from .finetuner import fine_tune  # noqa: F401

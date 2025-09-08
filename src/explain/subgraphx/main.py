@@ -1,10 +1,10 @@
 import torch
-from src.Clean_Code.Optimization.custom_subgraphx import CustomSubgraphX
+from src.explain.subgraphx.custom_subgraphx import CustomSubgraphX
 from torch_geometric.data import Data
 import numpy as np
 from tqdm import tqdm
-from src.Clean_Code.GNN_Training.gnn_models import GNN_Classifier
-from src.Clean_Code.LazyTrainer.datasets import load_graph_data
+from src.gnn_training.training import GNN_Classifier
+from src.gnn_training.training import load_graph_data
 from torch_geometric.loader import DataLoader
 import json
 import os
@@ -42,7 +42,8 @@ dig.xgraph.method.shapley.MarginalSubgraphDataset = MarginalSubgraphDataset
 BEST_MODEL_DIR = "/app/output_lazy/stanfordnlp_sst2_GCNConv_20250612_091841"
 BEST_MODEL_PATH = os.path.join(BEST_MODEL_DIR, "best_model.pt")
 ARGS_PATH = os.path.join(BEST_MODEL_DIR, "args.json")
-VAL_DATA_PATH = "/app/src/Clean_Code/output/pyg_graphs/stanfordnlp/sst2/validation"
+import os as _os
+VAL_DATA_PATH = _os.path.join(_os.environ.get('GRAPHTEXT_OUTPUT_DIR', 'outputs'), 'pyg_graphs/stanfordnlp/sst2/validation')
 
 with open(ARGS_PATH, "r") as f:
     args = json.load(f)
@@ -187,7 +188,7 @@ def load_dataset():
     test_path = args.get("root_test_data_path")
     eval_path = args.get("root_eval_data_path")
     # Default hardcoded fallback for SST2, adjust as needed
-    default_eval = "/app/src/Clean_Code/output/pyg_graphs/stanfordnlp/sst2/validation"
+    default_eval = _os.path.join(_os.environ.get('GRAPHTEXT_OUTPUT_DIR', 'outputs'), 'pyg_graphs/stanfordnlp/sst2/validation')
     if test_path is not None and os.path.exists(test_path):
         data_dir = test_path
     elif eval_path is not None and os.path.exists(eval_path):

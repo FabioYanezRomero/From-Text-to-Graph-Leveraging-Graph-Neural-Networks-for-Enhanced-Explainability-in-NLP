@@ -39,11 +39,11 @@ def test_with_subset():
     
     # Create small datasets
     print("Creating small training dataset...")
-    train_source = "/app/src/Clean_Code/output/gnn_embeddings/knn8/stanfordnlp/sst2/train/train"
+    train_source = "outputs/embeddings/knn8/stanfordnlp/sst2/train/train"
     create_small_dataset(train_source, train_temp_dir, max_samples=100)
     
     print("\nCreating small validation dataset...")
-    val_source = "/app/src/Clean_Code/output/gnn_embeddings/knn8/stanfordnlp/sst2/validation/validation"
+    val_source = "outputs/embeddings/knn8/stanfordnlp/sst2/validation/validation"
     create_small_dataset(val_source, val_temp_dir, max_samples=20)
     
     # Configuration for testing with a small subset

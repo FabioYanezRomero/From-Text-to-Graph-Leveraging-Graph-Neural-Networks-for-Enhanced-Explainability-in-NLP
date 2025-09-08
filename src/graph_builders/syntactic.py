@@ -13,10 +13,12 @@ import torch
 import torch.cuda
 import stanza
 from .base_generator import BaseTreeGenerator
+from .registry import GENERATORS
 import concurrent.futures
 
 
 
+@GENERATORS.register("syntactic")
 class SyntacticTreeGenerator(BaseTreeGenerator):
     """
     Creates syntactic trees from sentences.

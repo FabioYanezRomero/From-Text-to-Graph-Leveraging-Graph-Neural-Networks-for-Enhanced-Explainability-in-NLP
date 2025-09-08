@@ -26,8 +26,8 @@ seed=42
 cuda=false
 fp16=false
 label_source="llm"
-data_dir="/app/src/Clean_Code/output/pytorch_geometric"
-output_dir="/app/src/Clean_Code/output/gnn_results"
+data_dir="outputs/pyg_graphs"
+output_dir="outputs/gnn_results"
 
 # Help message
 show_help() {
@@ -53,8 +53,8 @@ show_help() {
     echo "  --cuda                   Use CUDA for training"
     echo "  --fp16                   Use mixed precision training"
     echo "  --label_source SOURCE    Source of labels (original, llm) [default: llm]"
-    echo "  --data_dir DIR           Directory containing the graph data [default: /app/src/Clean_Code/output/embeddings/graphs]"
-    echo "  --output_dir DIR         Directory to save results [default: /app/src/Clean_Code/output/gnn_results]"
+    echo "  --data_dir DIR           Directory containing the graph data [default: outputs/pyg_graphs]"
+    echo "  --output_dir DIR         Directory to save results [default: outputs/gnn_results]"
     echo "  --help                   Show this help message and exit"
 }
 
@@ -223,7 +223,7 @@ echo "Output directory: $output_dir"
 echo ""
 
 # Construct command with all arguments
-cmd="python -m src.Clean_Code.GNN_Training.train \
+cmd="python -m src.gnn_training.training \
     --dataset_name $dataset_name \
     --module $module \
     --hidden_dim $hidden_dim \

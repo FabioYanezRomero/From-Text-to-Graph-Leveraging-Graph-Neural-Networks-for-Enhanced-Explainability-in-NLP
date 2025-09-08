@@ -45,10 +45,10 @@ def run_command(cmd, description):
 def main():
     parser = argparse.ArgumentParser(description='Precompute graphs for faster training')
     parser.add_argument('--input_dir', type=str, 
-                       default="/app/src/Clean_Code/output/gnn_embeddings/fully_connected/stanfordnlp/sst2/train/train",
+                       default="outputs/embeddings/fully_connected/stanfordnlp/sst2/train/train",
                        help='Directory containing fully connected graph batch files')
     parser.add_argument('--output_base', type=str,
-                       default="/app/src/Clean_Code/output/gnn_embeddings/precomputed",
+                       default="outputs/embeddings/precomputed",
                        help='Base directory for precomputed graphs')
     parser.add_argument('--k', type=int, default=8,
                        help='Number of nearest neighbors for k-NN sparsification')
@@ -76,7 +76,7 @@ def main():
         return
     
     # 1. Precompute k-NN sparsified graphs
-    knn_cmd = f"""python /app/src/Clean_Code/GNN_training/precompute_knn_graphs.py \
+    knn_cmd = f"""python -m src.gnn_training.precompute_knn_graphs \
         --input_dir "{args.input_dir}" \
         --output_dir "{knn_output_dir}" \
         --k {args.k} \
@@ -88,7 +88,7 @@ def main():
         return
     
     # 2. Precompute window-connected graphs
-    window_cmd = f"""python /app/src/Clean_Code/GNN_training/precompute_window_graphs.py \
+    window_cmd = f"""python -m src.gnn_training.precompute_window_graphs \
         --input_dir "{args.input_dir}" \
         --output_dir "{window_output_dir}" \
         --window_size {args.window_size} \
@@ -105,14 +105,14 @@ def main():
     print(f"{'='*60}")
     
     # Test k-NN dataset
-    knn_test_cmd = f"""python /app/src/Clean_Code/GNN_training/precomputed_dataset.py \
+    knn_test_cmd = f"""python -m src.gnn_training.precomputed_dataset \
         --data_dir "{knn_output_dir}" \
         --max_files 1"""
     
     success = run_command(knn_test_cmd, "Testing k-NN precomputed dataset")
     
     # Test window dataset
-    window_test_cmd = f"""python /app/src/Clean_Code/GNN_training/precomputed_dataset.py \
+    window_test_cmd = f"""python -m src.gnn_training.precomputed_dataset \
         --data_dir "{window_output_dir}" \
         --max_files 1"""
     

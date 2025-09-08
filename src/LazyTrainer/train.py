@@ -21,15 +21,15 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 # Local imports – models and utils come from original package, dataset from ours
 # ---------------------------------------------------------------------------
-from src.Clean_Code.GNN_Training.gnn_models import GNN_Classifier
-from src.Clean_Code.GNN_Training.utils import (
+from src.gnn_training.training import GNN_Classifier
+from src.gnn_training.training import (
     create_optimizer,
     create_scheduler,
     get_device,
     save_metrics,
     set_seed,
 )
-from src.Clean_Code.LazyTrainer.datasets import load_graph_data
+from src.gnn_training.training import load_graph_data
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -41,7 +41,7 @@ from src.Clean_Code.LazyTrainer.datasets import load_graph_data
 # ------------------------
 default_args = [
     '--dataset_name', 'stanfordnlp/sst2',
-    '--data_dir', '/app/src/Clean_Code/output/pyg_graphs/stanfordnlp/sst2',
+    '--data_dir', 'outputs/pyg_graphs/stanfordnlp/sst2',
     '--module', 'GATConv',
     '--batch_size', '32',
     '--num_epochs', '5',
@@ -82,7 +82,7 @@ def parse_args() -> argparse.Namespace:  # noqa: D401
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cuda", action="store_true")
     parser.add_argument("--fp16", action="store_true")
-    parser.add_argument("--output_dir", type=str, default="/app/src/Clean_Code/output/output_lazy")
+    parser.add_argument("--output_dir", type=str, default="outputs/output_lazy")
 
     import sys
     if len(sys.argv) > 1:
@@ -186,8 +186,8 @@ def main():
 
     # output folder
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Use absolute output path: /app/src/Clean_Code/output/output_lazy/{graph_type}/...
-    lazy_base = os.path.join("/app/src/Clean_Code/output/output_lazy", args.graph_type)
+    # Use consolidated output path
+    lazy_base = os.path.join("outputs/output_lazy", args.graph_type)
     os.makedirs(lazy_base, exist_ok=True)
     run_dir = os.path.join(lazy_base, f"{args.dataset_name.replace('/', '_')}_{args.module}_{timestamp}")
     os.makedirs(run_dir, exist_ok=True)

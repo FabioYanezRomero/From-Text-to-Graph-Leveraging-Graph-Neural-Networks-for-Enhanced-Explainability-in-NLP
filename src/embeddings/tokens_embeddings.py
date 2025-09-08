@@ -120,7 +120,7 @@ def main():
             raise RuntimeError(f"Could not load tokenizer: {e2}")
     
     # Find the best model checkpoint
-    finetuned_models_dir = f"/app/src/Clean_Code/output/finetuned_llms/{dataset_name}"
+    finetuned_models_dir = f"outputs/llm/{dataset_name}"
     best_checkpoint = None
     best_f1 = -1.0
     
@@ -248,7 +248,7 @@ def main():
         text_field = 'sentence' if 'sentence' in dataset.column_names else 'text'
         
         # Create output directory
-        split_output_dir = f"/app/src/Clean_Code/output/gnn_embeddings/fully_connected/{dataset_name}/{split}/{split}"
+        split_output_dir = f"outputs/embeddings/fully_connected/{dataset_name}/{split}/{split}"
         os.makedirs(split_output_dir, exist_ok=True)
         
         # Process in batches

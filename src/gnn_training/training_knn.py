@@ -248,12 +248,12 @@ def train_fast(max_epochs=20, patience=5, gnn_type='GCNConv', heads=1):
     # Load datasets with reduced size for faster training
     print("Loading datasets...")
     train_dataset = FastGraphDataset(
-        "/app/src/Clean_Code/output/gnn_embeddings/fully_connected/stanfordnlp/sst2/train/train",
+        "outputs/embeddings/fully_connected/stanfordnlp/sst2/train/train",
         sparsity_k=8,
     )
     
     test_dataset = FastGraphDataset(
-        "/app/src/Clean_Code/output/gnn_embeddings/fully_connected/stanfordnlp/sst2/validation/validation",
+        "outputs/embeddings/fully_connected/stanfordnlp/sst2/validation/validation",
         sparsity_k=8
     )
     

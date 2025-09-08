@@ -7,8 +7,8 @@ MODEL_NAME="bert-base-uncased"
 DEVICE="cuda"
 DATASET_NAME="stanfordnlp/sst2"
 SPLIT="validation"
-TREE_DIR="/app/src/Clean_Code/output/text_trees/${DATASET_NAME}/${SPLIT}/${GRAPH_TYPE}"
-OUTPUT_DIR="/app/src/Clean_Code/output/gnn_embeddings/${DATASET_NAME}/${SPLIT}/${GRAPH_TYPE}"
+TREE_DIR="outputs/graphs/${DATASET_NAME}/${SPLIT}/${GRAPH_TYPE}"
+OUTPUT_DIR="outputs/embeddings/${DATASET_NAME}/${SPLIT}/${GRAPH_TYPE}"
 BATCH_SIZE=128
 
 # Parse arguments
@@ -65,7 +65,7 @@ if [[ -z "$GRAPH_TYPE" || -z "$DATASET_NAME" || -z "$SPLIT" || -z "$TREE_DIR" ||
 fi
 
 # Run the embedding pipeline
-python3 /app/src/Clean_Code/Graph_Embeddings/generate_graphs_with_embeddings.py \
+python3 -m src.embeddings.generate \
     --graph_type "$GRAPH_TYPE" \
     --dataset_name "$DATASET_NAME" \
     --split "$SPLIT" \

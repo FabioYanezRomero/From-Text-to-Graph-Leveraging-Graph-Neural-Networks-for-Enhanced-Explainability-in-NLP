@@ -13,6 +13,7 @@ import torch
 import torch.cuda
 import stanza
 from .base_generator import BaseTreeGenerator
+from .registry import GENERATORS
 
 # Dictionary mapping constituency labels to more descriptive phrases
 POS_MAPPER = {
@@ -168,6 +169,7 @@ PHRASE_MAPPER = {
 }
 
 
+@GENERATORS.register("constituency")
 class ConstituencyTreeGenerator(BaseTreeGenerator):
     """
     Creates constituency trees from sentences.

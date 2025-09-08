@@ -1,5 +1,16 @@
-"""Intuitive aliases for graph builders."""
-from src.Clean_Code.Tree_Generation.tree_generator import process_dataset, build_trees
+"""Graph builders: constituency, syntactic, and more.
 
-__all__ = ["process_dataset", "build_trees"]
+To add a new builder, create a module in this package and register your
+BaseTreeGenerator subclass with the `GENERATORS` registry:
 
+    from .base_generator import BaseTreeGenerator
+    from .registry import GENERATORS
+
+    @GENERATORS.register("my_new_tree")
+    class MyNewTree(BaseTreeGenerator):
+        ...
+
+It will be auto-discovered by `tree_generator.py` at runtime.
+"""
+
+from .registry import GENERATORS  # re-export for convenience

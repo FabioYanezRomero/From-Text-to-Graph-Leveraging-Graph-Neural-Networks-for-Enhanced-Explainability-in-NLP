@@ -1,5 +1,5 @@
 import networkx as nx
-from src.Clean_Code.Tree_Generation.constituency import ConstituencyTreeGenerator
+from src.graph_builders.constituency import ConstituencyTreeGenerator
 
 # Test sentence
 sentence = "Safety Net (Forbes.com) Forbes.com - After earning a PH.D. in Sociology, Danny Bazil Riley started to work as the general manager at a commercial real estate firm at an annual base salary of #36;70,000. Soon after, a financial planner stopped by his desk to drop off brochures about insurance benefits available through his employer. But, at 32, 'buying insurance was the furthest thing from my mind,' says Riley."

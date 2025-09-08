@@ -1,7 +1,4 @@
-"""
-Main entry point for the Model_Finetuning module when run as a package.
-"""
-
+"""Entrypoint for finetuning package."""
 import sys
 from .finetuner import main
 

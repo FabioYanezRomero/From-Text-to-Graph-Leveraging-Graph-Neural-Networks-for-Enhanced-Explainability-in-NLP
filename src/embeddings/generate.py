@@ -7,7 +7,7 @@ import numpy as np
 import networkx as nx
 from transformers import AutoModel, AutoTokenizer
 from datasets import load_dataset
-from dicts import constituency_dict
+from .dicts import constituency_dict
 import re
 
 def load_trees(tree_dir, batch_size):
@@ -51,6 +51,21 @@ def is_special_label(label):
         and (label in constituency_dict.values() or (label.startswith('«') and label.endswith('»')))
     )
 
+def _expr_from_special_label(label: str) -> str:
+    """Return the natural-language expression for a special node label.
+
+    Labels may come already pretty-formatted with guillemets (e.g., «NOUN PHRASE»).
+    We strip decorative quotes and extra whitespace to form the text we feed to
+    the language model for [CLS] pooling.
+    """
+    if not isinstance(label, str):
+        return str(label)
+    # strip guillemets and whitespace
+    s = label.strip()
+    if s.startswith('«') and s.endswith('»') and len(s) >= 2:
+        s = s[1:-1]
+    return s.strip()
+
 def validate_graph_structure(graph, graph_idx=None):
     """Assert that all non-leaf nodes are special and all leaf nodes are words (not special)."""
     for nid, data in graph.nodes(data=True):
@@ -79,50 +94,77 @@ def compute_special_embeddings(labels, model, tokenizer, device):
     model.eval()
     with torch.no_grad():
         for label in tqdm(labels, desc="Computing special embeddings"):
-            inputs = tokenizer(label, return_tensors='pt').to(device)
+            expr = _expr_from_special_label(label)
+            inputs = tokenizer(expr, return_tensors='pt').to(device)
             outputs = model(**inputs)
             cls_emb = outputs.last_hidden_state[:, 0, :].squeeze(0).cpu().numpy()
             special_embeddings[label] = cls_emb
     return special_embeddings
 
-def get_word_embeddings(sentence, model, tokenizer, device):
-    """Get wordpiece embeddings for each word in the sentence using robust alignment via offset overlaps."""
-    inputs = tokenizer(sentence, return_tensors='pt', return_offsets_mapping=True, truncation=True)
-    offsets = inputs.pop('offset_mapping')  # Remove offset_mapping before passing to model
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    outputs = model(**inputs)
-    hidden = outputs.last_hidden_state.squeeze(0).detach().cpu().numpy()
-    tokens = tokenizer.convert_ids_to_tokens(inputs['input_ids'].squeeze(0))
-    offsets = offsets.squeeze(0).tolist()
-    words = sentence.split()
-    word_embs = []
+def _encode_with_offsets(text, tokenizer, device):
+    enc = tokenizer(text, return_tensors='pt', return_offsets_mapping=True, truncation=True)
+    offsets = enc.pop('offset_mapping')
+    enc = {k: v.to(device) for k, v in enc.items()}
+    return enc, offsets.squeeze(0).tolist()
 
-    # Compute character spans for each word
-    char_idx = 0
-    word_spans = []
-    for word in words:
-        # Skip leading spaces
-        while char_idx < len(sentence) and sentence[char_idx].isspace():
-            char_idx += 1
-        start = char_idx
-        end = start + len(word)
-        word_spans.append((start, end))
-        char_idx = end
 
-    for word, (w_start, w_end) in zip(words, word_spans):
-        token_indices = []
-        for i, (tok, (t_start, t_end)) in enumerate(zip(tokens, offsets)):
-            if tok in [tokenizer.cls_token, tokenizer.sep_token]:
+def _aggregate_subwords(hidden, offsets, spans, special_token_ids, agg='mean'):
+    """Aggregate subword vectors into word vectors by span overlap.
+
+    hidden: [seq_len, hidden_dim]
+    offsets: list[(start,end)] for each subword token
+    spans: list[(start,end)] for each target word/token
+    special_token_ids: set of indices to ignore (CLS/SEP etc.)
+    """
+    out = []
+    for (w_start, w_end) in spans:
+        idxs = []
+        for i, (t_start, t_end) in enumerate(offsets):
+            if i in special_token_ids or t_start == t_end:
                 continue
-            # Check for overlap between word and token spans
             if max(w_start, t_start) < min(w_end, t_end):
-                token_indices.append(i)
-        if token_indices:
-            emb = hidden[token_indices].mean(axis=0)
+                idxs.append(i)
+        if not idxs:
+            out.append(np.zeros_like(hidden[0]))
         else:
-            emb = np.zeros_like(hidden[0])
-        word_embs.append(emb)
-    return word_embs
+            vecs = hidden[idxs]
+            if agg == 'first':
+                out.append(vecs[0])
+            elif agg == 'sum':
+                out.append(vecs.sum(axis=0))
+            else:
+                out.append(vecs.mean(axis=0))
+    return out
+
+
+def _spans_from_whitespace_words(sentence):
+    spans = []
+    i = 0
+    for w in sentence.split():
+        while i < len(sentence) and sentence[i].isspace():
+            i += 1
+        start = i
+        end = start + len(w)
+        spans.append((start, end))
+        i = end
+    return spans
+
+
+def get_word_embeddings(sentence, model, tokenizer, device, spans=None, agg='mean'):
+    """Compute word embeddings by aggregating subwords overlapping given spans.
+
+    - If spans is None, uses whitespace tokenization spans.
+    - Aggregation is mean by default (configurable).
+    """
+    enc, offsets = _encode_with_offsets(sentence, tokenizer, device)
+    outputs = model(**enc)
+    hidden = outputs.last_hidden_state.squeeze(0).detach().cpu().numpy()
+    input_ids = enc['input_ids'].squeeze(0).tolist()
+    # Identify special tokens (CLS/SEP/PAD) by zero-length offsets or known ids
+    special_idxs = set(i for i, (s, e) in enumerate(offsets) if e == s)
+    # Build spans
+    spans = spans or _spans_from_whitespace_words(sentence)
+    return _aggregate_subwords(hidden, offsets, spans, special_idxs, agg=agg)
 
 def assign_embeddings_to_graph(graph, word_embs, special_embeddings):
     word_idx = 0
@@ -167,8 +209,9 @@ def main():
     parser.add_argument('--graph_type', type=str, choices=['constituency', 'syntactic'], help='Type of graph to process', default='syntactic')
     parser.add_argument('--dataset_name', type=str, default='stanfordnlp/sst2')
     parser.add_argument('--split', type=str, default='validation')
-    parser.add_argument('--tree_dir', type=str, default='/app/src/Clean_Code/output/text_trees/stanfordnlp/sst2/validation/syntactic')
-    parser.add_argument('--output_dir', type=str, default='/app/src/Clean_Code/output/gnn_embeddings/stanfordnlp/sst2/validation/syntactic')
+    base = os.environ.get('GRAPHTEXT_OUTPUT_DIR', 'outputs')
+    parser.add_argument('--tree_dir', type=str, default=f'{base}/graphs/stanfordnlp/sst2/validation/syntactic')
+    parser.add_argument('--output_dir', type=str, default=f'{base}/embeddings/stanfordnlp/sst2/validation/syntactic')
     parser.add_argument('--model_name', type=str, default='bert-base-uncased')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size for processing graphs and sentences')
@@ -211,35 +254,59 @@ def main():
                         data['embedding'] = word_embs[word_idx] if word_idx < len(word_embs) else np.zeros_like(word_embs[0])
                         word_idx += 1
             else:
-                # Use Stanza to tokenize the sentence as was done during tree generation
-                import stanza
-                if not hasattr(main, 'stanza_pipeline'):
-                    main.stanza_pipeline = stanza.Pipeline(lang='en', processors='tokenize', tokenize_no_ssplit=True, use_gpu=False)
-                stanza_doc = main.stanza_pipeline(sentence)
-                stanza_words = [word.text for sent in stanza_doc.sentences for word in sent.words]
-                word_embs = get_word_embeddings(' '.join(stanza_words), model, tokenizer, args.device)
-                if len(stanza_words) != len(word_embs):
-                    raise ValueError(f"Stanza token count ({len(stanza_words)}) and embedding count ({len(word_embs)}) mismatch.")
-                # Robust alignment: for each stanza token, find the first unmatched graph node with matching text
-                stanza_words_norm = [w.strip().lower() for w in stanza_words]
-                graph_word_nodes = [(nid, data) for nid, data in graph.nodes(data=True) if data.get('text', None) is not None]
-                node_matched = [False] * len(graph_word_nodes)
-                for token_idx, stanza_token in enumerate(stanza_words_norm):
-                    found = False
-                    for node_idx, (nid, data) in enumerate(graph_word_nodes):
-                        node_word_norm = data['text'].strip().lower()
-                        if not node_matched[node_idx] and node_word_norm == stanza_token:
-                            data['embedding'] = word_embs[token_idx]
-                            node_matched[node_idx] = True
-                            found = True
-                            break
-                    if not found:
-                        data['embedding'] = np.zeros_like(word_embs[0])
-                        
+                # Detect whether graph nodes are word-level or token-level
+                nodes = list(graph.nodes(data=True))
+                node_types = {d.get('type') for _, d in nodes}
+                is_token_graph = node_types == {'token'} or ('token' in node_types and 'word' not in node_types)
 
-                for (matched, (nid, data)) in zip(node_matched, graph_word_nodes):
-                    if not matched:
-                        data['embedding'] = np.zeros_like(word_embs[0])
+                if is_token_graph:
+                    # Token graphs: use HF tokenizer tokens without specials; one-to-one mapping by node id
+                    enc = tokenizer(sentence, add_special_tokens=False, return_tensors='pt').to(args.device)
+                    with torch.no_grad():
+                        outputs = model(**enc)
+                        hidden = outputs.last_hidden_state.squeeze(0).detach().cpu().numpy()  # [seq_len, hid]
+                    ordered_nodes = sorted([(nid, d) for nid, d in nodes], key=lambda x: x[0])
+                    if len(ordered_nodes) != hidden.shape[0]:
+                        print(f"[warn] token count mismatch nodes({len(ordered_nodes)}) vs model tokens({hidden.shape[0]}); truncating")
+                    m = min(len(ordered_nodes), hidden.shape[0])
+                    for i in range(m):
+                        ordered_nodes[i][1]['embedding'] = hidden[i]
+                    if m > 0:
+                        zero_vec = np.zeros_like(hidden[0])
+                        for _, d in ordered_nodes[m:]:
+                            d['embedding'] = zero_vec
+                else:
+                    # Word graphs: Build character spans via Stanza tokenization, then aggregate subwords per span
+                    import stanza
+                    if not hasattr(main, 'stanza_pipeline'):
+                        main.stanza_pipeline = stanza.Pipeline(lang='en', processors='tokenize', tokenize_no_ssplit=True, use_gpu=False)
+                    doc = main.stanza_pipeline(sentence)
+                    spans = []
+                    words = []
+                    for sent in doc.sentences:
+                        for tok in sent.tokens:
+                            start = getattr(tok, 'start_char', None)
+                            end = getattr(tok, 'end_char', None)
+                            if start is None or end is None:
+                                if not words:
+                                    spans = _spans_from_whitespace_words(sentence)
+                                    words = [w for s in doc.sentences for t in s.tokens for w in [t.text]]
+                                else:
+                                    pass
+                            else:
+                                spans.append((start, end))
+                                words.append(tok.text)
+                    word_embs = get_word_embeddings(sentence, model, tokenizer, args.device, spans=spans)
+                    ordered_nodes = sorted([(nid, d) for nid, d in nodes], key=lambda x: x[0])
+                    if len(ordered_nodes) != len(word_embs):
+                        print(f"[warn] length mismatch words({len(ordered_nodes)}) vs embs({len(word_embs)}); truncating")
+                    m = min(len(ordered_nodes), len(word_embs))
+                    for i in range(m):
+                        ordered_nodes[i][1]['embedding'] = word_embs[i]
+                    if m > 0:
+                        zero_vec = np.zeros_like(word_embs[0])
+                        for _, d in ordered_nodes[m:]:
+                            d['embedding'] = zero_vec
 
             batch_processed_graphs.append(graph)
         batch_path = os.path.join(

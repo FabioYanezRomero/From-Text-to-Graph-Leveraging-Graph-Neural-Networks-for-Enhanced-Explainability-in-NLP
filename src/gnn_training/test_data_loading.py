@@ -108,8 +108,8 @@ def test_data_loading(data_dir, batch_size=4, num_samples=5):
 
 if __name__ == "__main__":
     # Use the same data directories as in the training script
-    train_dir = "/app/src/Clean_Code/output/gnn_embeddings/knn8/stanfordnlp/sst2/train/train"
-    val_dir = "/app/src/Clean_Code/output/gnn_embeddings/knn8/stanfordnlp/sst2/validation/validation"
+    train_dir = "outputs/embeddings/knn8/stanfordnlp/sst2/train/train"
+    val_dir = "outputs/embeddings/knn8/stanfordnlp/sst2/validation/validation"
     
     print("Testing training data...")
     train_ok = test_data_loading(train_dir)

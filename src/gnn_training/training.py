@@ -985,15 +985,15 @@ class GNNTrainer:
         return output_dir
 
 
-def main():
+    def main():
     """Main training function with optimized defaults."""
     parser = argparse.ArgumentParser(description='Optimized GNN Training Pipeline')
     
     # Data paths
     parser.add_argument('--train_data_dir', type=str, 
-                       default="/app/src/Clean_Code/output/gnn_embeddings/fully_connected/stanfordnlp/sst2/train/train")
+                       default="outputs/pyg_graphs/stanfordnlp/sst2/syntactic/train")
     parser.add_argument('--val_data_dir', type=str, 
-                       default="/app/src/Clean_Code/output/gnn_embeddings/fully_connected/stanfordnlp/sst2/validation/validation")
+                       default="outputs/pyg_graphs/stanfordnlp/sst2/syntactic/validation")
     
     # Model architecture
     parser.add_argument('--module', type=str, default='TransformerConv')
@@ -1032,3 +1032,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+    
+# Backwards-compat alias
+GNN_Classifier = GNNClassifier

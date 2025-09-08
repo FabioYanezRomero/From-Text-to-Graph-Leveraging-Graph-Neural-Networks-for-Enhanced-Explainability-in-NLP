@@ -195,9 +195,11 @@ class GraphSHAPExplainer:
         return results
 
 # Replace these with your actual file paths
-MODEL_PATH = "/app/src/Clean_Code/output/gnn_training/TransformerConvKNN4/final_model.pth"
-DATASET_PATH = "/app/src/Clean_Code/output/gnn_embeddings/fully_connected/stanfordnlp/sst2/validation/validation/graphs_batch_000.pkl"
-CONFIG_PATH = "/app/src/Clean_Code/output/gnn_training/TransformerConvKNN4/config.json"
+import os as _os
+_BASE = _os.environ.get('GRAPHTEXT_OUTPUT_DIR', 'outputs')
+MODEL_PATH = _os.path.join(_BASE, "gnn_training/TransformerConvKNN4/final_model.pth")
+DATASET_PATH = _os.path.join(_BASE, "embeddings/fully_connected/stanfordnlp/sst2/validation/validation/graphs_batch_000.pkl")
+CONFIG_PATH = _os.path.join(_BASE, "gnn_training/TransformerConvKNN4/config.json")
 
 # Load configuration
 with open(CONFIG_PATH, 'r') as f:
@@ -340,7 +342,7 @@ print(f"First graph: {dataset[0]}")
 TARGET_SUMMARY_PATHS = [
     "/app/explanations/LLM/sst-2/tokenSHAP_summary.json",
     "/app/tokenSHAP_summary.json",
-    "/app/src/Clean_Code/LLM_explainability/tokenSHAP_summary.json",
+    _os.path.join(_BASE, "explain/llm/tokenSHAP_summary.json"),
     "tokenSHAP_summary.json",
 ]
 selected_indices = None

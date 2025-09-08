@@ -8,7 +8,7 @@ DATASET="stanfordnlp/sst2"   # "stanfordnlp/sst2", "SetFit/ag_news"
 SUBSETS=(train validation)  # "train", "test", "validation"
 BATCH_SIZE=1000
 DEVICE="cuda:0"            # "cuda:0", "cpu"
-OUTPUT_DIR="/app/src/Clean_Code/output/text_trees"
+OUTPUT_DIR="outputs/graphs"
 
 SCRIPT_DIR="$(dirname "$0")"
 

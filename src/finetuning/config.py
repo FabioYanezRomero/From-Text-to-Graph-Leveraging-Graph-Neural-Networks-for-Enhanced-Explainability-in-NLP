@@ -23,7 +23,7 @@ DEFAULT_SCHEDULER = 'linear'
 DEFAULT_SEED = 42
 
 # Output configuration
-DEFAULT_OUTPUT_DIR = '/app/src/Clean_Code/output/finetuned_models'
+DEFAULT_OUTPUT_DIR = 'outputs/llm'
 
 # Dataset configuration
 DEFAULT_DATASET_NAME = 'snli'

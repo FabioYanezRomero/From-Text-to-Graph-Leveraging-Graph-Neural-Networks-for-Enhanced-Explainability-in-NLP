@@ -16,7 +16,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
 # Path to the finetuned model checkpoint
-MODEL_PATH = "/app/src/Clean_Code/output/finetuned_llms/stanfordnlp/sst2/sst2_2025-06-04_14-52-49"
+MODEL_PATH = "outputs/llm/stanfordnlp/sst2/sst2_2025-06-04_14-52-49"
 
 # Load the model and tokenizer directly from the checkpoint directory
 # This ensures we load the finetuned classification head weights

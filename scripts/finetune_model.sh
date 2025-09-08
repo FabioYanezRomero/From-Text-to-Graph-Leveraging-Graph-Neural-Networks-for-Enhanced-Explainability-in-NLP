@@ -12,7 +12,7 @@ model_name="google-bert/bert-base-uncased"
 num_epochs=5
 batch_size=16
 learning_rate=1e-6
-output_dir="/app/src/Clean_Code/output/finetuned_llms"
+output_dir="outputs/llm"
 fp16=true
 
 # Help message
@@ -25,7 +25,7 @@ show_help() {
     echo "  --num_epochs N           Number of training epochs (default: 5)"
     echo "  --batch_size N           Training batch size (default: 16)"
     echo "  --learning_rate RATE     Learning rate (default: 1e-6)"
-    echo "  --output_dir DIR         Output directory (default: /app/src/Clean_Code/output/finetuned_models)"
+    echo "  --output_dir DIR         Output directory (default: outputs/llm)"
     echo "  --no_fp16                Disable mixed precision training"
     echo "  --help                   Show this help message"
     echo ""

@@ -1,7 +1,7 @@
 """
 GraphText: Modular orchestration for text-to-graph GNN workflows.
 
-This lightweight package wraps the existing implementation under `src/Clean_Code`
+This lightweight package wraps the existing implementation (now migrated under `src/`)
 and exposes a clean, extensible interface and CLI for:
 - LLM fine-tuning
 - Graph generation (multiple methodologies)
@@ -17,4 +17,3 @@ embedders, and explainers without touching the core pipeline.
 __all__ = [
     "registry",
 ]
-
