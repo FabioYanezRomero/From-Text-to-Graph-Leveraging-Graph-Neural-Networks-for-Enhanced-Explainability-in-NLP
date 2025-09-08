@@ -4,7 +4,7 @@ import torch
 from glob import glob
 import json
 import argparse
-from nx_to_pyg import nx_list_to_pyg
+from .nx_to_pyg import nx_list_to_pyg
 
 import re
 
@@ -50,11 +50,12 @@ def build_label_map(pred_json_path, epoch, split, use_pred=True):
             label_map[idx] = label
     return label_map
 
-def main(label_source='llm', use_pred=True, hf_dataset_name='stanfordnlp/sst2', graph_type='syntactic'):
-    # Input and output base paths
-    IN_BASE = f'/app/src/Clean_Code/output/gnn_embeddings/{hf_dataset_name}'
-    OUT_BASE = f'/app/src/Clean_Code/output/pyg_graphs/{hf_dataset_name}/{graph_type}'
-    LLM_DIR = f'/app/src/Clean_Code/output/finetuned_llms/{hf_dataset_name}'
+def main(label_source='llm', use_pred=True, hf_dataset_name='stanfordnlp/sst2', graph_type='syntactic', in_base=None, out_base=None, llm_dir=None):
+    # Input and output base paths (allow override via args or env)
+    default_base = os.environ.get('GRAPHTEXT_OUTPUT_DIR', 'outputs')
+    IN_BASE = in_base or os.path.join(default_base, 'embeddings', hf_dataset_name)
+    OUT_BASE = out_base or os.path.join(default_base, 'pyg_graphs', hf_dataset_name, graph_type)
+    LLM_DIR = llm_dir or os.path.join(default_base, 'llm', hf_dataset_name)
     SPLITS = ['train', 'validation']
 
     os.makedirs(OUT_BASE, exist_ok=True)
@@ -141,6 +142,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Batch convert NetworkX graphs to PyG with label assignment.')
     parser.add_argument('--label-source', choices=['llm','original'], default='llm', help='Source of labels: llm or original')
     parser.add_argument('--hf-dataset-name', default='stanfordnlp/sst2', help='Hugging Face dataset name')
+    parser.add_argument('--graph-type', default='syntactic', help='Graph type (e.g., syntactic, constituency)')
     parser.add_argument('--use-pred', action='store_true', help='If set, use predicted_label; otherwise use true_label (llm mode only)')
+    parser.add_argument('--in-base', default=None, help='Base directory for embedded graphs (defaults to outputs/embeddings/<dataset>)')
+    parser.add_argument('--out-base', default=None, help='Base directory for PyG graphs (defaults to outputs/pyg_graphs/<dataset>/<graph_type>)')
+    parser.add_argument('--llm-dir', default=None, help='Directory containing finetuned LLM outputs (defaults to outputs/llm/<dataset>)')
     args = parser.parse_args()
-    main(label_source=args.label_source, use_pred=args.use_pred, hf_dataset_name=args.hf_dataset_name)
+    main(
+        label_source=args.label_source,
+        use_pred=args.use_pred,
+        hf_dataset_name=args.hf_dataset_name,
+        graph_type=args.graph_type,
+        in_base=args.in_base,
+        out_base=args.out_base,
+        llm_dir=args.llm_dir,
+    )

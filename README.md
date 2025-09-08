@@ -1,0 +1,82 @@
+GraphText: Modular NLP→Graph→GNN Pipeline
+=========================================
+
+This repo orchestrates a full workflow to build graphs from text, attach LLM embeddings, convert to PyTorch Geometric (PyG), train GNNs, and run explainability. It wraps the current implementation under `src/Clean_Code` with a small, extensible package and CLI for easier scaling and future additions.
+
+What’s New
+----------
+- `src/graphtext`: a thin, modular layer with registries and a unified CLI
+- Intuitive module paths under `src/` (shims): `src/finetuning`, `src/graph_builders`, `src/embeddings`, `src/convert`, `src/gnn_training`, `src/explain`
+- Composable subcommands: finetune → build-graphs → embed → to-pyg → train → explain
+- Config-driven pipeline runner for end-to-end experiments
+- Clear extension points to add new graph-generation and explainability methods
+- Consolidated outputs under `outputs/`
+- Metadata index at `outputs/metadata/index.json`
+
+Package Layout (new)
+--------------------
+- `src/graphtext/registry.py`: Simple registries for plug-ins
+- `src/graphtext/graphs/`: Graph builders (wrapping existing generators)
+- `src/graphtext/embeddings/`: LLM fine-tuning and graph embedding wrappers
+- `src/graphtext/convert/`: NetworkX→PyG conversion wrapper
+- `src/graphtext/training/`: GNN trainer wrapper
+- `src/graphtext/explain/`: Explainers wrapper
+- `src/graphtext/cli.py`: Unified CLI
+- `src/graphtext/pipeline.py`: Programmatic pipeline runner
+Shims to legacy code under intuitive paths:
+- `src/finetuning` → `src/Clean_Code/Model_Finetuning`
+- `src/graph_builders` → `src/Clean_Code/Tree_Generation`
+- `src/embeddings` → `src/Clean_Code/Graph_Embeddings`
+- `src/convert` → `src/Clean_Code/NetworkX_to_PyG`
+- `src/gnn_training` → `src/Clean_Code/GNN_training`
+- `src/explain/subgraphx` → `src/Clean_Code/Optimization`
+
+Quick Start
+-----------
+Run commands from the project root. Use the `src`-package style:
+
+- Fine-tune an LLM
+  - `python -m src.graphtext.cli finetune --dataset_name stanfordnlp/sst2 --output_dir outputs/llm`
+
+- Build graphs (syntactic or constituency)
+  - `python -m src.graphtext.cli build-graphs --graph_type syntactic --dataset stanfordnlp/sst2 --output_dir outputs/graphs`
+
+- Embed nodes using an LLM
+  - `python -m src.graphtext.cli embed --graph_type syntactic --dataset_name stanfordnlp/sst2 --split validation --tree_dir <trees_dir> --output_dir <emb_out>`
+
+- Convert to PyG with labels
+  - `python -m src.graphtext.cli to-pyg --label_source llm --hf_dataset_name stanfordnlp/sst2 --graph_type syntactic`
+
+- Train a GNN
+  - `python -m src.graphtext.cli train --train_data_dir <pyg_train_dir> --val_data_dir <pyg_val_dir>`
+
+- Explain a trained GNN
+  - `python -m src.graphtext.cli explain --method subgraphx`
+
+Pipeline via JSON
+-----------------
+See `configs/example_pipeline.json` for a complete end-to-end config. Run:
+
+- `python -m src.graphtext.cli run --config configs/example_pipeline.json`
+
+Extending Graph Generation
+--------------------------
+Add a new builder by registering it:
+
+```
+from src.graphtext.registry import GRAPH_BUILDERS
+from src.graphtext.graphs.base import BaseGraphBuilder, BuildArgs
+
+@GRAPH_BUILDERS.register("my_builder")
+class MyBuilder(BaseGraphBuilder):
+    def process_dataset(self, args: BuildArgs) -> None:
+        # produce and save graphs under args.output_dir
+        ...
+```
+
+Notes
+-----
+- The new layer calls existing scripts/modules under `src/Clean_Code` via shims for now; the codebase will be fully migrated and `src/Clean_Code` removed after outputs are archived.
+- Some legacy modules use non-relative imports; the wrappers execute them as modules (`python -m ...`) to ensure imports resolve.
+- Default outputs are consolidated under `outputs/`. You can override with `GRAPHTEXT_OUTPUT_DIR`.
+- A metadata index is appended after each step at `outputs/metadata/index.json`.
