@@ -1,2 +1,0 @@
-"""SubgraphX-based explainability (shim)."""
-
