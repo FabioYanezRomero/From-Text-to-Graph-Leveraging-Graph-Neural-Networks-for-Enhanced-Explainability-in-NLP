@@ -10,6 +10,11 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+    gpus: all
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - SYS_ADMIN
     volumes:
       # Mount the main application code
       - type: bind
@@ -26,10 +31,11 @@ services:
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
       - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     networks:
       - app-network
     restart: unless-stopped
+    ipc: host
     deploy:
       resources:
         limits:
@@ -75,6 +81,10 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - SYS_ADMIN
 
   # SHAP explainability service
   shap:
@@ -111,6 +121,10 @@ services:
       dockerfile: docker/tokenshap.Dockerfile
     container_name: tokenshap
     gpus: all
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - SYS_ADMIN
     deploy:
       resources:
         reservations:

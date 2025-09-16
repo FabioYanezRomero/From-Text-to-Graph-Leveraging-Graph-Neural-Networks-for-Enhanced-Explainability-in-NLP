@@ -1,5 +1,5 @@
-# Use NVIDIA CUDA 12.4.1 as base image
-FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
+# Use NVIDIA CUDA 12.4.1 as base image (matches cu124 PyTorch wheels)
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -7,7 +7,11 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=on \
     DEBIAN_FRONTEND=noninteractive \
-    TZ=Europe/Madrid
+    TZ=Europe/Madrid \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    CUDA_HOME=/usr/local/cuda \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 
 # Add LLVM repository for OpenMP packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -30,10 +34,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     libopenblas-dev \
-    libomp-14-dev \
-    libomp-14-doc \
-    libomp5-14 \
+    libomp-dev \
     libopenmpi-dev \
+    cuda-compat-12-4 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create symlinks for python
@@ -42,6 +45,9 @@ RUN ln -sf /usr/bin/python3 /usr/bin/python && \
 
 # Set working directory
 WORKDIR /app
+
+# Ensure latest pip tooling
+RUN python3 -m pip install --upgrade pip setuptools wheel
 
 # Install PyTorch 2.6.0 with CUDA 12.4
 RUN pip install --no-cache-dir \
@@ -72,8 +78,13 @@ COPY . .
 # Set working directory for main code
 WORKDIR /app/src
 
-# Create a non-root user and switch to it
-RUN useradd -m appuser && chown -R appuser:appuser /app
+# Create a non-root user with video/render access and ensure helper scripts are executable
+RUN groupadd -f video \
+    && groupadd -f render \
+    && useradd -m appuser \
+    && usermod -aG video,render appuser \
+    && chown -R appuser:appuser /app \
+    && find /app/scripts -type f -name '*.sh' -exec chmod +x {} +
 USER appuser
 
 # Default command to keep the container running

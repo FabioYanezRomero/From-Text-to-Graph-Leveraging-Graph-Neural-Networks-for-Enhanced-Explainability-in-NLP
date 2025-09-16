@@ -13,6 +13,9 @@ seaborn
 scikit-learn
 tqdm
 
+# NLP parsers (required for syntactic/constituency builders)
+stanza
+
 # Additional utilities
 pyyaml
 joblib
