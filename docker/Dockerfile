@@ -11,7 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     CUDA_HOME=/usr/local/cuda \
-    LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/cuda/compat/lib:${LD_LIBRARY_PATH}
 
 # Add LLVM repository for OpenMP packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -36,7 +36,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libopenblas-dev \
     libomp-dev \
     libopenmpi-dev \
-    cuda-compat-12-1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create symlinks for python
