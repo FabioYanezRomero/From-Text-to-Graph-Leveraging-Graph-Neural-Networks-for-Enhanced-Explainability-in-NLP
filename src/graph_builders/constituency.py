@@ -208,50 +208,42 @@ class ConstituencyTreeGenerator(BaseTreeGenerator):
         # Set up Stanza configuration
         stanza_device = 'gpu' if device.startswith('cuda') else 'cpu'
         
-        # Download the transformer-based models explicitly
+        # Initialize the Stanza pipeline with available constituency parser
+        print("Initializing Stanza pipeline with constituency parser...")
         try:
-            print("Downloading transformer-based Stanza English models...")
-            # Download with transformer-based constituency parser
-            # Using 'default_accurate' which uses BERT for best accuracy
-            stanza.download('en', package='default_accurate', processors={
-                'tokenize': 'default',
-                'pos': 'default',
-                'constituency': 'default_accurate'  # Uses BERT for best accuracy
-            })
-            print("Transformer-based Stanza models downloaded successfully.")
+            self.nlp = stanza.Pipeline(
+                lang='en',
+                processors='tokenize,pos,lemma,depparse,constituency',
+                package={
+                    'pos': 'combined_charlm',
+                    'lemma': 'combined_nocharlm',
+                    'depparse': 'combined_charlm',
+                    'constituency': 'ptb3-revised_charlm'
+                },
+                use_gpu=(stanza_device == 'gpu'),
+                download_method=stanza.DownloadMethod.NONE,  # We already downloaded the models
+                tokenize_pretokenized=False,
+                tokenize_no_ssplit=False,
+                pos_batch_size=1000,
+                depparse_batch_size=1000,
+                constituency_batch_size=1000,
+                constituency_pretagged=True  # Use POS tags from the POS tagger
+            )
         except Exception as e:
-            print(f"Warning: Could not download transformer-based Stanza model: {e}")
-            print("Falling back to default models...")
-            try:
-                stanza.download('en', package='default')
-            except Exception as e2:
-                print(f"Error downloading default models: {e2}")
-        
-        # Initialize the Stanza pipeline with BERT-based constituency parser
-        #print("Initializing Stanza pipeline with BERT-based constituency parser...")
-        from transformers import AutoModel, AutoTokenizer
-
-        # Use the model name that matches your Stanza model (e.g., 'google/electra-large-discriminator')
-        AutoModel.from_pretrained('google/electra-large-discriminator')
-        AutoTokenizer.from_pretrained('google/electra-large-discriminator')
-        
-        self.nlp = stanza.Pipeline(
-            lang='en',
-            processors={
-                'tokenize': 'default',
-                'pos': 'default',
-                'constituency': 'default_accurate'  # Uses BERT for best accuracy
-            },
-            package='default_accurate',  # Specify the package for BERT-based model
-            use_gpu=(stanza_device == 'gpu'),
-            download_method=stanza.DownloadMethod.NONE,  # We already downloaded the models
-            tokenize_pretokenized=False,
-            tokenize_no_ssplit=True,
-            pos_batch_size=1000,
-            constituency_batch_size=1000,
-            constituency_pretagged=True  # Use POS tags from the POS tagger
-        )
-        print("Stanza pipeline with BERT-based constituency parser initialized successfully.")
+            print(f"Error initializing pipeline: {e}")
+            print("Falling back to simpler pipeline...")
+            self.nlp = stanza.Pipeline(
+                lang='en',
+                processors='tokenize,pos,constituency',
+                package='default',
+                use_gpu=(stanza_device == 'gpu'),
+                download_method=stanza.DownloadMethod.NONE,
+                tokenize_pretokenized=False,
+                tokenize_no_ssplit=False,
+                pos_batch_size=1000,
+                constituency_batch_size=1000
+            )
+        print("Stanza pipeline with constituency parser initialized successfully.")
         
 
     def _parse(self, sentences: List[str]):
@@ -266,14 +258,41 @@ class ConstituencyTreeGenerator(BaseTreeGenerator):
             List: List of parsed constituency trees, one per input sentence.
         """
         trees = []
+        print(f"Starting to parse {len(sentences)} sentences...")
         for i, sentence in enumerate(sentences):
+            if i % 10 == 0:  # Print progress every 10 sentences
+                print(f"Processing sentence {i+1}/{len(sentences)}")
             try:
-                # Process the current sentence
-                doc = self.nlp(sentence)
-                
+                # Process the current sentence with timeout protection
+                import signal
+                from contextlib import contextmanager
+
+                @contextmanager
+                def timeout_context(seconds):
+                    def timeout_handler(signum, frame):
+                        raise TimeoutError(f"Parsing timeout after {seconds} seconds")
+
+                    signal.signal(signal.SIGALRM, timeout_handler)
+                    signal.alarm(seconds)
+                    try:
+                        yield
+                    finally:
+                        signal.alarm(0)
+
+                try:
+                    with timeout_context(30):  # 30 second timeout per sentence
+                        doc = self.nlp(sentence)
+                except TimeoutError:
+                    print(f"Timeout parsing sentence {i+1}, skipping...")
+                    # Create a simple fallback tree
+                    words = sentence.split()[:50]  # Limit to 50 words
+                    flat_tree = ['ROOT', ['S'] + [['WORD', word] for word in words]]
+                    trees.append(flat_tree)
+                    continue
+
                 if not doc.sentences:
                     raise ValueError("No sentences returned by parser")
-                    
+
                 # If we get multiple sentences, create a combined parse
                 if len(doc.sentences) > 1:
                     # Create a new root node for the combined parse

@@ -1,5 +1,6 @@
-# Dedicated Dockerfile for TokenSHAP (token-level SHAP for LLMs) with GPU support
-FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
+# Dedicated Dockerfile for TokenSHAP (token-level SHAP for LLMs) with GPU support.
+# Use CUDA 12.1 to keep the driver requirement aligned with the main container.
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -26,13 +27,12 @@ WORKDIR /tokenshap
 # Upgrade pip/setuptools/wheel first
 RUN python -m pip install --upgrade pip setuptools wheel
 
-# Install PyTorch (CUDA 12.8 build) + torchvision + torchaudio
-# Reference: https://pytorch.org
+# Install PyTorch (CUDA 12.1 build) + torchvision + torchaudio
 RUN pip install --no-cache-dir \
-    torch==2.8.0+cu128 \
-    torchvision==0.23.0+cu128 \
-    torchaudio==2.8.0+cu128 \
-    --index-url https://download.pytorch.org/whl/cu128
+    torch==2.3.1+cu121 \
+    torchvision==0.18.1+cu121 \
+    torchaudio==2.3.1+cu121 \
+    --index-url https://download.pytorch.org/whl/cu121
 
 # Install Transformers, Datasets, and related NLP utilities
 RUN pip install --no-cache-dir \

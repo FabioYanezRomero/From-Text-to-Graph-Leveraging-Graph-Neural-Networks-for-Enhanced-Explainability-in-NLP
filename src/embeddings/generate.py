@@ -203,6 +203,37 @@ def clean_graph_whitespace_nodes(graph):
                 graph.add_edge(parent, child)
         graph.remove_node(node)
 
+def _load_finetuned_weights_if_any(model, weights_path):
+    if not weights_path:
+        return model
+    import torch
+    if not os.path.isfile(weights_path):
+        print(f"[warn] Weights file not found: {weights_path}; using base model weights.")
+        return model
+    try:
+        sd = torch.load(weights_path, map_location='cpu')
+        # unpack common wrappers
+        if isinstance(sd, dict) and 'state_dict' in sd and isinstance(sd['state_dict'], dict):
+            sd = sd['state_dict']
+        # strip potential 'module.' prefixes
+        cleaned = {}
+        for k, v in sd.items():
+            nk = k[7:] if k.startswith('module.') else k
+            cleaned[nk] = v
+        # keep only keys present in the base model (ignore classifier heads etc.)
+        base_sd = model.state_dict()
+        filtered = {k: v for k, v in cleaned.items() if k in base_sd}
+        missing, unexpected = model.load_state_dict(filtered, strict=False)
+        print(f"[info] Loaded finetuned weights: {weights_path}")
+        if missing:
+            print(f"[info] Missing keys (ok): {len(missing)}")
+        if unexpected:
+            print(f"[info] Ignored unexpected keys (heads, etc.): {len(unexpected)}")
+    except Exception as e:
+        print(f"[warn] Failed to load finetuned weights '{weights_path}': {e}; using base model weights.")
+    return model
+
+
 def main():
 
     parser = argparse.ArgumentParser(description="Generate constituency or syntactic graphs with node embeddings for GNN training.")
@@ -213,6 +244,7 @@ def main():
     parser.add_argument('--tree_dir', type=str, default=f'{base}/graphs/stanfordnlp/sst2/validation/syntactic')
     parser.add_argument('--output_dir', type=str, default=f'{base}/embeddings/stanfordnlp/sst2/validation/syntactic')
     parser.add_argument('--model_name', type=str, default='bert-base-uncased')
+    parser.add_argument('--weights_path', type=str, default=os.environ.get('GRAPHTEXT_WEIGHTS_PATH', ''), help='Optional path to a finetuned .pt state_dict to load into the base model')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size for processing graphs and sentences')
     args = parser.parse_args()
@@ -224,7 +256,10 @@ def main():
     assert len(sentences) == total_graphs, f"Mismatch: {len(sentences)} sentences, {total_graphs} graphs"
     
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    model = AutoModel.from_pretrained(args.model_name).to(args.device)
+    model = AutoModel.from_pretrained(args.model_name)
+    # Optionally load a finetuned state_dict (e.g., model_epoch_X.pt) into the base model
+    model = _load_finetuned_weights_if_any(model, args.weights_path)
+    model = model.to(args.device)
 
     special_embeddings = {}
     if args.graph_type == 'constituency':

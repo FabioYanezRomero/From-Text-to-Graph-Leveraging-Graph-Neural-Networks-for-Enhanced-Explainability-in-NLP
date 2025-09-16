@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build word-window graphs for AG News and SST2 for multiple window sizes.
+# Build window graphs (word or token) for SST-2 and AG News across multiple window sizes.
 
 SIZES=(${SIZES:-1 2 3 5 7})
 DATASETS=("SetFit/ag_news" "stanfordnlp/sst2")
@@ -9,25 +9,11 @@ SUBSETS=(train validation test)
 BATCH_SIZE=${BATCH_SIZE:-256}
 DEVICE=${DEVICE:-cuda:0}
 OUT_BASE=${OUT_BASE:-outputs/graphs}
-# Prefer a fine-tuned model provided via env/route
-# You can define it in the environment or in scripts/models.env
+
+# Prefer a fine-tuned model provided via env/route (used by token-based builders)
 if [ -f "scripts/models.env" ]; then
   # shellcheck disable=SC1091
   source scripts/models.env
-fi
-
-# Selection order:
-# 1) $FINETUNED_MODEL_NAME (explicit fine-tuned route/id/path)
-# 2) $GRAPHTEXT_MODEL_NAME (project-wide default)
-# 3) $MODEL_NAME (legacy override)
-# 4) 'bert-base-uncased' (last-resort fallback)
-if [[ -n "${FINETUNED_MODEL_NAME:-}" ]]; then
-  MODEL_NAME="${FINETUNED_MODEL_NAME}"
-elif [[ -n "${GRAPHTEXT_MODEL_NAME:-}" ]]; then
-  MODEL_NAME="${GRAPHTEXT_MODEL_NAME}"
-else
-  MODEL_NAME=${MODEL_NAME:-bert-base-uncased}
-  echo "[warn] FINETUNED_MODEL_NAME/GRAPHTEXT_MODEL_NAME not set; using default '${MODEL_NAME}'." >&2
 fi
 
 # Auto-fallback to CPU if CUDA is not available to PyTorch
@@ -45,6 +31,15 @@ PY
     echo "[warn] torch.cuda.is_available()==False; falling back to CPU." >&2
     DEVICE=cpu
   fi
+fi
+
+if [[ -n "${FINETUNED_MODEL_NAME:-}" ]]; then
+  MODEL_NAME="${FINETUNED_MODEL_NAME}"
+elif [[ -n "${GRAPHTEXT_MODEL_NAME:-}" ]]; then
+  MODEL_NAME="${GRAPHTEXT_MODEL_NAME}"
+else
+  MODEL_NAME=${MODEL_NAME:-bert-base-uncased}
+  echo "[warn] FINETUNED_MODEL_NAME/GRAPHTEXT_MODEL_NAME not set; using default '${MODEL_NAME}'." >&2
 fi
 
 for ds in "${DATASETS[@]}"; do

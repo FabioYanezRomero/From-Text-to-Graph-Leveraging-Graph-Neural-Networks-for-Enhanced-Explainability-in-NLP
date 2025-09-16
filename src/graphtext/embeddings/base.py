@@ -57,6 +57,7 @@ class EmbedGraphsConfig:
     tree_dir: str
     output_dir: str
     model_name: str = "bert-base-uncased"
+    weights_path: str | None = None
     device: str = "cuda"
     batch_size: int = 128
 
@@ -81,6 +82,7 @@ class GraphEmbedder:
             "--tree_dir", cfg.tree_dir,
             "--output_dir", cfg.output_dir,
             "--model_name", cfg.model_name,
+            "--weights_path", cfg.weights_path or "",
             "--device", cfg.device,
             "--batch_size", str(cfg.batch_size),
         ]

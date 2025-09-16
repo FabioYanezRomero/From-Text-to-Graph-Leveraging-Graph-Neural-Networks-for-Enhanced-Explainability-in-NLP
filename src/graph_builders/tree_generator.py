@@ -74,7 +74,7 @@ def _parse_graph_type(graph_type: str):
     return f"{base}.{unit}", params
 
 
-def build_trees(graph_type, dataset_name, subset, batch_size, device, output_dir, model_name=None):
+def build_trees(graph_type, dataset_name, subset, batch_size, device, output_dir, model_name=None, weights_path=None, max_batches=None):
     """
     Build trees from a dataset
     
@@ -100,10 +100,25 @@ def build_trees(graph_type, dataset_name, subset, batch_size, device, output_dir
         init_params['device'] = device
     if model_name is not None and 'model_name' in sig.parameters:
         init_params['model_name'] = model_name
-    generator = GenCls(**init_params)
+    if weights_path is not None and 'weights_path' in sig.parameters:
+        init_params['weights_path'] = weights_path
+    try:
+        generator = GenCls(**init_params)
+    except ModuleNotFoundError as e:
+        raise RuntimeError(
+            "Missing dependency for graph type '" + graph_type + "': "
+            + str(e) + ". Install the required package(s), e.g., 'pip install stanza'"
+        ) from e
+    except RuntimeError as e:
+        # Surface clearer guidance for common setup issues (e.g., Stanza models)
+        raise
     # Load dataset
     instance = load_dataset(dataset_name, split=subset)
-    instance.set_format(type='torch')
+    # Let datasets return native Python types for strings; tensors for numeric where possible
+    try:
+        instance.set_format(type='torch')
+    except Exception:
+        pass
     dataloader = DataLoader(dataset=instance, batch_size=batch_size, shuffle=False)
     
     # Create output directory
@@ -116,10 +131,18 @@ def build_trees(graph_type, dataset_name, subset, batch_size, device, output_dir
         # Extract sentences and labels
         try:
             sentences = batch['sentence']
-        except:
-            sentences = batch['text']
-        
-        labels = batch['label']
+        except Exception:
+            sentences = batch.get('text')
+        # Create placeholder labels if not present (e.g., test split without labels)
+        try:
+            labels = batch['label']
+        except Exception:
+            import torch as _torch
+            try:
+                n = len(sentences)
+            except Exception:
+                n = 0
+            labels = _torch.full((n,), -1, dtype=_torch.long)
         
         # Generate trees
         trees = generator.get_graph(sentences)
@@ -129,9 +152,11 @@ def build_trees(graph_type, dataset_name, subset, batch_size, device, output_dir
         with open(f"{output_path}/{iterator}.pkl", 'wb') as f:
             pkl.dump(processed_data, f)
         iterator += 1
+        if max_batches is not None and iterator >= max_batches:
+            break
 
 
-def process_dataset(graph_type, dataset, subsets, batch_size, device, output_dir, model_name=None):
+def process_dataset(graph_type, dataset, subsets, batch_size, device, output_dir, model_name=None, weights_path=None, max_batches=None):
     """
     Process multiple datasets to generate constituency trees
     
@@ -167,6 +192,8 @@ def process_dataset(graph_type, dataset, subsets, batch_size, device, output_dir
                 device=device,
                 output_dir=output_dir,
                 model_name=model_name,
+                weights_path=weights_path,
+                max_batches=max_batches,
             )
         
         # Clear GPU memory again
@@ -175,12 +202,7 @@ def process_dataset(graph_type, dataset, subsets, batch_size, device, output_dir
 
 
 def subsets_handler(dataset, subsets):
-    if dataset == "SetFit/ag_news":
-        if "validation" in subsets:
-            subsets.remove("validation")
-    elif dataset == "stanfordnlp/sst2":
-        if "test" in subsets:
-            subsets.remove("test")
+    # Keep all provided subsets; builders now tolerate missing labels (e.g., test split)
     return subsets
 
 
@@ -194,6 +216,8 @@ def main(args):
         device=args.device,
         output_dir=args.output_dir,
         model_name=args.model_name,
+        weights_path=args.weights_path,
+        max_batches=args.max_batches,
     )
 
 
@@ -207,6 +231,8 @@ if __name__ == "__main__":
     import os as _os
     _base = _os.environ.get('GRAPHTEXT_OUTPUT_DIR', 'outputs')
     parser.add_argument("--output_dir", type=str, default=f"{_base}/graphs")
-    parser.add_argument("--model_name", type=str, required=True, help="HF model or checkpoint path for tokenization/embeddings where required")
+    parser.add_argument("--model_name", type=str, default=None, help="HF model name (only used by generators that require it)")
+    parser.add_argument("--weights_path", type=str, default=None, help="Path to fine-tuned model weights (optional)")
+    parser.add_argument("--max_batches", type=int, default=None, help="Limit number of batches per split (for quick tests)")
     args = parser.parse_args()
     main(args)

@@ -1,15 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build syntactic dependency trees for AG News using the registry-based generator.
+# Build syntactic dependency trees for SST-2 using the registry-based generator.
 
-DATASET="SetFit/ag_news"
-SUBSETS=(train test)
+DATASET="stanfordnlp/sst2"
+# Auto-detect all splits available in the dataset (e.g., train validation test)
+mapfile -t SUBSETS < <(python - <<'PY'
+from datasets import get_dataset_split_names
+import sys
+name = "stanfordnlp/sst2"
+try:
+    names = get_dataset_split_names(name)
+    print("\n".join(names))
+except Exception as e:
+    # Fallback to common splits if discovery fails
+    print("train\nvalidation\ntest")
+PY
+)
 BATCH_SIZE=${BATCH_SIZE:-256}
 DEVICE=${DEVICE:-cuda:0}
 OUT_BASE=${OUT_BASE:-outputs/graphs}
 
-# Model selection is not needed for syntactic tree building (uses Stanza only).
+# Model selection is not needed for syntactic tree building (uses Stanza).
+# Keep env sourcing for parity but avoid printing confusing BERT warnings.
 if [ -f "scripts/models.env" ]; then
   # shellcheck disable=SC1091
   source scripts/models.env

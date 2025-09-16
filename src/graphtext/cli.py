@@ -2,6 +2,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import os
 
 from .graphs import BaseGraphBuilder
 from .graphs.base import BuildArgs
@@ -68,6 +69,7 @@ def cmd_embed(args: argparse.Namespace):
         tree_dir=args.tree_dir,
         output_dir=args.output_dir,
         model_name=args.model_name,
+        weights_path=getattr(args, 'weights_path', None),
         device=args.device,
         batch_size=args.batch_size,
     )
@@ -210,6 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--tree_dir", required=True)
     s.add_argument("--output_dir", required=True)
     s.add_argument("--model_name", default="bert-base-uncased")
+    s.add_argument("--weights_path", default=os.environ.get('GRAPHTEXT_WEIGHTS_PATH', ''), help="Optional path to finetuned .pt state_dict to load into base model")
     s.add_argument("--device", default="cuda")
     s.add_argument("--batch_size", type=int, default=128)
     s.set_defaults(func=cmd_embed)

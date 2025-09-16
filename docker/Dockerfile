@@ -1,5 +1,5 @@
-# Use NVIDIA CUDA 12.4.1 as base image (matches cu124 PyTorch wheels)
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+# Use a CUDA 12.1 runtime so we only need NVIDIA drivers >= 530 on the host
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -36,7 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libopenblas-dev \
     libomp-dev \
     libopenmpi-dev \
-    cuda-compat-12-4 \
+    cuda-compat-12-1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create symlinks for python
@@ -49,22 +49,24 @@ WORKDIR /app
 # Ensure latest pip tooling
 RUN python3 -m pip install --upgrade pip setuptools wheel
 
-# Install PyTorch 2.6.0 with CUDA 12.4
+# Install PyTorch 2.3.1 with CUDA 12.1 (compatible with driver >= 530)
 RUN pip install --no-cache-dir \
-    torch==2.6.0+cu124 \
-    torchvision==0.21.0+cu124 \
-    torchaudio==2.6.0+cu124 \
-    --index-url https://download.pytorch.org/whl/cu124
+    torch==2.3.1+cu121 \
+    torchvision==0.18.1+cu121 \
+    torchaudio==2.3.1+cu121 \
+    --index-url https://download.pytorch.org/whl/cu121
 
-# Install PyTorch Geometric with dependencies for PyTorch 2.6.0
+# Install PyTorch Geometric with wheels matching PyTorch 2.3.1 + cu121
 RUN pip install --no-cache-dir \
-    torch_geometric==2.5.0 \
-    pyg_lib==0.4.0+pt26cu124 \
-    torch_scatter==2.1.2+pt26cu124 \
-    torch_sparse==0.6.18+pt26cu124 \
-    torch_cluster==1.6.3+pt26cu124 \
-    torch_spline_conv==1.2.2+pt26cu124 \
-    -f https://data.pyg.org/whl/torch-2.6.0+cu124.html
+    pyg_lib==0.4.0+pt23cu121 \
+    torch_scatter==2.1.2+pt23cu121 \
+    torch_sparse==0.6.18+pt23cu121 \
+    torch_cluster==1.6.3+pt23cu121 \
+    torch_spline_conv==1.2.2+pt23cu121 \
+    -f https://data.pyg.org/whl/torch-2.3.1+cu121.html
+
+# Install torch-geometric itself after the binary wheels are present
+RUN pip install --no-cache-dir torch_geometric==2.5.3
 
 # Install remaining dependencies (excluding torch and geometric packages)
 COPY requirements.txt .
