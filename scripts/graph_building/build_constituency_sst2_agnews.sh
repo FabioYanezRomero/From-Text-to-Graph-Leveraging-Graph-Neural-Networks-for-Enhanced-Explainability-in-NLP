@@ -32,19 +32,18 @@ if [ -f "scripts/models.env" ]; then
   source scripts/models.env
 fi
 
-# Set model name and checkpoint path based on dataset
+GLOBAL_MODEL_PREF=""
 if [[ -n "${FINETUNED_MODEL_NAME:-}" ]]; then
-  MODEL_NAME="${FINETUNED_MODEL_NAME}"
+  GLOBAL_MODEL_PREF="${FINETUNED_MODEL_NAME}"
 elif [[ -n "${GRAPHTEXT_MODEL_NAME:-}" ]]; then
-  MODEL_NAME="${GRAPHTEXT_MODEL_NAME}"
-else
-  MODEL_NAME=${MODEL_NAME:-bert-base-uncased}
-  echo "[warn] FINETUNED_MODEL_NAME/GRAPHTEXT_MODEL_NAME not set; using default '${MODEL_NAME}'." >&2
+  GLOBAL_MODEL_PREF="${GRAPHTEXT_MODEL_NAME}"
+elif [[ -n "${MODEL_NAME:-}" ]]; then
+  GLOBAL_MODEL_PREF="${MODEL_NAME}"
 fi
 
-# Set checkpoint path based on dataset
-if [[ -n "${SST2_CHECKPOINT:-}" || -n "${AGNEWS_CHECKPOINT:-}" ]]; then
-  echo "[info] Using local fine-tuned checkpoints for constituency parsing"
+DEFAULT_MODEL_NAME=${DEFAULT_MODEL_NAME:-bert-base-uncased}
+if [[ -z "$GLOBAL_MODEL_PREF" ]]; then
+  echo "[warn] FINETUNED_MODEL_NAME/GRAPHTEXT_MODEL_NAME not set; defaulting to '${DEFAULT_MODEL_NAME}'." >&2
 fi
 
 # Auto-fallback to CPU if CUDA is not available to PyTorch
@@ -68,16 +67,61 @@ fi
 for ds in "${DATASETS[@]}"; do
     echo "Building constituency for ${ds} -> ${OUT_BASE}"
 
-    # Set dataset-specific checkpoint path
-    if [[ "$ds" == "stanfordnlp/sst2" && -n "${SST2_CHECKPOINT:-}" ]]; then
-        CHECKPOINT_PATH="$SST2_CHECKPOINT"
-        echo "[info] Using SST-2 checkpoint: $CHECKPOINT_PATH"
-    elif [[ "$ds" == "SetFit/ag_news" && -n "${AGNEWS_CHECKPOINT:-}" ]]; then
-        CHECKPOINT_PATH="$AGNEWS_CHECKPOINT"
-        echo "[info] Using AG News checkpoint: $CHECKPOINT_PATH"
+    CHECKPOINT_PATH=""
+    case "$ds" in
+      stanfordnlp/sst2)
+        if [[ -n "${SST2_CHECKPOINT:-}" ]]; then
+          CHECKPOINT_PATH="$SST2_CHECKPOINT"
+        fi
+        ;;
+      SetFit/ag_news)
+        if [[ -n "${AGNEWS_CHECKPOINT:-}" ]]; then
+          CHECKPOINT_PATH="$AGNEWS_CHECKPOINT"
+        fi
+        ;;
+    esac
+
+    if [[ -n "$CHECKPOINT_PATH" && ! -f "$CHECKPOINT_PATH" ]]; then
+      echo "[warn] Expected checkpoint not found at $CHECKPOINT_PATH; proceeding without it." >&2
+      CHECKPOINT_PATH=""
+    elif [[ -n "$CHECKPOINT_PATH" ]]; then
+      echo "[info] Using dataset-specific checkpoint: $CHECKPOINT_PATH"
     else
-        CHECKPOINT_PATH=""
-        echo "[warn] No checkpoint found for $ds, using base model"
+      echo "[warn] No checkpoint found for $ds; using base model weights." >&2
+    fi
+
+    MODEL_FOR_DATASET="$GLOBAL_MODEL_PREF"
+    if [[ -z "$MODEL_FOR_DATASET" ]]; then
+      if [[ -n "$CHECKPOINT_PATH" ]]; then
+        CONFIG_MODEL=$(CONSTITUENCY_WEIGHTS="$CHECKPOINT_PATH" python3 - <<'PY'
+import json
+import os
+import sys
+weights_path = os.environ.get('CONSTITUENCY_WEIGHTS')
+if not weights_path:
+    sys.exit(0)
+cfg_path = os.path.join(os.path.dirname(weights_path), 'config.json')
+if not os.path.isfile(cfg_path):
+    sys.exit(0)
+try:
+    with open(cfg_path) as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(0)
+for key in ("model_name", "model_name_or_path", "pretrained_model_name"):
+    val = data.get(key)
+    if isinstance(val, str) and val.strip():
+        print(val.strip())
+        sys.exit(0)
+PY
+        )
+        if [[ -n "${CONFIG_MODEL:-}" ]]; then
+          MODEL_FOR_DATASET="$CONFIG_MODEL"
+        fi
+      fi
+      if [[ -z "$MODEL_FOR_DATASET" ]]; then
+        MODEL_FOR_DATASET="$DEFAULT_MODEL_NAME"
+      fi
     fi
 
     # Get available subsets for this dataset
@@ -95,7 +139,7 @@ for ds in "${DATASETS[@]}"; do
       --batch_size \"${BATCH_SIZE}\" \
       --device \"${DEVICE}\" \
       --output_dir \"${OUT_BASE}\" \
-      --model_name \"${MODEL_NAME}\""
+      --model_name \"${MODEL_FOR_DATASET}\""
 
     # Add checkpoint if available
     if [[ -n "$CHECKPOINT_PATH" ]]; then

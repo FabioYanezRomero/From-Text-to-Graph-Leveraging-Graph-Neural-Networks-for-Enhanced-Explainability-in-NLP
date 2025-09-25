@@ -10,27 +10,88 @@ from datasets import load_dataset
 from .dicts import constituency_dict
 import re
 
-def load_trees(tree_dir, batch_size):
+def _iter_graph_records(tree_dir):
+    files = [f for f in os.listdir(tree_dir) if re.fullmatch(r'\d+\.pkl', f)]
+    if not files:
+        raise FileNotFoundError(f"No numbered .pkl files found in {tree_dir}")
+    files_sorted = sorted(files, key=lambda x: int(x.split('.')[0]))
+    for fname in files_sorted:
+        with open(os.path.join(tree_dir, fname), "rb") as f:
+            obj = pkl.load(f)
+        if not (isinstance(obj, list) and obj and isinstance(obj[0], tuple) and len(obj[0]) >= 2):
+            raise ValueError(f"File {fname} does not match expected structure: list->[tuple]->[list, labels]")
+        graphs = obj[0][0]
+        labels = obj[0][1]
+        if not isinstance(graphs, list):
+            raise ValueError(f"File {fname} first element is not a list of graphs")
+        if isinstance(labels, torch.Tensor):
+            labels = labels.tolist()
+        labels = [int(label) for label in labels]
+        if len(graphs) != len(labels):
+            raise ValueError(f"Graph/label length mismatch in {fname}: {len(graphs)} vs {len(labels)}")
+        yield graphs, labels
+
+
+def iter_tree_batches(tree_dir, batch_size, *, return_labels: bool = False):
+    """Yield (graphs, labels) batches without keeping the entire dataset in memory."""
+    graph_buffer = []
+    label_buffer = [] if return_labels else None
+    for graphs, labels in _iter_graph_records(tree_dir):
+        for g, lbl in zip(graphs, labels):
+            graph_buffer.append(g)
+            if return_labels:
+                label_buffer.append(lbl)
+            if len(graph_buffer) == batch_size:
+                if return_labels:
+                    yield graph_buffer, label_buffer
+                    graph_buffer, label_buffer = [], []
+                else:
+                    yield graph_buffer
+                    graph_buffer = []
+        # Safety in case one record exceeds batch size exactly
+    if graph_buffer:
+        if return_labels:
+            yield graph_buffer, label_buffer
+        else:
+            yield graph_buffer
+
+
+def count_graphs_in_dir(tree_dir):
+    total = 0
+    for graphs, _ in _iter_graph_records(tree_dir):
+        total += len(graphs)
+    return total
+
+
+def collect_constituency_special_labels(tree_dir):
+    from .dicts import constituency_dict
+    special_labels = set(constituency_dict.values())
+    for graphs, _ in _iter_graph_records(tree_dir):
+        for graph in graphs:
+            for _, data in graph.nodes(data=True):
+                label = data.get('label')
+                if is_special_label(label):
+                    special_labels.add(label)
+    return special_labels
+
+
+def load_trees(tree_dir, batch_size, *, return_labels: bool = False):
     """
     Load all constituency trees from numbered pickle files in the directory, sorted numerically.
     Each .pkl file is a list, whose [0] is a tuple, whose [0][0] is a list of DiGraph objects.
     Returns a list of batches, each batch being a list of graphs of size batch_size (except possibly the last).
     """
-    files = [f for f in os.listdir(tree_dir) if re.fullmatch(r'\d+\.pkl', f)]
-    if not files:
-        raise FileNotFoundError(f"No numbered .pkl files found in {tree_dir}")
-    files_sorted = sorted(files, key=lambda x: int(x.split('.')[0]))
-    all_graphs = []
-    for fname in files_sorted:
-        with open(os.path.join(tree_dir, fname), "rb") as f:
-            obj = pkl.load(f)
-            # Expect obj to be a list, whose first element is a tuple, whose first element is a list of graphs
-            if isinstance(obj, list) and len(obj) > 0 and isinstance(obj[0], tuple) and len(obj[0]) > 0 and isinstance(obj[0][0], list):
-                all_graphs.extend(obj[0][0])
-            else:
-                raise ValueError(f"File {fname} does not match expected structure: list->[tuple]->[list]")
-    # Split into batches
-    batches = [all_graphs[i:i+batch_size] for i in range(0, len(all_graphs), batch_size)]
+    batches = []
+    label_batches = [] if return_labels else None
+    for item in iter_tree_batches(tree_dir, batch_size, return_labels=return_labels):
+        if return_labels:
+            graphs, labels = item
+            batches.append(graphs)
+            label_batches.append(labels)
+        else:
+            batches.append(item)
+    if return_labels:
+        return batches, label_batches
     return batches
 
 def load_sentences(dataset_name, split):
@@ -52,22 +113,19 @@ def is_special_label(label):
     )
 
 def _expr_from_special_label(label: str) -> str:
-    """Return the natural-language expression for a special node label.
+    """Return the literal expression for a special node label.
 
-    Labels may come already pretty-formatted with guillemets (e.g., «NOUN PHRASE»).
-    We strip decorative quotes and extra whitespace to form the text we feed to
-    the language model for [CLS] pooling.
+    We keep the full token, replacing guillemets with ASCII brackets so the
+    checkpoint receives the exact symbolic tag (e.g., «UNKNOWN» -> <<UNKNOWN>>).
     """
     if not isinstance(label, str):
         return str(label)
-    # strip guillemets and whitespace
     s = label.strip()
-    if s.startswith('«') and s.endswith('»') and len(s) >= 2:
-        s = s[1:-1]
-    return s.strip()
+    s = s.replace('«', '<<').replace('»', '>>')
+    return s
 
-def validate_graph_structure(graph, graph_idx=None):
-    """Assert that all non-leaf nodes are special and all leaf nodes are words (not special)."""
+def validate_graph_structure(graph, graph_idx=None, *, allow_special_leaves: bool = False):
+    """Assert that all non-leaf nodes are special and, unless allowed, leaf nodes are words."""
     for nid, data in graph.nodes(data=True):
         out_degree = graph.out_degree(nid)
         label = data['label']
@@ -76,9 +134,10 @@ def validate_graph_structure(graph, graph_idx=None):
                 f"Non-leaf node (id={nid}, label={label}) in graph {graph_idx} is not a valid special label!"
             )
         else:
-            assert label not in constituency_dict.values(), (
-                f"Leaf node (id={nid}, label={label}) in graph {graph_idx} is a special label, expected a word!"
-            )
+            if not allow_special_leaves:
+                assert label not in constituency_dict.values(), (
+                    f"Leaf node (id={nid}, label={label}) in graph {graph_idx} is a special label, expected a word!"
+                )
 
 def normalize_special_labels(graph):
     """Replace any non-leaf node label that is a key in constituency_dict with its pretty label."""

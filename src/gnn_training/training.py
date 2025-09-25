@@ -17,7 +17,7 @@ Performance Improvements:
 """
 
 from __future__ import annotations
-import glob, os, pickle, json, argparse, threading, gc, psutil, time
+import glob, os, pickle, json, argparse, threading, gc, psutil, time, shutil, math
 from typing import List, Tuple, Dict, Any, Optional, Union
 from datetime import datetime
 from collections import OrderedDict
@@ -522,7 +522,18 @@ class GNNTrainer:
         self.patience_counter = 0
         self.peak_memory = 0
         self.current_epoch = 0  # Initialize current_epoch counter
-        
+
+        # Prepare output directory for checkpoints and logs
+        default_run_dir = Path('gnn_training_runs') / datetime.now().strftime('%Y%m%d_%H%M%S')
+        configured_dir = config.get('output_dir')
+        self.output_dir = Path(configured_dir) if configured_dir else default_run_dir
+        self.output_dir = self.output_dir.resolve()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.best_model_path = self.output_dir / 'best_model.pth'
+        if self.best_model_path.exists():
+            print(f"Removing existing checkpoint at {self.best_model_path} to start fresh...")
+            self.best_model_path.unlink()
+
         # Initialize gradient scaler for mixed precision training
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.device.type == 'cuda')
         
@@ -548,7 +559,7 @@ class GNNTrainer:
         for k, v in config.items():
             if k not in ['train_data_dir', 'val_data_dir', 'test_data_dir']:
                 print(f"  {k}: {v}")
-        
+
         print("\nLoading datasets...")
         
         # Training data (required)
@@ -635,20 +646,28 @@ class GNNTrainer:
             self.scheduler = None
         
         # Training state
-        self.best_val_loss = float('inf')
-        self.best_val_acc = 0.0
+        self.best_metric_loss = float('inf')
+        self.best_metric_acc = 0.0
+        self.best_metric_source = None
         self.patience_counter = 0
-        self.training_history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
+        self.training_history = {
+            'train_loss': [], 'train_acc': [],
+            'val_loss': [], 'val_acc': [],
+            'test_loss': [], 'test_acc': []
+        }
         
         print(f"Model initialized with {sum(p.numel() for p in self.model.parameters())} parameters")
 
-    def validate(self) -> Tuple[float, float]:
+    def validate(self, record_history: bool = True) -> Tuple[float, float]:
         """Validate the model on the validation set.
         
         Returns:
             Tuple of (average loss, accuracy)
         """
         if not self.use_validation or self.val_loader is None:
+            if record_history:
+                self.training_history['val_loss'].append(None)
+                self.training_history['val_acc'].append(None)
             print("No validation data provided, skipping validation")
             return float('inf'), 0.0
             
@@ -685,42 +704,164 @@ class GNNTrainer:
         accuracy = 100.0 * total_correct / total_samples if total_samples > 0 else 0.0
         
         # Update training history
-        self.training_history['val_loss'].append(avg_loss)
-        self.training_history['val_acc'].append(accuracy)
+        if record_history:
+            self.training_history['val_loss'].append(avg_loss)
+            self.training_history['val_acc'].append(accuracy)
         
         print(f"\nValidation - Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%")
-        
+
         return avg_loss, accuracy
-        
+
+    def test_epoch(self, record_history: bool = True) -> Tuple[float, float]:
+        """Evaluate the model on the test set."""
+        if not self.use_test or self.test_loader is None:
+            if record_history:
+                self.training_history['test_loss'].append(None)
+                self.training_history['test_acc'].append(None)
+            print("No test data provided, skipping test")
+            return float('inf'), 0.0
+
+        self.model.eval()
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+
+        with torch.no_grad():
+            for batch in tqdm(self.test_loader, desc="Testing"):
+                try:
+                    batch = batch.to(self.device)
+                    out = self.model(batch)
+                    loss = F.cross_entropy(out, batch.y)
+
+                    pred = out.argmax(dim=1)
+                    correct = (pred == batch.y).sum().item()
+
+                    total_loss += loss.item() * batch.num_graphs
+                    total_correct += correct
+                    total_samples += batch.num_graphs
+                except Exception as e:
+                    print(f"Error during test batch: {str(e)}")
+                    continue
+
+        avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
+        accuracy = 100.0 * total_correct / total_samples if total_samples > 0 else 0.0
+
+        if record_history:
+            self.training_history['test_loss'].append(avg_loss)
+            self.training_history['test_acc'].append(accuracy)
+
+        print(f"\nTest - Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%")
+
+        return avg_loss, accuracy
+
+    def evaluate_test(self, record_history: bool = False) -> Optional[Dict[str, float]]:
+        """Run full test evaluation returning detailed metrics."""
+        if not self.use_test or self.test_loader is None:
+            if record_history:
+                self.training_history['test_loss'].append(None)
+                self.training_history['test_acc'].append(None)
+            print("No test data provided, skipping testing")
+            return None
+
+        self.model.eval()
+        total_loss = 0.0
+        total_samples = 0
+        all_preds = []
+        all_labels = []
+
+        with torch.no_grad():
+            for batch in tqdm(self.test_loader, desc="Testing"):
+                batch = batch.to(self.device)
+                out = self.model(batch)
+                loss = F.cross_entropy(out, batch.y)
+                total_loss += loss.item() * batch.num_graphs
+                total_samples += batch.num_graphs
+                preds = out.argmax(dim=1).detach().cpu()
+                labels = batch.y.detach().cpu()
+                all_preds.append(preds)
+                all_labels.append(labels)
+
+        if total_samples == 0:
+            return None
+
+        all_preds = torch.cat(all_preds).numpy()
+        all_labels = torch.cat(all_labels).numpy()
+
+        avg_loss = total_loss / total_samples
+        accuracy = accuracy_score(all_labels, all_preds)
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            all_labels, all_preds, average='weighted', zero_division=0
+        )
+
+        metrics = {
+            'loss': avg_loss,
+            'accuracy': accuracy,
+            'precision': precision,
+            'recall': recall,
+            'f1': f1
+        }
+
+        if record_history:
+            self.training_history['test_loss'].append(avg_loss)
+            self.training_history['test_acc'].append(accuracy * 100.0)
+
+        return metrics
+
     def _free_memory(self):
         """Simple memory cleanup."""
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     
-    def save_model(self, path: str, epoch: int, val_loss: float, val_acc: float):
+    def save_model(self, path: str, epoch: int, metric_loss: float, metric_acc: float, metric_source: str):
         """Save model checkpoint."""
         try:
+            path = Path(path)
             checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': self.model.state_dict(),
                 'optimizer_state_dict': self.optimizer.state_dict(),
-                'best_val_loss': self.best_val_loss,
-                'best_val_acc': self.best_val_acc,
+                'best_metric_loss': self.best_metric_loss,
+                'best_metric_acc': self.best_metric_acc,
+                'best_metric_source': self.best_metric_source,
+                'saved_metric_loss': metric_loss,
+                'saved_metric_acc': metric_acc,
+                'saved_metric_source': metric_source,
                 'config': self.config
             }
             if self.scheduler is not None:
                 checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
-            
+
             # Create directory if it doesn't exist
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            
+            path.parent.mkdir(parents=True, exist_ok=True)
+
             # Save the checkpoint
-            torch.save(checkpoint, path)
+            torch.save(checkpoint, str(path))
             print(f"Model saved to {path}")
             return True
         except Exception as e:
             print(f"Error saving model: {str(e)}")
             return False
+
+    def load_model(self, path: str):
+        """Load model, optimizer, and scheduler state from checkpoint."""
+        checkpoint = torch.load(path, map_location=self.device)
+        state_dict = checkpoint.get('model_state_dict', checkpoint)
+        self.model.load_state_dict(state_dict)
+
+        if 'optimizer_state_dict' in checkpoint:
+            try:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            except Exception as exc:
+                print(f"Warning: failed to load optimizer state: {exc}")
+        if 'scheduler_state_dict' in checkpoint and self.scheduler is not None:
+            try:
+                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            except Exception as exc:
+                print(f"Warning: failed to load scheduler state: {exc}")
+
+        self.best_metric_loss = checkpoint.get('best_metric_loss', checkpoint.get('best_val_loss', self.best_metric_loss))
+        self.best_metric_acc = checkpoint.get('best_metric_acc', checkpoint.get('best_val_acc', self.best_metric_acc))
+        self.best_metric_source = checkpoint.get('best_metric_source', checkpoint.get('saved_metric_source', self.best_metric_source))
         
     def _log_memory_usage(self, prefix=""):
         """Log current memory usage."""
@@ -786,50 +927,29 @@ class GNNTrainer:
                 raise
                 
         # Calculate epoch metrics
-        avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
-        accuracy = total_correct / total_samples if total_samples > 0 else 0.0
-        
-        print(f"\nEpoch {self.current_epoch + 1} - Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f}")
-        
-        # Update epoch counter
-        self.current_epoch += 1
-        
-        return avg_loss, accuracy
-        
-        pbar.close()
-        
-        # Calculate epoch metrics
         if total_samples > 0:
             avg_loss = total_loss / total_samples
-            accuracy = total_correct / total_samples
+            accuracy = 100.0 * total_correct / total_samples
         else:
             print("\nWarning: No valid samples processed in this epoch")
             avg_loss = float('inf')
             accuracy = 0.0
-        
-        # Memory summary
-        if self.device.type == 'cuda':
-            gpu_mem = torch.cuda.max_memory_allocated() / (1024 ** 3)  # GB
-            print(f"\nGPU Memory peak: {gpu_mem:.2f}GB")
-            
-        print(f"\nEpoch complete - Processed {total_samples} samples")
-        print(f"Average Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f}")
-        print(f"{'='*50}\n")
-        
-        # Update current epoch counter
+
+        print(f"\nEpoch {self.current_epoch + 1} - Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%")
+
+        # Update epoch counter
         self.current_epoch += 1
-        
+
         return avg_loss, accuracy
 
     def train(self):
         """Complete training loop with early stopping and memory optimization."""
-        best_model_path = os.path.join(os.getcwd(), 'best_model.pt')
         start_epoch = 0
-        
+
         # Always start fresh - remove any existing checkpoints
-        if os.path.exists(best_model_path):
+        if self.best_model_path.exists():
             print("Removing existing checkpoint to start fresh...")
-            os.remove(best_model_path)
+            self.best_model_path.unlink()
         start_epoch = 0
         print("Starting fresh training from epoch 0")
         
@@ -838,9 +958,10 @@ class GNNTrainer:
         print(f"Effective batch size: {self.config['batch_size'] * self.gradient_accumulation_steps}\n")
         
         # Initialize variables for error handling
-        val_loss = float('inf')
-        val_acc = 0.0
-        
+        last_epoch = start_epoch - 1
+        last_metric_loss = float('inf')
+        last_metric_acc = 0.0
+        last_metric_source = 'train'
         try:
             for epoch in range(start_epoch, self.config['epochs']):
                 epoch_start_time = time.time()
@@ -848,34 +969,73 @@ class GNNTrainer:
                 
                 # Train for one epoch
                 train_loss, train_acc = self.train_epoch()
+                self.training_history['train_loss'].append(train_loss)
+                self.training_history['train_acc'].append(train_acc)
                 
                 # Free up memory before validation
                 self._free_memory()
                 
-                # Validate
-                val_metrics = self.validate()
-                val_loss = val_metrics[0] if val_metrics else float('inf')
-                val_acc = val_metrics[1] if val_metrics else 0.0
+                # Validate if available
+                if self.use_validation and self.val_loader is not None:
+                    val_loss, val_acc = self.validate()
+                else:
+                    val_loss, val_acc = float('inf'), 0.0
+                    self.training_history['val_loss'].append(None)
+                    self.training_history['val_acc'].append(None)
+
+                # Test if available (per epoch)
+                if self.use_test and self.test_loader is not None:
+                    test_loss, test_acc = self.test_epoch()
+                else:
+                    test_loss, test_acc = float('inf'), 0.0
+                    self.training_history['test_loss'].append(None)
+                    self.training_history['test_acc'].append(None)
                 
                 # Update learning rate
                 if self.scheduler:
+                    scheduler_metric = val_loss
+                    if not math.isfinite(scheduler_metric):
+                        scheduler_metric = test_loss if math.isfinite(test_loss) else train_loss
                     if isinstance(self.scheduler, ReduceLROnPlateau):
-                        self.scheduler.step(val_loss)
+                        self.scheduler.step(scheduler_metric)
                     else:
                         self.scheduler.step()
-                
-                # Save model if validation loss improved
-                if val_loss < self.best_val_loss:
-                    self.best_val_loss = val_loss
-                    self.best_val_acc = val_acc
+
+                # Determine governing metric for checkpointing (test > validation > train)
+                metric_loss = float('inf')
+                metric_acc = 0.0
+                metric_source = 'train'
+                if math.isfinite(test_loss):
+                    metric_loss, metric_acc, metric_source = test_loss, test_acc, 'test'
+                elif math.isfinite(val_loss):
+                    metric_loss, metric_acc, metric_source = val_loss, val_acc, 'validation'
+                else:
+                    metric_loss, metric_acc, metric_source = train_loss, train_acc, 'train'
+
+                improved = False
+                if math.isfinite(metric_loss):
+                    if not math.isfinite(self.best_metric_loss) or metric_loss < self.best_metric_loss:
+                        improved = True
+                elif not math.isfinite(self.best_metric_loss):
+                    if metric_acc > self.best_metric_acc:
+                        improved = True
+
+                if improved:
+                    self.best_metric_loss = metric_loss
+                    self.best_metric_acc = metric_acc
+                    self.best_metric_source = metric_source
                     self.patience_counter = 0
                     self.save_model(
-                        best_model_path,
+                        self.best_model_path,
                         epoch,
-                        val_loss,
-                        val_acc
+                        metric_loss,
+                        metric_acc,
+                        metric_source
                     )
-                    print(f"Saved best model with val_loss: {val_loss:.4f}, val_acc: {val_acc:.4f}")
+                    loss_msg = f"{metric_loss:.4f}" if math.isfinite(metric_loss) else "N/A"
+                    print(f"Saved best model based on {metric_source} set (loss: {loss_msg}, acc: {metric_acc:.2f}%)")
+                else:
+                    self.patience_counter += 1
                 
                 # Early stopping
                 if self.patience_counter >= self.config['patience']:
@@ -885,53 +1045,83 @@ class GNNTrainer:
                 # Log epoch time and memory usage
                 epoch_time = time.time() - epoch_start_time
                 print(f"Epoch {epoch + 1} completed in {epoch_time:.2f} seconds")
-                print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, "
-                      f"Train Acc: {train_acc:.2f}%, Val Acc: {val_acc:.2f}%")
-                
+
+                val_loss_display = f"{val_loss:.4f}" if math.isfinite(val_loss) else "N/A"
+                val_acc_display = f"{val_acc:.2f}%" if math.isfinite(val_loss) else "N/A"
+                test_loss_display = f"{test_loss:.4f}" if math.isfinite(test_loss) else "N/A"
+                test_acc_display = f"{test_acc:.2f}%" if math.isfinite(test_loss) else "N/A"
+
+                print(
+                    f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss_display}, Test Loss: {test_loss_display}, "
+                    f"Train Acc: {train_acc:.2f}%, Val Acc: {val_acc_display}, Test Acc: {test_acc_display}"
+                )
+
                 # Force garbage collection between epochs
                 self._free_memory()
-            
+                last_epoch = epoch
+                last_metric_loss = metric_loss
+                last_metric_acc = metric_acc
+                last_metric_source = metric_source
+
             print("\nTraining completed!")
-            
+
         except RuntimeError as e:
             print(f"\nTraining interrupted due to error: {str(e)}")
             import traceback
             traceback.print_exc()
         
+        # If no validation improvements occurred, save the final model as best
+        if not self.best_model_path.exists():
+            print("No evaluation improvements recorded; saving final epoch as best checkpoint.")
+            self.best_metric_loss = last_metric_loss
+            self.best_metric_acc = last_metric_acc
+            self.best_metric_source = last_metric_source
+            self.save_model(self.best_model_path, last_epoch, last_metric_loss, last_metric_acc, last_metric_source)
+
         # Load best model for testing
-        if os.path.exists(best_model_path):
-            checkpoint = torch.load(best_model_path, map_location=self.device)
+        if self.best_model_path.exists():
+            checkpoint = torch.load(self.best_model_path, map_location=self.device)
             self.model.load_state_dict(checkpoint.get('model_state_dict', checkpoint))
-            
+
             # Safely get values with defaults
             epoch = checkpoint.get('epoch', 0)
-            val_loss = checkpoint.get('val_loss', 0.0)
-            print(f"\nLoaded best model from epoch {epoch + 1} with val_loss {val_loss:.4f}")
-        
+            best_loss = checkpoint.get('best_metric_loss', checkpoint.get('saved_metric_loss', float('inf')))
+            best_source = checkpoint.get('best_metric_source', checkpoint.get('saved_metric_source', 'validation'))
+            if math.isfinite(best_loss):
+                print(f"\nLoaded best model from epoch {epoch + 1} (based on {best_source}) with loss {best_loss:.4f}")
+            else:
+                print(f"\nLoaded best model from epoch {epoch + 1} (based on {best_source})")
+
         # Test if test data is available
         if self.use_test and self.test_loader is not None:
             print("\nTesting on test set...")
-            test_metrics = self.test()
+            test_metrics = self.evaluate_test(record_history=False)
             if test_metrics:
                 print(f"Test Loss: {test_metrics['loss']:.4f}, Test Acc: {test_metrics['accuracy']:.4f}")
         
         # Create output directory
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = f"gnn_training_{timestamp}"
+        output_dir = str(self.output_dir)
         os.makedirs(output_dir, exist_ok=True)
         
         try:
             # Save config
             with open(os.path.join(output_dir, 'config.json'), 'w') as f:
                 json.dump(self.config, f, indent=2)
-            
+
             # Save the final model
             final_model_path = os.path.join(output_dir, 'final_model.pth')
-            self.save_model(final_model_path, epoch, val_loss, val_acc)
+            final_epoch = last_epoch if last_epoch >= 0 else 0
+            self.save_model(final_model_path, final_epoch, last_metric_loss, last_metric_acc, last_metric_source)
             print(f"Final model saved to {final_model_path}")
-            
+
             # If using validation, also save the best model
-            if self.use_validation and hasattr(self, 'best_model_path'):
+            if self.best_model_path.exists():
+                best_target = Path(output_dir) / 'best_model.pth'
+                if best_target.resolve() != self.best_model_path:
+                    try:
+                        shutil.copy2(self.best_model_path, best_target)
+                    except Exception as copy_exc:
+                        print(f"Warning: failed to copy best model to output dir: {copy_exc}")
                 print(f"Best model saved to {self.best_model_path}")
         
         except Exception as e:
@@ -939,17 +1129,20 @@ class GNNTrainer:
             print("Attempting to save current model state...")
             try:
                 error_path = os.path.join(output_dir, f'model_error.pth')
-                self.save_model(error_path, epoch, float('inf'), 0.0)
+                self.save_model(error_path, last_epoch if last_epoch >= 0 else 0, float('inf'), 0.0, 'error')
                 print(f"Model state saved to {error_path}")
             except:
                 print("Failed to save model state")
             raise
         
-        # Load best model for testing if validation was used
-        if self.use_validation and os.path.exists(os.path.join(output_dir, 'best_model.pth')):
+        # Load best model stored in output directory if available
+        if os.path.exists(os.path.join(output_dir, 'best_model.pth')):
             try:
                 self.load_model(os.path.join(output_dir, 'best_model.pth'))
-                print(f"\nLoaded best model with Val Loss: {self.best_val_loss:.4f}, Val Acc: {self.best_val_acc:.4f}")
+                if math.isfinite(self.best_metric_loss):
+                    print(f"\nLoaded best model with {self.best_metric_source.capitalize()} Loss: {self.best_metric_loss:.4f}, Acc: {self.best_metric_acc:.2f}%")
+                else:
+                    print(f"\nLoaded best model based on {self.best_metric_source} accuracy: {self.best_metric_acc:.2f}%")
             except Exception as e:
                 print(f"\nFailed to load best model: {str(e)}")
         
@@ -957,7 +1150,7 @@ class GNNTrainer:
         if self.use_test and self.test_loader is not None:
             print("\nEvaluating on test set...")
             try:
-                test_results = self.test()
+                test_results = self.evaluate_test(record_history=False)
                 if test_results is not None:
                     print(f"\nTest Results:")
                     print(f"  Loss: {test_results['loss']:.4f}")
@@ -980,34 +1173,36 @@ class GNNTrainer:
                 json.dump(self.training_history, f, indent=2)
         except Exception as e:
             print(f"\nFailed to save training history: {str(e)}")
-        
+
         print(f"\nTraining completed! Results saved in: {output_dir}")
         return output_dir
 
 
-    def main():
+def main():
     """Main training function with optimized defaults."""
     parser = argparse.ArgumentParser(description='Optimized GNN Training Pipeline')
-    
+
     # Data paths
-    parser.add_argument('--train_data_dir', type=str, 
-                       default="outputs/pyg_graphs/stanfordnlp/sst2/syntactic/train")
-    parser.add_argument('--val_data_dir', type=str, 
-                       default="outputs/pyg_graphs/stanfordnlp/sst2/syntactic/validation")
-    
+    parser.add_argument('--train_data_dir', type=str,
+                       default="")
+    parser.add_argument('--val_data_dir', type=str,
+                       default="")
+    parser.add_argument('--test_data_dir', type=str, default="",
+                       help='Optional directory with test graphs')
+
     # Model architecture
-    parser.add_argument('--module', type=str, default='TransformerConv')
+    parser.add_argument('--module', type=str, default='GCNConv')
     parser.add_argument('--hidden_dim', type=int, default=128)
     parser.add_argument('--num_layers', type=int, default=2)
-    parser.add_argument('--heads', type=int, default=4)
+    parser.add_argument('--heads', type=int, default=1)
     parser.add_argument('--dropout', type=float, default=0.5)
     parser.add_argument('--pooling', type=str, default='mean')
     parser.add_argument('--layer_norm', action='store_true')
     parser.add_argument('--residual', action='store_true')
-    
+
     # Training parameters
-    parser.add_argument('--epochs', type=int, default=5)
-    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--epochs', type=int, default=20)
+    parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--learning_rate', type=float, default=0.001)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
     parser.add_argument('--optimizer', type=str, default='Adam')
@@ -1015,23 +1210,32 @@ class GNNTrainer:
     parser.add_argument('--patience', type=int, default=5)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--cache_size', type=int, default=0, help='Set to 0 to disable caching')
-    
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=1)
+    parser.add_argument('--output_dir', type=str, default="",
+                       help='Directory to store checkpoints and logs (created if missing)')
+
     args = parser.parse_args()
-    
+
     # Convert args to config dictionary
     config = vars(args)
     if config['scheduler'] == 'None':
         config['scheduler'] = None
-        
+    if not config.get('test_data_dir'):
+        config['test_data_dir'] = None
+    if not config.get('val_data_dir'):
+        config['val_data_dir'] = None
+    if not config.get('train_data_dir'):
+        raise ValueError("--train_data_dir must be provided")
+
     # Initialize and run trainer
     trainer = GNNTrainer(config)
     output_dir = trainer.train()
-    
+
     return output_dir
 
 
 if __name__ == '__main__':
     main()
-    
+
 # Backwards-compat alias
 GNN_Classifier = GNNClassifier

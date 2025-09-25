@@ -65,6 +65,11 @@ def nx_to_pyg(graph: nx.DiGraph):
     data.node_labels = labels
     data.edge_labels = edge_labels
     data.nx_node_names = node_list  # For reference
+
+    # Add data index information for label mapping (assuming single graph per data sample)
+    # This is a placeholder - you may need to adjust based on your graph creation process
+    data.data_index = 0  # Default index, should be set by the calling code
+
     return data
 
 def nx_list_to_pyg(graphs):

@@ -196,6 +196,21 @@ if [ -f "scripts/models.env" ]; then
   source scripts/models.env
 fi
 
+RESOLVED_WEIGHTS=""
+case "$DATASET" in
+  stanfordnlp/sst2|StanfordNLP/sst2|SST2|sst2)
+    if [[ -n "${SST2_CHECKPOINT:-}" ]]; then
+      RESOLVED_WEIGHTS="$SST2_CHECKPOINT"
+    fi
+    ;;
+  SetFit/ag_news|setfit/ag_news|SetFit/AG_NEWS|AG_NEWS|ag_news|ag-news)
+    if [[ -n "${AGNEWS_CHECKPOINT:-}" ]]; then
+      RESOLVED_WEIGHTS="$AGNEWS_CHECKPOINT"
+    fi
+    ;;
+esac
+
+RESOLVED_MODEL=""
 if [[ -n "$MODEL_OVERRIDE" ]]; then
   MODEL_NAME="$MODEL_OVERRIDE"
 elif [[ -n "${FINETUNED_MODEL_NAME:-}" ]]; then
@@ -203,8 +218,46 @@ elif [[ -n "${FINETUNED_MODEL_NAME:-}" ]]; then
 elif [[ -n "${GRAPHTEXT_MODEL_NAME:-}" ]]; then
   MODEL_NAME="$GRAPHTEXT_MODEL_NAME"
 else
-  MODEL_NAME=${MODEL_NAME:-bert-base-uncased}
-  echo "[warn] FINETUNED_MODEL_NAME/GRAPHTEXT_MODEL_NAME not set; using default '${MODEL_NAME}'." >&2
+  if [[ -z "$RESOLVED_MODEL" && -n "$RESOLVED_WEIGHTS" && -f "$RESOLVED_WEIGHTS" ]]; then
+    CONFIG_MODEL=$(NGRAM_SKIPGRAM_WEIGHTS="$RESOLVED_WEIGHTS" python3 - <<'PY'
+import json
+import os
+import sys
+weights_path = os.environ.get('NGRAM_SKIPGRAM_WEIGHTS')
+if not weights_path:
+    sys.exit(0)
+cfg_path = os.path.join(os.path.dirname(weights_path), 'config.json')
+if not os.path.isfile(cfg_path):
+    sys.exit(0)
+try:
+    with open(cfg_path) as f:
+        data = json.load(f)
+except Exception:
+    sys.exit(0)
+for key in ("model_name", "model_name_or_path", "pretrained_model_name"):
+    val = data.get(key)
+    if isinstance(val, str) and val.strip():
+        print(val.strip())
+        sys.exit(0)
+PY
+    )
+    if [[ -n "${CONFIG_MODEL:-}" ]]; then
+      RESOLVED_MODEL="$CONFIG_MODEL"
+    fi
+  fi
+  if [[ -n "$RESOLVED_MODEL" ]]; then
+    MODEL_NAME="$RESOLVED_MODEL"
+  else
+    MODEL_NAME=${MODEL_NAME:-bert-base-uncased}
+    echo "[warn] FINETUNED_MODEL_NAME/GRAPHTEXT_MODEL_NAME not set; using default '${MODEL_NAME}'." >&2
+  fi
+fi
+
+if [[ -n "$RESOLVED_WEIGHTS" && ! -f "$RESOLVED_WEIGHTS" ]]; then
+  echo "[warn] Expected checkpoint not found at $RESOLVED_WEIGHTS; proceeding without it." >&2
+  RESOLVED_WEIGHTS=""
+elif [[ -n "$RESOLVED_WEIGHTS" ]]; then
+  echo "[info] Using dataset-specific checkpoint: $RESOLVED_WEIGHTS" >&2
 fi
 
 if [[ "$DEVICE" == cuda:* || "$DEVICE" == cuda ]]; then
@@ -242,6 +295,9 @@ for unit in "${GRAPH_UNITS[@]}"; do
             --device "$DEVICE"
             --output_dir "$OUT_BASE"
             --model_name "$MODEL_NAME")
+          if [[ -n "$RESOLVED_WEIGHTS" ]]; then
+            CMD+=(--weights_path "$RESOLVED_WEIGHTS")
+          fi
           if [[ -n "$MAX_BATCHES" ]]; then
             CMD+=(--max_batches "$MAX_BATCHES")
           fi
@@ -261,6 +317,9 @@ for unit in "${GRAPH_UNITS[@]}"; do
               --device "$DEVICE"
               --output_dir "$OUT_BASE"
               --model_name "$MODEL_NAME")
+            if [[ -n "$RESOLVED_WEIGHTS" ]]; then
+              CMD+=(--weights_path "$RESOLVED_WEIGHTS")
+            fi
             if [[ -n "$MAX_BATCHES" ]]; then
               CMD+=(--max_batches "$MAX_BATCHES")
             fi
