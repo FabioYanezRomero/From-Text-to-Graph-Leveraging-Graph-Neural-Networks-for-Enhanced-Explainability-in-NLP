@@ -3,6 +3,7 @@
 
 # Machine learning and data processing
 transformers
+bitsandbytes
 datasets
 networkx
 pandas

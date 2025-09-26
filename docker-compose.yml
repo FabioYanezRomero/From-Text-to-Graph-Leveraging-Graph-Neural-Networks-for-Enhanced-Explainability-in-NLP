@@ -1,9 +1,5 @@
 # Using Docker Compose V2 syntax (no version field needed)
 
-volumes:
-  app-data:
-    driver: local
-
 services:
   # Main application service
   app:
@@ -20,9 +16,9 @@ services:
       - type: bind
         source: .
         target: /app
-      # Shared data volume
-      - type: volume
-        source: app-data
+      # Share host data directory with container
+      - type: bind
+        source: ./data
         target: /app/data
     working_dir: /app/src
     tty: true
@@ -57,8 +53,8 @@ services:
       - type: bind
         source: .
         target: /app
-      - type: volume
-        source: app-data
+      - type: bind
+        source: ./data
         target: /app/data
     working_dir: /graphsvx
     tty: true
@@ -96,8 +92,8 @@ services:
       - type: bind
         source: .
         target: /app
-      - type: volume
-        source: app-data
+      - type: bind
+        source: ./data
         target: /app/data
     working_dir: /shap
     tty: true
@@ -136,8 +132,8 @@ services:
       - type: bind
         source: .
         target: /app
-      - type: volume
-        source: app-data
+      - type: bind
+        source: ./data
         target: /app/data
     working_dir: /tokenshap
     tty: true
