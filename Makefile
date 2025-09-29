@@ -147,6 +147,11 @@ graphsvx-test:
 	@echo "${GREEN}🧪 Running GraphSVX tests...${RESET}"
 	${DOCKER_COMPOSE} exec graphsvx pytest -v || echo "No tests found or pytest not installed in GraphSVX container."
 
+# SubgraphX
+## Open a shell in the SubgraphX container
+subgraphx-shell:
+	${DOCKER_COMPOSE} exec subgraphx bash
+
 # Utility
 ## Format code with Black
 format:

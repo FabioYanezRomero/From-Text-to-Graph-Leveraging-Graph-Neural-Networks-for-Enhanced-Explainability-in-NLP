@@ -80,3 +80,13 @@ Notes
 - Some legacy modules use non-relative imports; the wrappers execute them as modules (`python -m ...`) to ensure imports resolve.
 - Default outputs are consolidated under `outputs/`. You can override with `GRAPHTEXT_OUTPUT_DIR`.
 - A metadata index is appended after each step at `outputs/metadata/index.json`.
+
+Docker Compose Services
+-----------------------
+- `app`: Main CUDA-enabled development environment for training and evaluation.
+- `graphsvx`: Standalone GraphSVX explainer image cloned from the upstream project.
+- `shap`: Lightweight SHAP explainability workspace.
+- `tokenshap`: Token-level SHAP container with Hugging Face tooling and GPU support.
+- `subgraphx`: DIG-powered SubgraphX explainer image sharing the `/app` volume for direct access to trained GNNs and graphs.
+
+Start any explainer container individually, for example `docker compose up -d subgraphx`, then open an interactive shell with `make subgraphx-shell` to run `python -m src.explain.subgraphx.main` or custom scripts.

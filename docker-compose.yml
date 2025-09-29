@@ -148,6 +148,44 @@ services:
     restart: unless-stopped
     ipc: host
 
+  # SubgraphX explainability service (DIG-based)
+  subgraphx:
+    build:
+      context: .
+      dockerfile: docker/subgraphx.Dockerfile
+    container_name: subgraphx
+    gpus: all
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - SYS_ADMIN
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - type: bind
+        source: .
+        target: /app
+      - type: bind
+        source: ./data
+        target: /app/data
+    working_dir: /app/src/explain/subgraphx
+    tty: true
+    stdin_open: true
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    networks:
+      - app-network
+    restart: unless-stopped
+    ipc: host
+
 networks:
   app-network:
     name: text-to-graph-network
