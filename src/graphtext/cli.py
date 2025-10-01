@@ -3,15 +3,19 @@ import argparse
 import json
 from pathlib import Path
 import os
+import subprocess
+import sys
+from typing import Dict
 
 from .graphs import BaseGraphBuilder
 from .graphs.base import BuildArgs
 from .embeddings import FineTuner, FineTuneConfig, GraphEmbedder, EmbedGraphsConfig
 from .convert import GraphBatchConverter, BatchConvertConfig
 from .training import TrainerConfig, train_via_legacy
-from .explain import ExplainConfig, run_subgraphx_autogoal
+from .explain import ExplainConfig, run_explainer
 from .registry import GRAPH_BUILDERS
 from .metadata import log_step
+from src.explain.gnn.config import DEFAULT_GNN_ROOT, DEFAULT_GRAPH_DATA_ROOT
 
 
 def cmd_finetune(args: argparse.Namespace):
@@ -127,15 +131,90 @@ def cmd_train(args: argparse.Namespace):
 
 
 def cmd_explain(args: argparse.Namespace):
-    cfg = ExplainConfig(method=args.method)
-    if cfg.method == "subgraphx":
-        run_subgraphx_autogoal(cfg)
-    else:
-        raise NotImplementedError(f"Unknown explainability method: {cfg.method}")
+    if args.num_jobs > 1 and args.job_index == -1:
+        base_tokens = sys.argv[1:]
+        filtered: list[str] = []
+        i = 0
+        while i < len(base_tokens):
+            token = base_tokens[i]
+            if token in {"--num_jobs", "--job_index"}:
+                i += 2
+                continue
+            filtered.append(token)
+            i += 1
+
+        processes = []
+        for job_idx in range(args.num_jobs):
+            cmd = [
+                sys.executable,
+                "-m",
+                "src.graphtext.cli",
+            ] + filtered + ["--num_jobs", str(args.num_jobs), "--job_index", str(job_idx)]
+            print(f"Launching explain job {job_idx + 1}/{args.num_jobs}...")
+            processes.append((job_idx, subprocess.Popen(cmd)))
+
+        failures = False
+        for job_idx, proc in processes:
+            rc = proc.wait()
+            if rc != 0:
+                print(f"Explain job {job_idx + 1} failed with exit code {rc}.")
+                failures = True
+
+        if failures:
+            raise SystemExit(1)
+
+        print("All explain jobs finished successfully.")
+        return
+
+    method = None if args.method == "auto" else args.method
+    overrides: Dict[str, float] = {}
+    if args.hyperparams:
+        overrides = json.loads(args.hyperparams)
+
+    profile = args.performance_profile
+    if profile == "balanced":
+        profile = None
+
+    shard_index = args.job_index if args.job_index >= 0 else 0
+
+    cfg = ExplainConfig(
+        dataset=args.dataset,
+        graph_type=args.graph_type,
+        backbone=args.backbone,
+        split=args.split,
+        method=method,
+        device=args.device,
+        checkpoint_name=args.checkpoint_name,
+        gnn_root=Path(args.gnn_root),
+        graph_data_root=Path(args.graph_data_root),
+        hyperparams=overrides,
+        profile=profile,
+        num_shards=max(1, args.num_jobs),
+        shard_index=shard_index,
+    )
+
+    output = run_explainer(cfg, progress=not args.no_progress)
+    print(
+        "Explainability via "
+        f"{output.method} finished for {len(output.results)} graphs. "
+        f"Summary saved to {output.summary_path}"
+    )
+    if output.raw_path:
+        print(f"Raw artefacts stored at {output.raw_path}")
+
     log_step(
         step="explain",
         params=vars(args),
-        outputs={},
+        outputs={
+            "method": output.method,
+            "num_graphs": len(output.results),
+            "artifact_dir": str(output.artifact_dir),
+            "summary_path": str(output.summary_path),
+            "raw_path": str(output.raw_path) if output.raw_path else None,
+            "profile": cfg.profile or "balanced",
+            "num_shards": cfg.num_shards,
+            "shard_index": cfg.shard_index,
+        },
     )
 
 
@@ -250,7 +329,38 @@ def build_parser() -> argparse.ArgumentParser:
 
     # explain
     s = sub.add_parser("explain", help="Run explainability on a trained GNN")
-    s.add_argument("--method", choices=["subgraphx"], default="subgraphx")
+    s.add_argument("--dataset", required=True)
+    s.add_argument("--graph_type", required=True)
+    s.add_argument("--backbone", default="SetFit")
+    s.add_argument("--split", default="validation")
+    s.add_argument("--method", choices=["auto", "subgraphx", "graphsvx"], default="auto")
+    s.add_argument("--device")
+    s.add_argument("--checkpoint_name", default="best_model.pt")
+    s.add_argument("--gnn_root", default=str(DEFAULT_GNN_ROOT))
+    s.add_argument("--graph_data_root", default=str(DEFAULT_GRAPH_DATA_ROOT))
+    s.add_argument(
+        "--hyperparams",
+        help="JSON string with hyperparameter overrides, e.g. '{\"rollout\": 25}'",
+    )
+    s.add_argument(
+        "--performance_profile",
+        choices=["balanced", "fast", "quality"],
+        default="balanced",
+        help="Performance preset applied to explainer-specific hyperparameters.",
+    )
+    s.add_argument(
+        "--num_jobs",
+        type=int,
+        default=1,
+        help="Number of parallel explain processes to spawn."
+    )
+    s.add_argument(
+        "--job_index",
+        type=int,
+        default=-1,
+        help=argparse.SUPPRESS,
+    )
+    s.add_argument("--no_progress", action="store_true")
     s.set_defaults(func=cmd_explain)
 
     # pipeline

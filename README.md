@@ -50,8 +50,12 @@ Run commands from the project root. Use the `src`-package style:
 - Train a GNN
   - `python -m src.graphtext.cli train --train_data_dir <pyg_train_dir> --val_data_dir <pyg_val_dir>`
 
-- Explain a trained GNN
-  - `python -m src.graphtext.cli explain --method subgraphx`
+- Explain a trained GNN (auto-selects SubgraphX for hierarchical graphs)
+  - `python -m src.graphtext.cli explain --dataset stanfordnlp/sst2 --graph_type syntactic --split validation --method auto`
+  - `python -m src.graphtext.cli explain --dataset ag_news --graph_type skipgrams --backbone SetFit --split test --method auto`
+  - Append `--performance_profile fast` to trade a small accuracy drop for significantly faster SubgraphX/GraphSVX sweeps, or `quality` to favour fidelity.
+  - Use `--num_jobs 4` (for example) to shard the dataset across four parallel explain processes; each shard writes its own summary under the run directory.
+  - Summaries land under each run directory, e.g. `outputs/gnn_models/<backbone>/<dataset>/<graph_type>/<run>/explanations/<method>/<backbone>_<dataset>_<graph_type>_<split>/summary.json`
 
 Pipeline via JSON
 -----------------
@@ -89,4 +93,4 @@ Docker Compose Services
 - `tokenshap`: Token-level SHAP container with Hugging Face tooling and GPU support.
 - `subgraphx`: DIG-powered SubgraphX explainer image sharing the `/app` volume for direct access to trained GNNs and graphs.
 
-Start any explainer container individually, for example `docker compose up -d subgraphx`, then open an interactive shell with `make subgraphx-shell` to run `python -m src.explain.subgraphx.main` or custom scripts.
+Start any explainer container individually, for example `docker compose up -d subgraphx`, then open an interactive shell with `make subgraphx-shell` to run `python -m src.explain.gnn.subgraphx.main` (or `...graphsvx.main`) or custom scripts.
