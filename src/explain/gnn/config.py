@@ -101,16 +101,18 @@ def clone_request_with_method(request: ExplainerRequest, method: str) -> Explain
 
 SUBGRAPHX_PROFILES: Dict[str, Dict[str, float]] = {
     "fast": {
+        "num_hops": 1,
+        "max_nodes": 5,
         "rollout": 20,
         "sample_num": 2,
-        "max_nodes": 10,
         "expand_atoms": 1,
         "local_radius": 0,
     },
     "quality": {
-        "rollout": 80,
+        "num_hops": 2,
+        "max_nodes": 15,
+        "rollout": 50,
         "sample_num": 8,
-        "max_nodes": 20,
         "expand_atoms": 3,
         "local_radius": 2,
     },

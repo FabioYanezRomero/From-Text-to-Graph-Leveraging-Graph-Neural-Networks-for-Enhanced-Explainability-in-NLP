@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import pickle
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -21,7 +22,12 @@ from src.explain.gnn.config import (
     SUBGRAPHX_PROFILES,
 )
 from src.explain.gnn.model_loader import load_gnn_model, load_graph_split
-from .custom_subgraphx import CustomSubgraphX
+from .hyperparam_advisor import (
+    ArchitectureSpec,
+    SubgraphXHyperparameterAdvisor,
+    FLOAT_PARAM_KEYS,
+    INT_PARAM_KEYS,
+)
 
 
 class MarginalSubgraphDataset(Dataset):
@@ -97,6 +103,7 @@ class SubgraphXResult:
     related_prediction: Dict[str, float]
     num_nodes: int
     num_edges: int
+    hyperparams: Dict[str, float]
 
     def to_json(self) -> Dict[str, object]:  # pragma: no cover - serialisation helper
         return {
@@ -105,6 +112,7 @@ class SubgraphXResult:
             "num_nodes": self.num_nodes,
             "num_edges": self.num_edges,
             "related_prediction": self.related_prediction,
+            "hyperparams": dict(self.hyperparams),
         }
 
 
@@ -123,6 +131,9 @@ def _merge_hyperparams(overrides: Optional[Dict[str, float]]) -> Dict[str, float
 def _make_slug(request: ExplainerRequest) -> str:
     dataset = str(request.dataset_subpath) if request.dataset_subpath != Path('.') else request.dataset
     parts = [request.backbone, dataset, request.graph_type, request.split]
+    if getattr(request, "num_shards", 1) > 1:
+        shard_label = f"shard{request.shard_index + 1}of{request.num_shards}"
+        parts.append(shard_label)
     safe = [p.replace("/", "-") for p in parts if p]
     return "_".join(safe)
 
@@ -133,6 +144,8 @@ def _prepare_explainer(
     save_dir: Path,
     hyperparams: Dict[str, float],
 ) -> CustomSubgraphX:
+    from .custom_subgraphx import CustomSubgraphX
+
     num_classes = int(args.get("num_classes") or args.get("output_dim", 2))
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -151,11 +164,149 @@ def _prepare_explainer(
     )
 
 
+def _extract_architecture_spec(
+    model: torch.nn.Module, args: Dict[str, object]
+) -> ArchitectureSpec:
+    """Normalise architecture metadata for hyperparameter tuning heuristics."""
+
+    def _coerce_int(value: object, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    num_layers = _coerce_int(
+        args.get("num_layers") or args.get("gnn_layers") or getattr(model, "num_layers", None),
+        2,
+    )
+    module = str(args.get("module") or getattr(model, "module", "GCNConv") or "GCNConv")
+    heads = _coerce_int(
+        args.get("heads")
+        or args.get("attention_heads")
+        or getattr(model, "heads", None),
+        1,
+    )
+    return ArchitectureSpec(num_layers=num_layers, module=module, heads=heads)
+
+
+def collect_hyperparams(
+    request: ExplainerRequest,
+    *,
+    progress: bool = True,
+    output_dir: Optional[Path] = None,
+    output_path: Optional[Path] = None,
+) -> Path:
+    """Collect advisor-suggested hyperparameters for every graph in the split."""
+
+    device = torch.device(request.device) if request.device else torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+    updated_request = ExplainerRequest(
+        dataset=request.dataset,
+        graph_type=request.graph_type,
+        backbone=request.backbone,
+        split=request.split,
+        method="subgraphx",
+        device=str(device),
+        checkpoint_name=request.checkpoint_name,
+        gnn_root=request.gnn_root,
+        graph_data_root=request.graph_data_root,
+        hyperparams=request.hyperparams,
+        profile=request.profile,
+        num_shards=request.num_shards,
+        shard_index=request.shard_index,
+    )
+
+    dataset, loader = load_graph_split(updated_request, batch_size=1, shuffle=False)
+    model, train_args, run_dir = load_gnn_model(updated_request, dataset=dataset)
+
+    profile_overrides = SUBGRAPHX_PROFILES.get((updated_request.profile or "").lower(), {})
+    locked_overrides: Dict[str, float] = {}
+    locked_overrides.update(profile_overrides)
+    locked_overrides.update(updated_request.hyperparams or {})
+
+    architecture_spec = _extract_architecture_spec(model, train_args)
+    advisor = SubgraphXHyperparameterAdvisor(
+        architecture=architecture_spec,
+        locked_params=locked_overrides,
+    )
+
+    if output_path is not None:
+        artifact_dir = output_path.parent
+    else:
+        base_dir = output_dir or run_dir / "explanations" / "subgraphx"
+        artifact_dir = base_dir / (_make_slug(updated_request) + "_hyperparams")
+        output_path = artifact_dir / "hyperparams.json"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    if progress:
+        desc = f"CollectHParams[{updated_request.shard_index + 1}/{updated_request.num_shards}]"
+        iterable = tqdm(
+            loader,
+            desc=desc,
+            leave=False,
+            position=updated_request.shard_index,
+            dynamic_ncols=True,
+        )
+    else:
+        iterable = loader
+
+    per_graph: List[Dict[str, object]] = []
+    for index, batch in enumerate(iterable):
+        data: Data = batch
+        params = advisor.suggest(data)
+        params["max_nodes"] = max(2, min(int(params["max_nodes"]), int(getattr(data, "num_nodes", 0) or params["max_nodes"])))
+        per_graph.append(
+            {
+                "graph_index": index,
+                "num_nodes": int(getattr(data, "num_nodes", 0)),
+                "num_edges": int(getattr(data, "num_edges", getattr(data, "edge_index", torch.empty(2, 0)).size(1) if hasattr(data, "edge_index") and data.edge_index is not None else 0)),
+                "hyperparams": dict(params),
+            }
+        )
+
+    payload = {
+        "method": "subgraphx",
+        "dataset": updated_request.dataset,
+        "graph_type": updated_request.graph_type,
+        "split": updated_request.split,
+        "backbone": updated_request.backbone,
+        "num_shards": updated_request.num_shards,
+        "shard_index": updated_request.shard_index,
+        "base_defaults": dict(advisor.base_defaults),
+        "locked_overrides": dict(advisor.locked_params),
+        "per_graph": per_graph,
+    }
+
+    output_path.write_text(json.dumps(payload, indent=2))
+    return output_path
+
+
+def _load_precomputed_hparams(path: Path) -> Tuple[Dict[int, Dict[str, float]], Dict[str, object]]:
+    payload = json.loads(Path(path).read_text())
+    graph_entries = payload.get("per_graph")
+    if graph_entries is None:
+        raise ValueError("Precomputed hyperparameter file missing 'per_graph' key")
+
+    mapping: Dict[int, Dict[str, float]] = {}
+    for entry in graph_entries:
+        if "graph_index" not in entry:
+            raise ValueError("Each entry in 'per_graph' must include 'graph_index'")
+        index = int(entry["graph_index"])
+        params = entry.get("hyperparams")
+        if params is None:
+            params = {k: v for k, v in entry.items() if k != "graph_index"}
+        mapping[index] = {k: float(v) if k in FLOAT_PARAM_KEYS else int(v) if k in INT_PARAM_KEYS else v for k, v in params.items()}
+    return mapping, payload
+
+
 def explain_request(
     request: ExplainerRequest,
     *,
     progress: bool = True,
     hyperparams: Optional[Dict[str, float]] = None,
+    precomputed_hparams: Optional[Dict[int, Dict[str, float]]] = None,
+    precomputed_source: Optional[Path] = None,
 ) -> Tuple[List[SubgraphXResult], Path, Path, Optional[Path]]:
     """Run SubgraphX on the dataset implied by the request."""
 
@@ -189,11 +340,19 @@ def explain_request(
     if hyperparams:
         combined_overrides.update(hyperparams)
 
-    params = _merge_hyperparams(combined_overrides)
+    architecture_spec = _extract_architecture_spec(model, train_args)
+    advisor = SubgraphXHyperparameterAdvisor(
+        architecture=architecture_spec,
+        locked_params=combined_overrides,
+    )
+
     artifact_dir = run_dir / "explanations" / "subgraphx" / _make_slug(updated_request)
-    explainer = _prepare_explainer(wrapper, train_args, artifact_dir, params)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    precomputed_lookup = precomputed_hparams or {}
 
     results: List[SubgraphXResult] = []
+    per_graph_hparams: List[Dict[str, float]] = []
     if progress:
         desc = f"SubgraphX[{updated_request.shard_index + 1}/{updated_request.num_shards}]"
         iterable = tqdm(
@@ -209,12 +368,23 @@ def explain_request(
     for index, batch in enumerate(iterable):
         data: Data = batch.to(wrapper.device)
         label = int(data.y.item()) if hasattr(data, "y") and data.y is not None else None
+        source = "advisor"
+        candidate = precomputed_lookup.get(index)
+        if candidate is not None:
+            graph_params = advisor.sanitise_for_graph(candidate, data)
+            source = "precomputed"
+        else:
+            graph_params = advisor.suggest(data)
+        graph_params["max_nodes"] = max(2, min(graph_params["max_nodes"], data.num_nodes))
+        graph_dir = artifact_dir / f"graph_{index:05d}"
+        explainer = _prepare_explainer(wrapper, train_args, graph_dir, graph_params)
         explanation, related_pred = explainer.explain(
             x=data.x,
             edge_index=data.edge_index,
             label=label,
-            max_nodes=params["max_nodes"],
+            max_nodes=graph_params["max_nodes"],
         )
+        final_params = dict(graph_params)
         results.append(
             SubgraphXResult(
                 graph_index=index,
@@ -223,8 +393,10 @@ def explain_request(
                 related_prediction=related_pred,
                 num_nodes=data.num_nodes,
                 num_edges=data.num_edges,
+                hyperparams=final_params,
             )
         )
+        per_graph_hparams.append({"graph_index": index, "source": source, **final_params})
 
     summary = {
         "method": "subgraphx",
@@ -232,12 +404,18 @@ def explain_request(
         "graph_type": updated_request.graph_type,
         "split": updated_request.split,
         "backbone": updated_request.backbone,
+        "num_shards": updated_request.num_shards,
+        "shard_index": updated_request.shard_index,
         "num_graphs": len(results),
-        "hyperparams": params,
+        "hyperparams": {
+            "base_defaults": dict(advisor.base_defaults),
+            "locked_overrides": dict(advisor.locked_params),
+            "precomputed_source": str(precomputed_source) if precomputed_source else None,
+            "per_graph": per_graph_hparams,
+        },
         "graphs": [entry.to_json() for entry in results],
     }
 
-    artifact_dir.mkdir(parents=True, exist_ok=True)
     summary_path = artifact_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2))
 
@@ -272,12 +450,109 @@ def _env_request() -> ExplainerRequest:
     )
 
 
-def main() -> None:  # pragma: no cover - CLI helper
+def main(argv: Optional[List[str]] = None) -> None:  # pragma: no cover - CLI helper
+    parser = argparse.ArgumentParser(description="SubgraphX Explainability Runner")
+    parser.add_argument(
+        "--collect-only",
+        action="store_true",
+        help="Only collect advisor-suggested hyperparameters and exit.",
+    )
+    parser.add_argument(
+        "--hyperparams-out",
+        type=Path,
+        help="Destination JSON file when collecting hyperparameters.",
+    )
+    parser.add_argument(
+        "--hyperparams-in",
+        type=Path,
+        help="Use previously collected hyperparameters from JSON when running explanations.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable tqdm progress bars.",
+    )
+    parser.add_argument("--dataset", type=str, help="Dataset identifier passed to the explainer.")
+    parser.add_argument("--graph-type", type=str, help="Graph type within the dataset.")
+    parser.add_argument("--backbone", type=str, help="Backbone name (e.g., SetFit).")
+    parser.add_argument("--split", type=str, help="Data split to use (train/validation/test).")
+    parser.add_argument("--device", type=str, help="Explicit torch device (cpu/cuda:0).")
+    parser.add_argument("--gnn-root", type=Path, help="Override path to trained GNN checkpoints.")
+    parser.add_argument("--graph-data-root", type=Path, help="Override path to precomputed graphs.")
+    parser.add_argument("--checkpoint-name", type=str, help="Checkpoint filename to load.")
+    parser.add_argument("--profile", type=str, help="SubgraphX profile key (fast/quality).")
+    parser.add_argument("--num-shards", type=int, help="Total shards when running in parallel.")
+    parser.add_argument("--shard-index", type=int, help="Index of this shard (0-based).")
+    parser.add_argument("--batch-size", type=int, help="Override batch size for data loader.")
+    args = parser.parse_args(argv)
+
     request = _env_request()
-    results = explain_request(request)
+
+    overrides: Dict[str, object] = {}
+    if args.dataset:
+        overrides["dataset"] = args.dataset
+    if args.graph_type:
+        overrides["graph_type"] = args.graph_type
+    if args.backbone:
+        overrides["backbone"] = args.backbone
+    if args.split:
+        overrides["split"] = args.split
+    if args.device:
+        overrides["device"] = args.device
+    if args.gnn_root:
+        overrides["gnn_root"] = args.gnn_root
+    if args.graph_data_root:
+        overrides["graph_data_root"] = args.graph_data_root
+    if args.checkpoint_name:
+        overrides["checkpoint_name"] = args.checkpoint_name
+    if args.profile:
+        overrides["profile"] = args.profile
+    if args.num_shards is not None:
+        overrides["num_shards"] = args.num_shards
+    if args.shard_index is not None:
+        overrides["shard_index"] = args.shard_index
+
+    if overrides:
+        request = replace(request, **overrides)
+
+    if args.collect_only:
+        output_path = collect_hyperparams(
+            request,
+            progress=not args.no_progress,
+            output_path=args.hyperparams_out,
+        )
+        print(f"Saved SubgraphX hyperparameters to {output_path}")
+        return
+
+    precomputed_lookup: Optional[Dict[int, Dict[str, float]]] = None
+    precomputed_source: Optional[Path] = None
+    if args.hyperparams_in:
+        precomputed_lookup, payload = _load_precomputed_hparams(args.hyperparams_in)
+        precomputed_source = Path(args.hyperparams_in).resolve()
+        mismatches: List[str] = []
+        for key in ("dataset", "graph_type", "split", "backbone"):
+            expected = getattr(request, key)
+            observed = payload.get(key)
+            if observed is not None and str(observed) != str(expected):
+                mismatches.append(f"{key}={observed} (expected {expected})")
+        if mismatches:
+            warnings.warn(
+                "Precomputed hyperparameters metadata differs from request: "
+                + "; ".join(mismatches)
+            )
+
+    results, artifact_dir, summary_path, _ = explain_request(
+        request,
+        progress=not args.no_progress,
+        precomputed_hparams=precomputed_lookup,
+        precomputed_source=precomputed_source,
+    )
+
     output_path = Path("subgraphx_results.json")
     output_path.write_text(json.dumps([entry.to_json() for entry in results], indent=2))
     print(f"Saved SubgraphX explanations to {output_path}")
+    print(f"Artifacts: {artifact_dir}")
+    print(f"Summary: {summary_path}")
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI invocation
