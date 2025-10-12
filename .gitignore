@@ -73,3 +73,6 @@ models
 /output_lazy
 /src/Clean_Code/LazyTrainer/output_lazy
 outputs/
+
+# Large temporary artifacts
+tmp_bigfile
