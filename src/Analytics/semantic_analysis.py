@@ -20,10 +20,6 @@ import networkx as nx
 import pandas as pd
 from tqdm import tqdm
 
-from torch.serialization import add_safe_globals
-import torch_geometric.data.data as pyg_data
-import torch_geometric.data.storage as pyg_storage
-
 from src.Insights.providers import GraphArtifactProvider
 
 
@@ -142,17 +138,29 @@ def _normalise_dataset_name(dataset: str, backbone: str) -> str:
 
 def _ensure_safe_globals() -> None:
     """Register PyG storage classes so torch.load accepts full Data objects."""
-    add_safe_globals(
-        [
-            pyg_data.Data,
-            pyg_data.DataTensorAttr,
-            pyg_data.DataEdgeAttr,
-            pyg_storage.BaseStorage,
-            pyg_storage.EdgeStorage,
-            pyg_storage.NodeStorage,
-            pyg_storage.GlobalStorage,
-        ]
-    )
+    try:
+        from torch.serialization import add_safe_globals
+        import torch_geometric.data.data as pyg_data
+        import torch_geometric.data.storage as pyg_storage
+    except Exception:
+        # Either torch/torch_geometric is unavailable or this torch build lacks add_safe_globals.
+        return
+
+    try:
+        add_safe_globals(
+            [
+                pyg_data.Data,
+                pyg_data.DataTensorAttr,
+                pyg_data.DataEdgeAttr,
+                pyg_storage.BaseStorage,
+                pyg_storage.EdgeStorage,
+                pyg_storage.NodeStorage,
+                pyg_storage.GlobalStorage,
+            ]
+        )
+    except Exception:
+        # Safe globals registration is best-effort; proceed even if it fails.
+        pass
 
 
 def _load_json(path: Path) -> List[dict]:
@@ -318,6 +326,9 @@ def _is_noise_token(token: str, stopwords: Set[str]) -> bool:
 
 
 _PUNCT_CHARS = set(".,:;!?()[]{}'\"`“”’—–-…/\\|+*=<>#@&%$^~ ")
+
+
+_GLOBAL_STOPWORDS: Set[str] = set()
 
 
 # --------------------------------------------------------------------------- #
@@ -594,101 +605,106 @@ def analyse_subgraphx(
     config: SubgraphXConfig,
     provider: GraphArtifactProvider,
 ) -> Tuple[List[GraphSemanticSummary], pd.DataFrame]:
-    """Process a SubgraphX artefact bundle."""
+    """Process a SubgraphX artefact bundle while keeping memory usage low."""
     dataset_label = _normalise_dataset_name(config.dataset, config.backbone)
     tqdm_desc = f"SubgraphX[{dataset_label}:{config.graph_type}]"
-    combined: Dict[int, _SubgraphXResult] = {}
-    offset = 0
-    for shard_idx, path in enumerate(config.paths):
-        results = _load_subgraphx_payload(path)
-        for result in results:
-            original_index = result.graph_index
-            global_index = original_index + offset
-            if global_index in combined:  # pragma: no cover - defensive check
-                raise ValueError(
-                    f"Duplicate SubgraphX graph_index {global_index} detected while merging {path}"
-                )
-            result.graph_index = global_index
-            setattr(result, "_aggregation_extras", {"shard_index": shard_idx, "local_graph_index": original_index})
-            combined[global_index] = result
-        offset += len(results)
 
     per_graph: List[GraphSemanticSummary] = []
     aggregated = AggregatedMetrics()
     medians: List[float] = []
 
-    # Optional prediction lookup from previous insights
     prediction_map: Dict[int, int] = {}
     if config.prediction_lookup:
         prediction_map = _load_prediction_lookup(config.prediction_lookup)
 
-    for graph_index, result in tqdm(sorted(combined.items()), desc=tqdm_desc):
-        info = provider(
-            argparse.Namespace(
-                dataset=config.dataset,
-                graph_type=config.graph_type,
-                graph_index=graph_index,
-                extras={"split": config.split, "backbone": config.backbone},
-            )
-        )
-        if info is None:
-            continue
-        node_order = list(info.node_names)
-        node_text = list(info.node_text)
-        graph = info.graph
-        positions = _compute_positions(node_order)
+    offset = 0
+    progress = tqdm(desc=tqdm_desc, unit="graph")
+    try:
+        for shard_idx, path in enumerate(config.paths):
+            results = _load_subgraphx_payload(path)
+            for result in results:
+                original_index = result.graph_index
+                graph_index = original_index + offset
+                result.graph_index = graph_index
+                setattr(
+                    result,
+                    "_aggregation_extras",
+                    {"shard_index": shard_idx, "local_graph_index": original_index},
+                )
 
-        scores = _subgraphx_scores(result)
-        median_score = _dataset_median(scores)
-        medians.append(median_score)
-        threshold = config.threshold if config.threshold is not None else median_score
+                info = provider(
+                    argparse.Namespace(
+                        dataset=config.dataset,
+                        graph_type=config.graph_type,
+                        graph_index=graph_index,
+                        extras={"split": config.split, "backbone": config.backbone},
+                    )
+                )
+                if info is None:
+                    progress.update(1)
+                    continue
 
-        selected = _select_tokens(
-            scores,
-            node_order,
-            node_text,
-            positions,
-            graph,
-            top_k=config.top_k,
-            importance_threshold=threshold,
-            restrict_to_leaves=True,
-            stopwords=_GLOBAL_STOPWORDS,
-        )
-        selected = [item for item in selected if not _token_is_structural(item.token)]
-        for attribution in selected:
-            aggregated.register(attribution.token, attribution.score, attribution.position)
+                node_order = list(info.node_names)
+                node_text = list(info.node_text)
+                graph = info.graph
+                positions = _compute_positions(node_order)
 
-        explanation_size = len(selected)
-        unique_tokens = len({tok.token for tok in selected})
-        metadata = {
-            "num_nodes": float(graph.number_of_nodes()),
-            "num_edges": float(graph.number_of_edges()),
-        }
-        metadata.update(_induced_metrics(graph, [item.node_index for item in selected]))
-        density = _semantic_density(unique_tokens, explanation_size)
+                scores = _subgraphx_scores(result)
+                median_score = _dataset_median(scores)
+                medians.append(median_score)
+                threshold = config.threshold if config.threshold is not None else median_score
 
-        extras = {
-            "masked_confidence": result.related_prediction.get("masked"),
-            "maskout_confidence": result.related_prediction.get("maskout"),
-            "sparsity": result.related_prediction.get("sparsity"),
-            "median_threshold": median_score,
-        }
-        extras.update(getattr(result, "_aggregation_extras", {}))
+                selected = _select_tokens(
+                    scores,
+                    node_order,
+                    node_text,
+                    positions,
+                    graph,
+                    top_k=config.top_k,
+                    importance_threshold=threshold,
+                    restrict_to_leaves=True,
+                    stopwords=_GLOBAL_STOPWORDS,
+                )
+                selected = [item for item in selected if not _token_is_structural(item.token)]
+                for attribution in selected:
+                    aggregated.register(attribution.token, attribution.score, attribution.position)
 
-        per_graph.append(
-            GraphSemanticSummary(
-                graph_index=graph_index,
-                label=result.label,
-                prediction_class=prediction_map.get(graph_index),
-                prediction_confidence=result.related_prediction.get("origin"),
-                explanation_size=explanation_size,
-                unique_token_count=unique_tokens,
-                semantic_density=density,
-                selected_tokens=selected,
-                graph_metadata=metadata,
-                extras=extras,
-            )
-        )
+                explanation_size = len(selected)
+                unique_tokens = len({tok.token for tok in selected})
+                metadata = {
+                    "num_nodes": float(graph.number_of_nodes()),
+                    "num_edges": float(graph.number_of_edges()),
+                }
+                metadata.update(_induced_metrics(graph, [item.node_index for item in selected]))
+                density = _semantic_density(unique_tokens, explanation_size)
+
+                extras = {
+                    "masked_confidence": result.related_prediction.get("masked"),
+                    "maskout_confidence": result.related_prediction.get("maskout"),
+                    "sparsity": result.related_prediction.get("sparsity"),
+                    "median_threshold": median_score,
+                }
+                extras.update(getattr(result, "_aggregation_extras", {}))
+
+                per_graph.append(
+                    GraphSemanticSummary(
+                        graph_index=graph_index,
+                        label=result.label,
+                        prediction_class=prediction_map.get(graph_index),
+                        prediction_confidence=result.related_prediction.get("origin"),
+                        explanation_size=explanation_size,
+                        unique_token_count=unique_tokens,
+                        semantic_density=density,
+                        selected_tokens=selected,
+                        graph_metadata=metadata,
+                        extras=extras,
+                    )
+                )
+                progress.update(1)
+            offset += len(results)
+            del results
+    finally:
+        progress.close()
 
     aggregate_frame = aggregated.to_frame()
     aggregate_frame["dataset"] = dataset_label
@@ -837,20 +853,21 @@ def _write_outputs(
     summaries: Sequence[GraphSemanticSummary],
     aggregate: pd.DataFrame,
 ) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
+    base_name = f"{dataset_label.replace('/', '_')}_{graph_type}"
+    target_dir = output_dir / base_name
+    target_dir.mkdir(parents=True, exist_ok=True)
     summary_frame = _summaries_to_frame(summaries, dataset_label, graph_type)
     tokens_frame = _tokens_to_frame(summaries, dataset_label, graph_type)
 
-    summary_path = output_dir / f"{dataset_label.replace('/', '_')}_{graph_type}_summary.csv"
-    tokens_path = output_dir / f"{dataset_label.replace('/', '_')}_{graph_type}_tokens.csv"
-    aggregate_path = output_dir / f"{dataset_label.replace('/', '_')}_{graph_type}_aggregate.csv"
-    base_name = f"{dataset_label.replace('/', '_')}_{graph_type}"
+    summary_path = target_dir / f"{base_name}_summary.csv"
+    tokens_path = target_dir / f"{base_name}_tokens.csv"
+    aggregate_path = target_dir / f"{base_name}_aggregate.csv"
 
     summary_frame.to_csv(summary_path, index=False)
     tokens_frame.to_csv(tokens_path, index=False)
     aggregate.to_csv(aggregate_path, index=False)
 
-    _write_partitioned_outputs(base_name, output_dir, summary_frame, tokens_frame)
+    _write_partitioned_outputs(base_name, target_dir, summary_frame, tokens_frame)
 
     meta = {
         "dataset": dataset_label,
@@ -861,7 +878,7 @@ def _write_outputs(
         "aggregate_csv": str(aggregate_path),
         "median_threshold": aggregate.attrs.get("median_of_medians"),
     }
-    meta_path = output_dir / f"{dataset_label.replace('/', '_')}_{graph_type}_meta.json"
+    meta_path = target_dir / f"{base_name}_meta.json"
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
 
@@ -923,6 +940,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         description="Perform semantic and structural analysis over GraphSVX and SubgraphX artefacts.",
     )
     parser.add_argument(
+        "--dataset",
+        help="Optional dataset filter; processes only entries whose dataset matches this value.",
+    )
+    parser.add_argument(
+        "--graph-type",
+        help="Optional graph-type filter; processes only entries whose graph_type matches this value.",
+    )
+    parser.add_argument(
         "--config",
         type=Path,
         default=Path("configs/semantic_analysis_config.json"),
@@ -937,6 +962,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     graphsvx_cfgs, subgraphx_cfgs, nx_root, pyg_root, stopwords = _load_config(args.config.resolve())
+
+    if args.dataset:
+        target = args.dataset.strip()
+        graphsvx_cfgs = [cfg for cfg in graphsvx_cfgs if cfg.dataset == target or _normalise_dataset_name(cfg.dataset, cfg.backbone) == target]
+        subgraphx_cfgs = [cfg for cfg in subgraphx_cfgs if cfg.dataset == target or _normalise_dataset_name(cfg.dataset, cfg.backbone) == target]
+    if args.graph_type:
+        graphsvx_cfgs = [cfg for cfg in graphsvx_cfgs if cfg.graph_type == args.graph_type]
+        subgraphx_cfgs = [cfg for cfg in subgraphx_cfgs if cfg.graph_type == args.graph_type]
+
     _ensure_safe_globals()
     global _GLOBAL_STOPWORDS
     _GLOBAL_STOPWORDS = stopwords
