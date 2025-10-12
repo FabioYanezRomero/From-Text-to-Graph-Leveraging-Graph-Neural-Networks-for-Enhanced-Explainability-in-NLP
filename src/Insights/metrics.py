@@ -7,6 +7,11 @@ import networkx as nx
 
 from .records import Coalition, ExplanationRecord
 
+try:
+    from .providers import GraphInfo  # type: ignore
+except ImportError:  # pragma: no cover
+    GraphInfo = None  # type: ignore
+
 
 def _compute_auc(values: Mapping[int, float], *, max_size: Optional[int]) -> Optional[float]:
     if not values or max_size in (None, 0):
@@ -234,7 +239,14 @@ def summarize_record(
     Produce a dictionary summarising key metrics for an explanation record.
     """
 
-    graph_obj = graph or graph_provider(record)
+    node_text: Optional[Sequence[str]] = None
+    graph_payload = graph or (graph_provider(record) if graph_provider else None)
+
+    if GraphInfo is not None and isinstance(graph_payload, GraphInfo):
+        graph_obj = graph_payload.graph
+        node_text = tuple(graph_payload.node_text)
+    else:
+        graph_obj = graph_payload  # type: ignore[assignment]
     minimal = record.minimal_coalition(sufficiency_threshold)
     insertion = insertion_curve(record)
     deletion = deletion_curve(record)
@@ -262,10 +274,18 @@ def summarize_record(
         "num_edges": record.num_edges,
     }
 
+    if node_text:
+        summary["top_tokens"] = [node_text[idx] for idx in summary["top_nodes"] if 0 <= idx < len(node_text)]
+    else:
+        summary["top_tokens"] = None
+
     if minimal and graph_obj is not None:
         summary["structural_metrics"] = induced_subgraph_metrics(graph_obj, minimal.nodes)
+        if node_text:
+            summary["minimal_coalition_tokens"] = [node_text[idx] for idx in minimal.nodes if 0 <= idx < len(node_text)]
     else:
         summary["structural_metrics"] = None
+        summary["minimal_coalition_tokens"] = None
 
     if graph_obj is not None and centrality_funcs and record.node_importance:
         importance_map = {idx: float(score) for idx, score in enumerate(record.node_importance)}

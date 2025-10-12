@@ -23,13 +23,32 @@ def log_step(step: str, params: Dict[str, Any], outputs: Dict[str, Any]) -> None
     os.makedirs(METADATA_DIR, exist_ok=True)
     idx = _load_index()
     idx.setdefault("runs", [])
+
+    def _serialise(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(k): _serialise(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_serialise(v) for v in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if hasattr(value, "isoformat"):
+            try:
+                return value.isoformat()
+            except Exception:
+                pass
+        if hasattr(value, "__fspath__"):
+            try:
+                return os.fspath(value)
+            except Exception:
+                pass
+        return repr(value)
+
     entry = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "step": step,
-        "params": params,
-        "outputs": outputs,
+        "params": _serialise(params),
+        "outputs": _serialise(outputs),
     }
     idx["runs"].append(entry)
     with open(METADATA_INDEX, "w") as f:
         json.dump(idx, f, indent=2)
-

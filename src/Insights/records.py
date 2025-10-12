@@ -122,7 +122,9 @@ class ExplanationRecord:
         required = baseline * threshold
         eligible = [c for c in self.coalitions if c.confidence >= required]
         if not eligible:
-            return None
+            # Fall back to the highest-confidence coalition even if the threshold is unmet.
+            best = max(self.coalitions, key=lambda c: (c.confidence, -c.size))
+            return best
 
         eligible.sort(key=lambda c: (c.size, -c.confidence))
         return eligible[0]
