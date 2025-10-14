@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .pipeline import SemanticPipeline, build_argument_parser, load_config
+from .common.data_loader import SubgraphXResult  # Ensure SubgraphXResult is imported
 
 try:  # pragma: no cover - optional dependency for compatibility
     from Analytics import semantic_analysis as legacy_semantic_module  # type: ignore

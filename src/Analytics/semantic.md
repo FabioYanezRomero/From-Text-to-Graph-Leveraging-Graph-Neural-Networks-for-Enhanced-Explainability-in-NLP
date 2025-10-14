@@ -8,7 +8,7 @@ and class-by-correctness) that mirror the structural analytics layout.
 ```bash
 python -m src.Analytics.semantic_analysis \
   --config configs/semantic_analysis_config.json \
-  --output-dir outputs/analytics/semantic
+  --output-dir outputs/analytics/general
 ```
 
 Options:
@@ -19,7 +19,7 @@ Options:
   optional thresholds.
 - `--output-dir`: Root directory for artefacts. For each dataset/graph
   combination a dedicated folder named `<dataset>_<graph>` is created (for
-  example `outputs/analytics/semantic/SetFit_ag_news_constituency`) containing:
+  example `outputs/analytics/general/SetFit_ag_news_constituency`) containing:
   - `<dataset>_<graph>_summary.csv` – per-graph semantic metrics.
   - `<dataset>_<graph>_tokens.csv` – top-k token attributions per graph.
   - `<dataset>_<graph>_aggregate.csv` – dataset-level token statistics.
@@ -39,14 +39,14 @@ python -m src.Analytics.semantic_analysis \
   --config configs/semantic_analysis_config.json \
   --dataset SetFit/ag_news \
   --graph-type skipgrams \
-  --output-dir outputs/analytics/semantic
+  --output-dir outputs/analytics/general
 
 # SetFit/ag_news window
 python -m src.Analytics.semantic_analysis \
   --config configs/semantic_analysis_config.json \
   --dataset SetFit/ag_news \
   --graph-type window \
-  --output-dir outputs/analytics/semantic
+  --output-dir outputs/analytics/general
 ```
 
 Run the command whenever new explanation artefacts are generated to keep the

@@ -1,19 +1,19 @@
-"\"\"\"Visualisations for unique token counts and sparsity metrics.\"\"\""
-
+"""Visualisations for sparsity KDEs by class and correctness."""
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import matplotlib
 
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
 
-DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/semantic/sparsity")
+DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/sparsity")
 
 
 def _iter_summary_csvs(root: Path, pattern: str) -> Iterable[Path]:
@@ -26,39 +26,58 @@ def _label_suffix(label: Optional[str]) -> str:
     safe = str(label).strip()
     if not safe or safe.lower() in {"nan", "none"}:
         return ""
-    return f"_label_{safe.replace('/', '_').replace(' ', '_')}"
+    return safe.replace("/", "_").replace(" ", "_")
 
 
-def _plot_hist(series: pd.Series, xlabel: str, title: str, output_path: Path, *, bins: int = 30, dpi: int = 300) -> Path:
-    if series.empty:
+def _plot_kde(series: pd.Series, title: str, output_path: Path, *, bw_adjust: float = 1.0, dpi: int = 300) -> Path:
+    cleaned = series.dropna()
+    if cleaned.empty:
         return output_path
     sns.set_theme(style="whitegrid", context="paper")
     fig, ax = plt.subplots(figsize=(6, 4))
-    sns.histplot(series, bins=bins, ax=ax, color="#4C72B0", edgecolor="white")
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel("Count")
+    sns.kdeplot(cleaned, fill=True, ax=ax, color="#4C72B0", bw_adjust=bw_adjust)
+    ax.set_xlabel("Sparsity")
+    ax.set_ylabel("Density")
     ax.set_title(title)
     fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     return output_path
 
 
-def _plot_scatter(frame: pd.DataFrame, title: str, output_path: Path, *, hue_col: Optional[str] = None, dpi: int = 300) -> Path:
-    if frame.empty:
+def _plot_difference(correct: pd.Series, incorrect: pd.Series, title: str, output_path: Path, *, bw_adjust: float = 1.0, dpi: int = 300) -> Path:
+    correct = correct.dropna()
+    incorrect = incorrect.dropna()
+    if correct.empty and incorrect.empty:
         return output_path
+    grid = np.linspace(0.0, 1.0, 256)
+
+    def _kde(values: np.ndarray) -> np.ndarray:
+        if values.size == 0:
+            return np.zeros_like(grid)
+        std = values.std(ddof=1) if values.size > 1 else 0.1
+        bandwidth = max(0.05, std * (values.size ** (-1 / 5)) * bw_adjust)
+        diff = (grid[None, :] - values[:, None]) / bandwidth
+        densities = np.exp(-0.5 * diff**2).sum(axis=0)
+        densities /= (values.size * bandwidth * np.sqrt(2 * np.pi))
+        return densities
+
+    correct_density = _kde(correct.to_numpy())
+    incorrect_density = _kde(incorrect.to_numpy())
+    delta = correct_density - incorrect_density
+
     sns.set_theme(style="whitegrid", context="paper")
     fig, ax = plt.subplots(figsize=(6, 4))
-    plot_kwargs = dict(x="unique_token_count", y="sparsity", alpha=0.6, s=36, ax=ax)
-    if hue_col and hue_col in frame.columns and frame[hue_col].notna().any():
-        sns.scatterplot(data=frame, hue=frame[hue_col].astype(str), **plot_kwargs)
-        ax.legend(title=hue_col, bbox_to_anchor=(1.05, 1), loc="upper left")
-    else:
-        sns.scatterplot(data=frame, color="#C44E52", **plot_kwargs)
-    ax.set_xlabel("Unique token count")
-    ax.set_ylabel("Sparsity")
+    ax.plot(grid, delta, color="#4C72B0", linewidth=1.6)
+    ax.axhline(0.0, color="#C44E52", linestyle="--", linewidth=1.0)
+    ax.fill_between(grid, delta, 0.0, where=delta >= 0, color="#4C72B0", alpha=0.25)
+    ax.fill_between(grid, delta, 0.0, where=delta < 0, color="#C44E52", alpha=0.25)
+    ax.set_xlabel("Sparsity")
+    ax.set_ylabel("Density difference (correct - incorrect)")
     ax.set_title(title)
     fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     return output_path
@@ -69,7 +88,6 @@ def generate_sparsity_visuals(
     output_root: Path | str | None = DEFAULT_OUTPUT_ROOT,
     *,
     pattern: str = "*summary.csv",
-    bins: int = 30,
     dpi: int = 300,
 ) -> List[Path]:
     root_dir = Path(summary_root)
@@ -80,101 +98,97 @@ def generate_sparsity_visuals(
     produced: List[Path] = []
     for csv_path in _iter_summary_csvs(root_dir, pattern):
         frame = pd.read_csv(csv_path)
-        if "unique_token_count" not in frame.columns:
+        if "sparsity" not in frame.columns:
             continue
 
-        target_dir = csv_path.parent if out_dir is None else (out_dir / csv_path.relative_to(root_dir).parent)
-        target_dir.mkdir(parents=True, exist_ok=True)
+        base_dir = csv_path.parent if out_dir is None else (out_dir / csv_path.relative_to(root_dir).parent)
+        base_dir.mkdir(parents=True, exist_ok=True)
+        sparsity_series = pd.to_numeric(frame["sparsity"], errors="coerce")
+        produced.append(
+            _plot_kde(
+                sparsity_series,
+                f"Sparsity KDE - {csv_path.stem}",
+                base_dir / f"{csv_path.stem}_sparsity_kde.png",
+                dpi=dpi,
+            )
+        )
 
-        unique_series = pd.to_numeric(frame["unique_token_count"], errors="coerce").dropna()
-        if not unique_series.empty:
+        if "is_correct" in frame.columns:
+            for correctness_flag, subset in frame.groupby("is_correct", dropna=False):
+                if pd.isna(correctness_flag):
+                    continue
+                status = "correct" if correctness_flag else "incorrect"
+                status_dir = base_dir / status
+                produced.append(
+                    _plot_kde(
+                        pd.to_numeric(subset["sparsity"], errors="coerce"),
+                        f"Sparsity KDE ({status}) - {csv_path.stem}",
+                        status_dir / f"{csv_path.stem}_{status}_sparsity_kde.png",
+                        dpi=dpi,
+                    )
+                )
+
+                if "label" in subset.columns:
+                    for label, combo in subset.groupby("label", dropna=False):
+                        if pd.isna(label):
+                            continue
+                        label_id = _label_suffix(label)
+                        combo_dir = status_dir / f"class_{label_id}" if label_id else status_dir / "class"
+                        produced.append(
+                            _plot_kde(
+                                pd.to_numeric(combo["sparsity"], errors="coerce"),
+                                f"Sparsity KDE ({status}, label {label}) - {csv_path.stem}",
+                                combo_dir / f"{csv_path.stem}_{status}_class{label_id}_sparsity_kde.png",
+                                dpi=dpi,
+                            )
+                        )
+
+            # overall correctness comparison (all labels)
+            correct_series = pd.to_numeric(frame.loc[frame.get("is_correct") == True, "sparsity"], errors="coerce")
+            incorrect_series = pd.to_numeric(frame.loc[frame.get("is_correct") == False, "sparsity"], errors="coerce")
             produced.append(
-                _plot_hist(
-                    unique_series,
-                    "Unique token count",
-                    f"Unique tokens - {csv_path.stem}",
-                    target_dir / f"{csv_path.stem}_unique_token_count_hist.png",
-                    bins=bins,
+                _plot_difference(
+                    correct_series,
+                    incorrect_series,
+                    f"Sparsity KDE (correct vs incorrect) - {csv_path.stem}",
+                    base_dir / f"{csv_path.stem}_correct_vs_incorrect_sparsity_kde.png",
                     dpi=dpi,
                 )
             )
 
-        if "sparsity" in frame.columns:
-            sparsity_series = pd.to_numeric(frame["sparsity"], errors="coerce").dropna()
-            if not sparsity_series.empty:
-                produced.append(
-                    _plot_hist(
-                        sparsity_series,
-                        "Sparsity",
-                        f"Sparsity - {csv_path.stem}",
-                        target_dir / f"{csv_path.stem}_sparsity_hist.png",
-                        bins=bins,
-                        dpi=dpi,
-                    )
-                )
-
-            scatter_frame = frame.dropna(subset=["unique_token_count", "sparsity"])
-            if not scatter_frame.empty:
-                produced.append(
-                    _plot_scatter(
-                        scatter_frame,
-                        f"Unique tokens vs Sparsity - {csv_path.stem}",
-                        target_dir / f"{csv_path.stem}_unique_vs_sparsity.png",
-                        hue_col="label" if "label" in scatter_frame.columns else None,
-                        dpi=dpi,
-                    )
-                )
-
-        groups = _group_aggregate(frame)
-        for label, subset in groups.items():
-            label_suffix = _label_suffix(label)
-            if label_suffix == "":
-                continue
-            unique_subset = pd.to_numeric(subset["unique_token_count"], errors="coerce").dropna()
-            if not unique_subset.empty:
-                produced.append(
-                    _plot_hist(
-                        unique_subset,
-                        "Unique token count",
-                        f"Unique tokens - label {label}",
-                        target_dir / f"{csv_path.stem}{label_suffix}_unique_token_count_hist.png",
-                        bins=bins,
-                        dpi=dpi,
-                    )
-                )
-            if "sparsity" in subset.columns:
-                sparsity_subset = pd.to_numeric(subset["sparsity"], errors="coerce").dropna()
-                if not sparsity_subset.empty:
+            if "label" in frame.columns:
+                for label, subset in frame.groupby("label", dropna=False):
+                    if pd.isna(label):
+                        continue
+                    label_id = _label_suffix(label)
+                    label_dir = base_dir / f"class_{label_id}" if label_id else base_dir / "class"
+                    correct_subset = pd.to_numeric(subset.loc[subset.get("is_correct") == True, "sparsity"], errors="coerce")
+                    incorrect_subset = pd.to_numeric(subset.loc[subset.get("is_correct") == False, "sparsity"], errors="coerce")
                     produced.append(
-                        _plot_hist(
-                            sparsity_subset,
-                            "Sparsity",
-                            f"Sparsity - label {label}",
-                            target_dir / f"{csv_path.stem}{label_suffix}_sparsity_hist.png",
-                            bins=bins,
+                        _plot_kde(
+                            pd.to_numeric(subset["sparsity"], errors="coerce"),
+                            f"Sparsity KDE (label {label}) - {csv_path.stem}",
+                            label_dir / f"{csv_path.stem}_class{label_id}_sparsity_kde.png",
                             dpi=dpi,
                         )
                     )
-                scatter = subset.dropna(subset=["unique_token_count", "sparsity"])
-                if not scatter.empty:
                     produced.append(
-                        _plot_scatter(
-                            scatter,
-                            f"Unique tokens vs Sparsity - label {label}",
-                            target_dir / f"{csv_path.stem}{label_suffix}_unique_vs_sparsity.png",
-                            hue_col=None,
+                        _plot_difference(
+                            correct_subset,
+                            incorrect_subset,
+                            f"Sparsity KDE (label {label}, correct vs incorrect) - {csv_path.stem}",
+                            label_dir / f"{csv_path.stem}_class{label_id}_correct_vs_incorrect_sparsity_kde.png",
                             dpi=dpi,
                         )
                     )
-    return produced
+        else:
+            produced.append(
+                _plot_kde(
+                    pd.to_numeric(frame["sparsity"], errors="coerce"),
+                    f"Sparsity KDE - {csv_path.stem}",
+                    base_dir / f"{csv_path.stem}_sparsity_kde.png",
+                    dpi=dpi,
+                )
+            )
 
-
-def _group_aggregate(frame: pd.DataFrame) -> Dict[Optional[str], pd.DataFrame]:
-    if "label" not in frame.columns:
-        return {}
-    groups: Dict[Optional[str], pd.DataFrame] = {}
-    for label, subset in frame.groupby("label", dropna=False):
-        if pd.isna(label):
-            continue
-        groups[str(label)] = subset
-    return groups
+    return [p for p in produced if isinstance(p, Path)]

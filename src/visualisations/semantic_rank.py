@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/semantic/token/rank")
+DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/position/rank")
 
 
 def _load_tokens(csv_path: Path) -> pd.DataFrame:

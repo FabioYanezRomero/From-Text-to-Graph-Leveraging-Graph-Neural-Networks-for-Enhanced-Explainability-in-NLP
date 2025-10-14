@@ -27,7 +27,6 @@ from .semantic_token_frequency import (
 from .semantic_sparsity import generate_sparsity_visuals
 from .semantic_confidence import generate_confidence_threshold_visuals
 from .semantic_embeddings import (
-    generate_embedding_centroids,
     generate_embedding_importance_correlation,
     generate_embedding_neighborhoods,
 )
@@ -51,7 +50,6 @@ __all__ = [
     "generate_token_score_ranking",
     "generate_sparsity_visuals",
     "generate_confidence_threshold_visuals",
-    "generate_embedding_centroids",
     "generate_embedding_importance_correlation",
     "generate_embedding_neighborhoods",
 ]

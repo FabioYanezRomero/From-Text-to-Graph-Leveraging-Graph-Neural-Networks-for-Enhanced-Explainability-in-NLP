@@ -89,14 +89,13 @@ def export_aggregate(folder: Path, aggregate_df: pd.DataFrame, score_root: Path)
     _write_csv(aggregate_df, dest / "aggregate.csv")
 
 
-def run_exports(semantic_root: Path, output_root: Path) -> None:
-    base_root = output_root / "semantic"
-    token_root = base_root / "token"
-    sparsity_root = base_root / "sparsity"
-    confidence_root = base_root / "confidence"
-    score_root = base_root / "score"
+def run_exports(general_root: Path, output_root: Path) -> None:
+    token_root = output_root / "token"
+    sparsity_root = output_root / "sparsity"
+    confidence_root = output_root / "confidence"
+    score_root = output_root / "score"
 
-    for folder in sorted(p for p in semantic_root.iterdir() if p.is_dir()):
+    for folder in sorted(p for p in general_root.iterdir() if p.is_dir()):
         token_df = _load_csv(folder / "tokens.csv")
         summary_df = _load_csv(folder / "summary.csv")
         aggregate_df = _load_csv(folder / "aggregate.csv")
@@ -108,9 +107,9 @@ def run_exports(semantic_root: Path, output_root: Path) -> None:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Export derived analytics for token/sparsity/score/confidence visualisations.")
     parser.add_argument(
-        "--semantic-root",
+        "--general-root",
         type=Path,
-        default=Path("outputs/analytics/semantic"),
+        default=Path("outputs/analytics/general"),
         help="Directory containing base semantic outputs (tokens/summary/aggregate).",
     )
     parser.add_argument(
@@ -121,7 +120,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    run_exports(args.semantic_root.resolve(), args.output_root.resolve())
+    run_exports(args.general_root.resolve(), args.output_root.resolve())
     return 0
 
 

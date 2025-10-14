@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
-DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/semantic/confidence")
+DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/confidence")
 SUMMARY_COLUMNS = [
     "prediction_confidence",
     "median_threshold",

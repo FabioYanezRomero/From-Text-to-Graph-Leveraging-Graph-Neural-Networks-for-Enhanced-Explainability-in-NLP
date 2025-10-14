@@ -263,54 +263,77 @@ def generate_embedding_centroids(
             continue
         important_embeddings = embeddings[mask.to_numpy()]
         important_meta = df_meta[mask].reset_index(drop=True)
-        label_groups = important_meta.dropna(subset=["label"]).groupby("label")
-        centroid_dict = {
-            str(label): important_embeddings[grp.index].mean(axis=0)
-            for label, grp in label_groups
-            if not grp.empty
-        }
-        if not centroid_dict:
+        if "is_correct" not in important_meta.columns or important_meta["is_correct"].dropna().empty:
             continue
-        labels = list(centroid_dict.keys())
-        centroid_matrix = np.vstack([centroid_dict[label] for label in labels])
-        if centroid_matrix.shape[0] < 2:
-            continue
-        projected, _ = _pca_project(centroid_matrix, components=min(2, centroid_matrix.shape[0]), random_state=random_state)
-        pc1 = projected[:, 0]
-        pc2 = projected[:, 1] if projected.shape[1] > 1 else np.zeros_like(pc1)
-        centroids_df = pd.DataFrame({"label": labels, "pc1": pc1, "pc2": pc2}).set_index("label")
+        correctness_groups = important_meta.groupby("is_correct", dropna=False)
 
         relative = csv_path.relative_to(tokens_root)
-        target_dir = out_dir / relative.parent
-        target_dir.mkdir(parents=True, exist_ok=True)
+        base_dir = out_dir / relative.parent
+        base_dir.mkdir(parents=True, exist_ok=True)
 
-        scatter_path = target_dir / f"{csv_path.stem}_centroids_pca.png"
-        sns.set_theme(style="whitegrid", context="paper")
-        fig, ax = plt.subplots(figsize=(6, 5))
-        ax.scatter(centroids_df["pc1"], centroids_df["pc2"], s=80, color="#4C72B0")
-        for label, row in centroids_df.iterrows():
-            ax.text(row["pc1"], row["pc2"], str(label), fontsize=10, weight="bold")
-        ax.set_xlabel("Centroid PC1")
-        ax.set_ylabel("Centroid PC2")
-        ax.set_title(f"Class centroids - {dataset_label} {graph_type}")
-        fig.tight_layout()
-        fig.savefig(scatter_path, dpi=300, bbox_inches="tight")
-        plt.close(fig)
-        produced.append(scatter_path)
+        for correctness_flag, subset_meta in correctness_groups:
+            if subset_meta.empty or pd.isna(correctness_flag):
+                continue
+            labels = subset_meta["label"].dropna()
+            if labels.empty:
+                continue
+            centroid_groups = subset_meta[subset_meta["label"].notna()].groupby("label")
 
-        dists = pd.DataFrame(
-            np.linalg.norm(centroid_matrix[:, None, :] - centroid_matrix[None, :, :], axis=-1),
-            index=centroids_df.index,
-            columns=centroids_df.index,
-        )
-        heatmap_path = target_dir / f"{csv_path.stem}_centroid_distances.png"
-        fig, ax = plt.subplots(figsize=(6, 5))
-        sns.heatmap(dists, cmap="Blues", annot=True, fmt=".2f", square=True, ax=ax)
-        ax.set_title(f"Centroid distances - {dataset_label} {graph_type}")
-        fig.tight_layout()
-        fig.savefig(heatmap_path, dpi=300, bbox_inches="tight")
-        plt.close(fig)
-        produced.append(heatmap_path)
+            centroids: Dict[str, np.ndarray] = {}
+            for label, grp in centroid_groups:
+                if grp.empty:
+                    continue
+                idx = grp.index.to_numpy()
+                centroids[str(label)] = important_embeddings[idx].mean(axis=0)
+
+            if len(centroids) < 2:
+                continue
+
+            centroid_labels = list(centroids.keys())
+            centroid_matrix = np.vstack([centroids[label] for label in centroid_labels])
+            try:
+                projected, _ = _pca_project(
+                    centroid_matrix,
+                    components=min(2, centroid_matrix.shape[0]),
+                    random_state=random_state,
+                )
+            except ValueError:
+                continue
+
+            pc1 = projected[:, 0]
+            pc2 = projected[:, 1] if projected.shape[1] > 1 else np.zeros_like(pc1)
+            centroids_df = pd.DataFrame({"label": centroid_labels, "pc1": pc1, "pc2": pc2}).set_index("label")
+
+            status = "correct" if correctness_flag is True else "incorrect" if correctness_flag is False else "mixed"
+            label_suffix = status if status != "mixed" else "overall"
+            target_dir = base_dir / label_suffix
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+            sns.set_theme(style="whitegrid", context="paper")
+            fig, ax = plt.subplots(figsize=(6, 5))
+            ax.scatter(centroids_df["pc1"], centroids_df["pc2"], s=90, color="#4C72B0")
+            for label, row in centroids_df.iterrows():
+                ax.text(row["pc1"], row["pc2"], str(label), fontsize=10, weight="bold")
+            ax.set_xlabel("Centroid PC1")
+            ax.set_ylabel("Centroid PC2")
+            title_status = "Correct" if correctness_flag is True else "Incorrect" if correctness_flag is False else "Combined"
+            ax.set_title(f"Class centroids ({title_status}) - {dataset_label} {graph_type}")
+            fig.tight_layout()
+            scatter_path = target_dir / f"{csv_path.stem}_{label_suffix}_centroids_pca.png"
+            fig.savefig(scatter_path, dpi=300, bbox_inches="tight")
+            plt.close(fig)
+            produced.append(scatter_path)
+
+            dist_matrix = np.linalg.norm(centroid_matrix[:, None, :] - centroid_matrix[None, :, :], axis=-1)
+            dists = pd.DataFrame(dist_matrix, index=centroids_df.index, columns=centroids_df.index)
+            fig, ax = plt.subplots(figsize=(6, 5))
+            sns.heatmap(dists, cmap="Blues", annot=True, fmt=".2f", square=True, ax=ax)
+            ax.set_title(f"Centroid distances ({title_status}) - {dataset_label} {graph_type}")
+            fig.tight_layout()
+            heatmap_path = target_dir / f"{csv_path.stem}_{label_suffix}_centroid_distances.png"
+            fig.savefig(heatmap_path, dpi=300, bbox_inches="tight")
+            plt.close(fig)
+            produced.append(heatmap_path)
 
     return produced
 

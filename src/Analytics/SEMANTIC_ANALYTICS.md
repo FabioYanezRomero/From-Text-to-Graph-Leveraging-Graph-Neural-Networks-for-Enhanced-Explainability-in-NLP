@@ -40,7 +40,7 @@ Run the full semantic analytics pipeline (mirrors the legacy behaviour of
 ```bash
 python3 -m src.Analytics.semantic.cli_pipeline \
   --config configs/semantic_analysis_config.json \
-  --output-dir outputs/analytics/semantic
+  --output-dir outputs/analytics/general
 ```
 
 The command writes, for each dataset/graph-type combination:
@@ -60,5 +60,5 @@ so existing scripts continue to work, but new code should prefer the CLI above.
   `src.Analytics.semantic.common` and `src.Analytics.token` and can be imported
   from other analytics scripts as needed.
 * Post-processing utilities export the CSV artefacts into category-specific
-  folders under `outputs/analytics/semantic/`, mirroring the package layout
-  (`token`, `sparsity`, `score`, `confidence`, …).
+  folders alongside the other analytics modules (`outputs/analytics/token/`,
+  `outputs/analytics/sparsity/`, `outputs/analytics/score/`, `outputs/analytics/confidence/`, …).

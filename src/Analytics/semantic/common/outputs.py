@@ -15,6 +15,13 @@ def summaries_to_frame(summaries: List[GraphSemanticSummary], dataset: str, grap
             is_correct = None
         else:
             is_correct = bool(summary.label == summary.prediction_class)
+        density = summary.semantic_density
+        sparsity = None
+        try:
+            if density is not None:
+                sparsity = float(1.0 - float(density))
+        except (TypeError, ValueError):
+            sparsity = None
         base = {
             "graph_index": summary.graph_index,
             "label": summary.label,
@@ -23,6 +30,7 @@ def summaries_to_frame(summaries: List[GraphSemanticSummary], dataset: str, grap
             "explanation_size": summary.explanation_size,
             "unique_token_count": summary.unique_token_count,
             "semantic_density": summary.semantic_density,
+            "sparsity": sparsity,
             "is_correct": is_correct,
             "dataset": dataset,
             "graph_type": graph_type,

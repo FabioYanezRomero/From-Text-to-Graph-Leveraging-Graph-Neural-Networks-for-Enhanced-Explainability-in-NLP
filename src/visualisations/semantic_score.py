@@ -20,9 +20,10 @@ try:
 except Exception:  # pragma: no cover - optional dependency during visualisation-only usage
     _semantic_analysis = None
 
-DEFAULT_DENSITY_ROOT = Path("outputs/analytics/semantic/score/density")
-DEFAULT_DIFFERENCE_ROOT = Path("outputs/analytics/semantic/score/difference")
-DEFAULT_RANKING_ROOT = Path("outputs/analytics/semantic/score/ranking")
+DEFAULT_DENSITY_ROOT = Path("outputs/analytics/score/density")
+DEFAULT_DIFFERENCE_ROOT = Path("outputs/analytics/score/difference")
+DEFAULT_POSITION_DIFFERENCE_ROOT = Path("outputs/analytics/position/difference")
+DEFAULT_RANKING_ROOT = Path("outputs/analytics/score/ranking")
 
 
 _FALLBACK_STOPWORDS: Set[str] = {
@@ -351,18 +352,87 @@ def _kde(values: np.ndarray, grid: np.ndarray, bandwidth: Optional[float] = None
     return densities
 
 
-def _group_correct_incorrect(paths: Iterable[Path]) -> Dict[str, Dict[str, Path]]:
+def _group_correct_incorrect(root: Path, paths: Iterable[Path]) -> Dict[str, Dict[str, Path]]:
     groups: Dict[str, Dict[str, Path]] = defaultdict(dict)
     for path in paths:
-        stem = path.stem
-        if not stem.endswith("_tokens"):
-            continue
-        core = stem[: -len("_tokens")]
-        if core.endswith("_correct"):
-            groups[core[: -len("_correct")]]["correct"] = path
-        elif core.endswith("_incorrect"):
-            groups[core[: -len("_incorrect")]]["incorrect"] = path
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            relative = path
+        stem = relative.stem
+        parent = relative.parent
+        label_key: Optional[str] = None
+        if stem.endswith("_correct"):
+            label_key = str((parent / stem[: -len("_correct")]).as_posix())
+            groups[label_key]["correct"] = path
+        elif stem.endswith("_incorrect"):
+            label_key = str((parent / stem[: -len("_incorrect")]).as_posix())
+            groups[label_key]["incorrect"] = path
+        elif stem.endswith("_tokens"):
+            core = stem[: -len("_tokens")]
+            if core.endswith("_correct"):
+                label_key = str((parent / core[: -len("_correct")]).as_posix())
+                groups[label_key]["correct"] = path
+            elif core.endswith("_incorrect"):
+                label_key = str((parent / core[: -len("_incorrect")]).as_posix())
+                groups[label_key]["incorrect"] = path
     return groups
+
+
+def _scope_labels(stem: str) -> Tuple[str, str]:
+    core = stem
+    if core.startswith("tokens_"):
+        core = core[len("tokens_") :]
+    if core.startswith("summary_"):
+        core = core[len("summary_") :]
+    if core in {"", "tokens"}:
+        display = "All"
+        key = "all"
+    elif core.startswith("class") and core[len("class") :].isdigit():
+        idx = int(core[len("class") :])
+        display = f"Class {idx + 1}"
+        key = f"class{idx + 1}"
+    else:
+        display = core.replace("_", " ")
+        key = core
+    return display.title(), key.replace("/", "_")
+
+
+def _plot_metric_difference(
+    correct_values: np.ndarray,
+    incorrect_values: np.ndarray,
+    *,
+    grid: np.ndarray,
+    xlabel: str,
+    title: str,
+    output_file: Path,
+    dpi: int,
+) -> Tuple[Path, Dict[str, float]]:
+    sns.set_theme(style="whitegrid", context="paper")
+    fig, ax = plt.subplots(figsize=(6, 4))
+    difference = _kde(correct_values, grid) - _kde(incorrect_values, grid)
+    ax.plot(grid, difference, color="#C44E52", linewidth=1.8)
+    ax.axhline(0.0, color="#4C72B0", linestyle="--", linewidth=1.0)
+    ax.fill_between(grid, difference, 0.0, where=difference >= 0, color="#C44E52", alpha=0.2)
+    ax.fill_between(grid, difference, 0.0, where=difference < 0, color="#55A868", alpha=0.2)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Density difference (correct - incorrect)")
+    ax.set_xlim(grid.min(), grid.max())
+    ax.margins(x=0)
+    ax.set_title(title)
+    fig.tight_layout()
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_file, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+
+    stats = {
+        "area": float(np.trapz(difference, grid)),
+        "positive_mass": float(np.trapz(np.clip(difference, 0.0, None), grid)),
+        "negative_mass": float(np.trapz(np.clip(-difference, 0.0, None), grid)),
+        "max_difference": float(difference.max() if difference.size else 0.0),
+        "min_difference": float(difference.min() if difference.size else 0.0),
+    }
+    return output_file, stats
 
 
 def plot_token_score_difference(
@@ -372,7 +442,7 @@ def plot_token_score_difference(
     *,
     title: Optional[str] = None,
     dpi: int = 300,
-) -> Path | None:
+) -> Optional[Tuple[Path, Dict[str, float]]]:
     correct_frame = _load_tokens(Path(correct_csv))
     incorrect_frame = _load_tokens(Path(incorrect_csv))
 
@@ -382,33 +452,24 @@ def plot_token_score_difference(
         return None
 
     grid = np.linspace(0.0, 1.0, 256)
-    difference = _kde(correct_values, grid) - _kde(incorrect_values, grid)
-
     output_file = Path(output_path) if output_path else Path(correct_csv).with_suffix(".png")
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-
-    sns.set_theme(style="whitegrid", context="paper")
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(grid, difference, color="#C44E52", linewidth=1.8)
-    ax.axhline(0.0, color="#4C72B0", linestyle="--", linewidth=1.0)
-    ax.fill_between(grid, difference, 0.0, where=difference >= 0, color="#C44E52", alpha=0.2)
-    ax.fill_between(grid, difference, 0.0, where=difference < 0, color="#55A868", alpha=0.2)
-    ax.set_xlabel("Token score (scaled 0–1)")
-    ax.set_ylabel("Density difference (correct - incorrect)")
-    ax.set_xlim(0.0, 1.0)
-    ax.margins(x=0)
-    ax.set_title(title or f"{Path(correct_csv).stem} score difference")
-    fig.tight_layout()
-    fig.savefig(output_file, dpi=dpi, bbox_inches="tight")
-    plt.close(fig)
-    return output_file
+    title_text = title or f"{Path(correct_csv).stem} score difference"
+    return _plot_metric_difference(
+        correct_values,
+        incorrect_values,
+        grid=grid,
+        xlabel="Token score (scaled 0–1)",
+        title=title_text,
+        output_file=output_file,
+        dpi=dpi,
+    )
 
 
 def generate_token_score_differences(
     tokens_root: Path | str,
     output_root: Path | str | None = DEFAULT_DIFFERENCE_ROOT,
     *,
-    pattern: str = "*tokens.csv",
+    pattern: str = "*.csv",
     dpi: int = 300,
 ) -> List[Path]:
     root = Path(tokens_root)
@@ -416,24 +477,161 @@ def generate_token_score_differences(
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
 
-    groups = _group_correct_incorrect(_iter_token_csvs(root, pattern))
+    groups = _group_correct_incorrect(root, _iter_token_csvs(root, pattern))
     produced: List[Path] = []
-    for key, subset in groups.items():
+    summary_rows: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for subset in groups.values():
         correct_path = subset.get("correct")
         incorrect_path = subset.get("incorrect")
         if not correct_path or not incorrect_path:
             continue
-        target_dir = _ensure_dir(out_dir, correct_path, root)
-        if out_dir:
-            target = target_dir / f"{key}_correct_vs_incorrect_score_diff.png"
-        else:
-            diff_dir = correct_path.parent / "score_differences"
-            diff_dir.mkdir(parents=True, exist_ok=True)
-            target = diff_dir / f"{key}_correct_vs_incorrect_score_diff.png"
 
-        result = plot_token_score_difference(correct_path, incorrect_path, output_path=target, dpi=dpi, title=f"{key.replace('_', ' ').title()} Score (Correct - Incorrect)")
+        if out_dir:
+            relative_parent = correct_path.relative_to(root).parent
+            target_dir = out_dir / relative_parent
+            target_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            target_dir = correct_path.parent / "score_differences"
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+        stem = correct_path.stem
+        if stem.endswith("_correct"):
+            stem = stem[: -len("_correct")]
+        label, safe_name = _scope_labels(stem)
+        target = target_dir / f"{safe_name}_correct_vs_incorrect_score_diff.png"
+
+        result = plot_token_score_difference(
+            correct_path,
+            incorrect_path,
+            output_path=target,
+            dpi=dpi,
+            title=f"{label} Score (Correct - Incorrect)",
+        )
         if result is not None:
-            produced.append(result)
+            plot_path, stats = result
+            produced.append(plot_path)
+            dataset_key = (
+                correct_path.relative_to(root).parts[0]
+                if correct_path.is_relative_to(root) and correct_path.relative_to(root).parts
+                else "root"
+            )
+            summary_rows[dataset_key].append(
+                {
+                    "dataset": dataset_key,
+                    "scope": safe_name,
+                    "metric": "score",
+                    **stats,
+                }
+            )
+
+    for dataset_key, rows in summary_rows.items():
+        if not rows:
+            continue
+        summary_dir = (out_dir / dataset_key) if out_dir else root
+        summary_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = summary_dir / "score_difference_metrics.csv"
+        pd.DataFrame(rows).to_csv(summary_path, index=False)
+        produced.append(summary_path)
+    return produced
+
+
+def plot_token_position_difference(
+    correct_csv: Path | str,
+    incorrect_csv: Path | str,
+    output_path: Path | str | None = None,
+    *,
+    title: Optional[str] = None,
+    dpi: int = 300,
+) -> Optional[Tuple[Path, Dict[str, float]]]:
+    correct_frame = _load_tokens(Path(correct_csv))
+    incorrect_frame = _load_tokens(Path(incorrect_csv))
+
+    correct_values = correct_frame["position"].dropna().astype(float).clip(0.0, 1.0).to_numpy()
+    incorrect_values = incorrect_frame["position"].dropna().astype(float).clip(0.0, 1.0).to_numpy()
+    if correct_values.size == 0 and incorrect_values.size == 0:
+        return None
+
+    grid = np.linspace(0.0, 1.0, 256)
+    output_file = Path(output_path) if output_path else Path(correct_csv).with_suffix(".png")
+    title_text = title or f"{Path(correct_csv).stem} position difference"
+    return _plot_metric_difference(
+        correct_values,
+        incorrect_values,
+        grid=grid,
+        xlabel="Token position (0=beginning, 1=end)",
+        title=title_text,
+        output_file=output_file,
+        dpi=dpi,
+    )
+
+
+def generate_token_position_differences(
+    tokens_root: Path | str,
+    output_root: Path | str | None = DEFAULT_POSITION_DIFFERENCE_ROOT,
+    *,
+    pattern: str = "*.csv",
+    dpi: int = 300,
+) -> List[Path]:
+    root = Path(tokens_root)
+    out_dir = Path(output_root) if output_root else None
+    if out_dir:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    produced: List[Path] = []
+    correct_incorrect = _group_correct_incorrect(root, _iter_token_csvs(root, pattern))
+    summary_rows: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for entry in correct_incorrect.values():
+        correct_path = entry.get("correct")
+        incorrect_path = entry.get("incorrect")
+        if not correct_path or not incorrect_path:
+            continue
+
+        if out_dir:
+            relative_parent = correct_path.relative_to(root).parent
+            target_dir = out_dir / relative_parent
+            target_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            target_dir = correct_path.parent / "position_differences"
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+        stem = correct_path.stem
+        if stem.endswith("_correct"):
+            stem = stem[: -len("_correct")]
+        label, safe_name = _scope_labels(stem)
+        target = target_dir / f"{safe_name}_correct_vs_incorrect_position_diff.png"
+
+        result = plot_token_position_difference(
+            correct_path,
+            incorrect_path,
+            output_path=target,
+            dpi=dpi,
+            title=f"{label} Position (Correct - Incorrect)",
+        )
+        if result is not None:
+            plot_path, stats = result
+            produced.append(plot_path)
+            dataset_key = (
+                correct_path.relative_to(root).parts[0]
+                if correct_path.is_relative_to(root) and correct_path.relative_to(root).parts
+                else "root"
+            )
+            summary_rows[dataset_key].append(
+                {
+                    "dataset": dataset_key,
+                    "scope": safe_name,
+                    "metric": "position",
+                    **stats,
+                }
+            )
+
+    for dataset_key, rows in summary_rows.items():
+        if not rows:
+            continue
+        summary_dir = (out_dir / dataset_key) if out_dir else root
+        summary_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = summary_dir / "position_difference_metrics.csv"
+        pd.DataFrame(rows).to_csv(summary_path, index=False)
+        produced.append(summary_path)
     return produced
 
 
