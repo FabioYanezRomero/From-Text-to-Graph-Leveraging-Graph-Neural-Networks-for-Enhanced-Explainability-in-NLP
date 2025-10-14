@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import matplotlib
 
@@ -15,9 +15,224 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-DEFAULT_DENSITY_ROOT = Path("outputs/analytics/score/density")
-DEFAULT_DIFFERENCE_ROOT = Path("outputs/analytics/score/difference")
-DEFAULT_RANKING_ROOT = Path("outputs/analytics/score/ranking")
+try:
+    from Analytics import semantic_analysis as _semantic_analysis  # type: ignore
+except Exception:  # pragma: no cover - optional dependency during visualisation-only usage
+    _semantic_analysis = None
+
+DEFAULT_DENSITY_ROOT = Path("outputs/analytics/semantic/score/density")
+DEFAULT_DIFFERENCE_ROOT = Path("outputs/analytics/semantic/score/difference")
+DEFAULT_RANKING_ROOT = Path("outputs/analytics/semantic/score/ranking")
+
+
+_FALLBACK_STOPWORDS: Set[str] = {
+    "a",
+    "an",
+    "the",
+    "and",
+    "or",
+    "but",
+    "if",
+    "while",
+    "for",
+    "to",
+    "of",
+    "in",
+    "on",
+    "at",
+    "by",
+    "with",
+    "from",
+    "as",
+    "that",
+    "this",
+    "these",
+    "those",
+    "is",
+    "am",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "it",
+    "its",
+    "he",
+    "she",
+    "they",
+    "we",
+    "you",
+    "i",
+    "me",
+    "him",
+    "her",
+    "them",
+    "us",
+    "my",
+    "your",
+    "our",
+    "their",
+    "not",
+    "no",
+    "nor",
+    "so",
+    "than",
+    "then",
+    "too",
+    "very",
+    "can",
+    "could",
+    "should",
+    "would",
+    "may",
+    "might",
+    "will",
+    "shall",
+    "do",
+    "does",
+    "did",
+    "doing",
+    "done",
+    "have",
+    "has",
+    "had",
+    "having",
+    "there",
+    "here",
+    "also",
+    "just",
+    "only",
+    "over",
+    "under",
+    "up",
+    "down",
+    "out",
+    "into",
+    "about",
+    "after",
+    "before",
+    "between",
+    "more",
+    "most",
+    "less",
+    "least",
+    "any",
+    "some",
+    "such",
+    "each",
+    "other",
+    "both",
+    "all",
+    "many",
+    "much",
+    "few",
+    "several",
+}
+
+
+def _resolve_stopwords(custom_stopwords: Optional[Iterable[str]] = None) -> Set[str]:
+    """Return the stopword inventory to filter vocabulary comparisons."""
+    if custom_stopwords is not None:
+        return {str(item).strip().lower() for item in custom_stopwords if isinstance(item, str)}
+
+    resolved: Set[str] = set()
+    if _semantic_analysis is not None:
+        try:
+            resolved.update({str(item).strip().lower() for item in _semantic_analysis._default_stopwords()})  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - defensive fallback
+            pass
+        global_stopwords = getattr(_semantic_analysis, "_GLOBAL_STOPWORDS", None)
+        if isinstance(global_stopwords, (set, list, tuple)):
+            resolved.update({str(item).strip().lower() for item in global_stopwords if isinstance(item, str)})
+    if not resolved:
+        resolved.update(_FALLBACK_STOPWORDS)
+    return resolved
+
+
+def _normalise_token(token: object, stopwords: Set[str]) -> Optional[str]:
+    """Normalise a token for vocabulary overlap calculations."""
+    if token is None or (isinstance(token, float) and np.isnan(token)):
+        return None
+    text = str(token).strip()
+    if not text:
+        return None
+    lower = text.lower()
+    if lower in stopwords:
+        return None
+    return lower
+
+
+def _coerce_bool(value: object) -> bool:
+    """Robust boolean coercion for heterogeneous dataframe columns."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)):
+        return bool(value)
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return False
+    text = str(value).strip().lower()
+    return text in {"1", "true", "t", "yes", "y"}
+
+
+def _extract_token_sets(frame: pd.DataFrame, stopwords: Set[str]) -> Tuple[Set[str], Set[str]]:
+    """Split a token dataframe into correct/incorrect vocabularies."""
+    if "token" not in frame.columns or "is_correct" not in frame.columns:
+        return set(), set()
+
+    normalised = frame["token"].map(lambda tok: _normalise_token(tok, stopwords))
+    valid_mask = normalised.notna()
+    if not valid_mask.any():
+        return set(), set()
+
+    subset = frame.loc[valid_mask, ["is_correct"]].copy()
+    subset["token"] = normalised[valid_mask]
+    subset["is_correct"] = subset["is_correct"].map(_coerce_bool)
+
+    correct_tokens = set(subset.loc[subset["is_correct"], "token"])
+    incorrect_tokens = set(subset.loc[~subset["is_correct"], "token"])
+    return correct_tokens, incorrect_tokens
+
+
+def _vocabulary_overlap_metrics(frame: pd.DataFrame, stopwords: Set[str]) -> Optional[Dict[str, object]]:
+    """Compute overlap metrics between correct and incorrect vocabularies."""
+    correct_tokens, incorrect_tokens = _extract_token_sets(frame, stopwords)
+    if not correct_tokens and not incorrect_tokens:
+        return None
+
+    intersection = correct_tokens & incorrect_tokens
+    union = correct_tokens | incorrect_tokens
+
+    size_correct = len(correct_tokens)
+    size_incorrect = len(incorrect_tokens)
+    size_shared = len(intersection)
+    size_union = len(union)
+
+    if size_union == 0:
+        return None
+
+    jaccard = size_shared / size_union if size_union else 0.0
+    denominator = size_correct + size_incorrect
+    dice = (2.0 * size_shared / denominator) if denominator else 0.0
+    overlap_coeff = size_shared / min(size_correct, size_incorrect) if size_correct and size_incorrect else 0.0
+    correct_ratio = size_shared / size_correct if size_correct else 0.0
+    incorrect_ratio = size_shared / size_incorrect if size_incorrect else 0.0
+    shared_sample = ", ".join(sorted(intersection)[:15])
+
+    return {
+        "correct_vocab_size": size_correct,
+        "incorrect_vocab_size": size_incorrect,
+        "total_vocab_size": size_union,
+        "shared_vocab_size": size_shared,
+        "correct_unique_vocab_size": size_correct - size_shared,
+        "incorrect_unique_vocab_size": size_incorrect - size_shared,
+        "jaccard_similarity": float(jaccard),
+        "dice_coefficient": float(dice),
+        "overlap_coefficient": float(overlap_coeff),
+        "correct_overlap_ratio": float(correct_ratio),
+        "incorrect_overlap_ratio": float(incorrect_ratio),
+        "shared_tokens_sample": shared_sample,
+    }
 
 
 def _iter_token_csvs(root: Path, pattern: str = "*tokens.csv") -> Iterable[Path]:
@@ -250,21 +465,56 @@ def generate_token_score_ranking(
     pattern: str = "*tokens.csv",
     top_k: int = 30,
     dpi: int = 300,
+    stopwords: Optional[Iterable[str]] = None,
 ) -> List[Path]:
     root = Path(tokens_root)
     out_dir = Path(output_root) if output_root else None
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
 
+    stopword_set = _resolve_stopwords(stopwords)
+    overlap_summary: Dict[Path, Dict[str, Dict[str, object]]] = defaultdict(dict)
     produced: List[Path] = []
     for csv_path in _iter_token_csvs(root, pattern):
         frame = _load_tokens(csv_path)
         groups = _group_by_label(frame)
+        target_dir = _ensure_dir(out_dir, csv_path, root)
         for label, subset in groups.items():
             summary = _top_tokens_by_score(subset, top_k=top_k)
             if summary.empty:
                 continue
-            target_dir = _ensure_dir(out_dir, csv_path, root)
             output_path = target_dir / f"{csv_path.stem}{_label_suffix(label)}_token_score_ranking.png"
             produced.append(_plot_score_ranking(summary, f"Average token score{'' if label is None else f' (label {label})'}", output_path, dpi=dpi))
+        should_collect_overlap = "_correct_" not in csv_path.stem and "_incorrect_" not in csv_path.stem and "_class_" not in csv_path.stem
+        if should_collect_overlap:
+            overall_metrics = _vocabulary_overlap_metrics(frame, stopword_set)
+            if overall_metrics:
+                overlap_summary[target_dir]["ALL"] = overall_metrics
+            for label, subset in groups.items():
+                metrics = _vocabulary_overlap_metrics(subset, stopword_set)
+                if metrics:
+                    label_key = "UNLABELED" if label is None else str(label)
+                    overlap_summary[target_dir][label_key] = metrics
+
+    for directory, label_metrics in overlap_summary.items():
+        if not label_metrics:
+            continue
+        records: List[Dict[str, object]] = []
+        for label_key, metrics in sorted(label_metrics.items(), key=lambda item: (item[0] != "ALL", str(item[0]))):
+            record = {"label": label_key}
+            record.update(metrics)
+            records.append(record)
+        metrics_frame = pd.DataFrame(records)
+        for column in (
+            "jaccard_similarity",
+            "dice_coefficient",
+            "overlap_coefficient",
+            "correct_overlap_ratio",
+            "incorrect_overlap_ratio",
+        ):
+            if column in metrics_frame.columns:
+                metrics_frame[column] = metrics_frame[column].astype(float)
+        metrics_path = directory / "vocabulary_overlap_metrics.csv"
+        metrics_frame.to_csv(metrics_path, index=False)
+        produced.append(metrics_path)
     return produced

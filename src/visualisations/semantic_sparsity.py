@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
-DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/sparsity")
+DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/semantic/sparsity")
 
 
 def _iter_summary_csvs(root: Path, pattern: str) -> Iterable[Path]:
@@ -178,4 +178,3 @@ def _group_aggregate(frame: pd.DataFrame) -> Dict[Optional[str], pd.DataFrame]:
             continue
         groups[str(label)] = subset
     return groups
-

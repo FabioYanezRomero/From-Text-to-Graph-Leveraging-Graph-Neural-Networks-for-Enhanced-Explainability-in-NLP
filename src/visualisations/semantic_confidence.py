@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
-DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/confidence")
+DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/semantic/confidence")
 SUMMARY_COLUMNS = [
     "prediction_confidence",
     "median_threshold",
@@ -140,4 +140,3 @@ def generate_confidence_threshold_visuals(
         )
 
     return [path for path in produced if path is not None]
-

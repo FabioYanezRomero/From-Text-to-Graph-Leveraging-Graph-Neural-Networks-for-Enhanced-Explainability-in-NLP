@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 
-DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/token/frequency")
+DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/semantic/token/frequency")
 
 
 def _iter_token_csvs(root: Path, pattern: str = "*tokens.csv") -> Iterable[Path]:
