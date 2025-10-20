@@ -47,6 +47,12 @@ RUN pip install --no-cache-dir \
 # Install TokenSHAP from PyPI
 RUN pip install --no-cache-dir tokenshap
 
+# Copy and install application requirements
+COPY requirements.txt /app/requirements.txt
+RUN grep -v -E 'torch|pytorch' /app/requirements.txt > /tmp/requirements-tokenshap.txt && \
+    pip install --no-cache-dir -r /tmp/requirements-tokenshap.txt && \
+    rm /tmp/requirements-tokenshap.txt
+
 # Optional: Jupyter for interactive development
 RUN pip install --no-cache-dir jupyter
 

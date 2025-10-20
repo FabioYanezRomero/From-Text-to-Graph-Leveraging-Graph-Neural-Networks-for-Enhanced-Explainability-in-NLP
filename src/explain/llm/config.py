@@ -87,6 +87,14 @@ class DatasetProfile:
 DEFAULT_FINETUNED_ROOT = Path("outputs/finetuned_llms")
 DEFAULT_INSIGHTS_ROOT = Path("outputs/insights/LLM")
 
+# Default hyperparameters for TokenSHAP
+TOKEN_SHAP_DEFAULTS: Dict[str, float] = {
+    "sampling_ratio": 0.1,
+    "min_samples": 50,
+    "max_samples": 2048,
+    "target_forward_passes": 2000,  # Default target for fair comparison mode
+}
+
 
 def build_default_profiles(
     *,
@@ -145,6 +153,7 @@ class LLMExplainerRequest:
     num_shards: int = 1
     shard_index: int = 0
     fair_comparison: bool = False
+    target_forward_passes: int = 2000
 
     def resolve_device(self) -> str:
         if self.device:

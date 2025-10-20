@@ -11,12 +11,9 @@ from .records import Coalition, ExplanationRecord
 
 try:
     from .providers import GraphInfo  # type: ignore
-except ImportError:  # pragma: no cover
-    GraphInfo = None  # type: ignore
-
-try:
     from .llm_providers import TokenInfo  # type: ignore
 except ImportError:  # pragma: no cover
+    GraphInfo = None  # type: ignore
     TokenInfo = None  # type: ignore
 
 
@@ -336,7 +333,7 @@ def summarize_record(
     elif TokenInfo is not None and isinstance(graph_payload, TokenInfo):
         # For LLM explanations, we have tokens but no graph structure
         graph_obj = None
-        node_text = tuple(graph_payload.token_text)
+        node_text = tuple(graph_payload.tokens)
     else:
         graph_obj = graph_payload  # type: ignore[assignment]
     minimal = record.minimal_coalition(sufficiency_threshold)

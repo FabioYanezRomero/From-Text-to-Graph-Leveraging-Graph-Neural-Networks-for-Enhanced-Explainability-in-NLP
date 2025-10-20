@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
-"""Main entry point for LLM explainability using TokenSHAP."""
+"""CLI entry point for LLM explainability using TokenSHAP."""
 
 from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from .config import (
     DEFAULT_FINETUNED_ROOT,
@@ -19,278 +19,328 @@ from .token_shap_runner import collect_token_shap_hyperparams, token_shap_explai
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 LOGGER = logging.getLogger(__name__)
 
 
-def run_token_shap(
-    dataset_key: str,
-    *,
-    device: Optional[str] = None,
-    max_samples: Optional[int] = None,
-    sampling_override: Optional[float] = None,
-    top_k_nodes: int = 5,
-    sufficiency_threshold: float = 0.9,
-    finetuned_root: Path = DEFAULT_FINETUNED_ROOT,
-    insights_root: Path = DEFAULT_INSIGHTS_ROOT,
-    output_basename: Optional[str] = None,
-    store_raw: bool = True,
-    use_advisor: bool = True,
-    num_shards: int = 1,
-    shard_index: int = 0,
-    fair_comparison: bool = False,
-) -> None:
-    """
-    Run TokenSHAP explanations on a finetuned LLM.
+def _list_datasets(args: argparse.Namespace) -> int:
+    """List available dataset profiles."""
+    profiles = build_default_profiles(finetuned_root=Path(args.finetuned_root))
     
-    Args:
-        dataset_key: Key for the dataset profile (e.g., "stanfordnlp/sst2")
-        device: Device to use (cuda/cpu), auto-detected if None
-        max_samples: Maximum number of samples to explain
-        sampling_override: Override sampling ratio (use advisor if None)
-        top_k_nodes: Number of top tokens to highlight
-        sufficiency_threshold: Threshold for minimal coalition
-        finetuned_root: Root directory for finetuned models
-        insights_root: Root directory for output insights
-        output_basename: Custom basename for output files
-        store_raw: Whether to store raw coalition data
-        use_advisor: Whether to use hyperparameter advisor
-    """
-    profiles = build_default_profiles(finetuned_root=finetuned_root)
-    if dataset_key not in profiles:
-        available = ", ".join(profiles.keys())
-        raise ValueError(
-            f"Unknown dataset key '{dataset_key}'. Available: {available}"
-        )
+    print("Available LLM dataset profiles:")
+    print("-" * 80)
+    for key, profile in profiles.items():
+        print(f"\n  Key: {key}")
+        print(f"  Dataset: {profile.dataset_name}")
+        print(f"  Split: {profile.split}")
+        print(f"  Num Labels: {profile.num_labels}")
+        print(f"  Checkpoint: {profile.checkpoint_dir}")
+        print(f"  Backbone: {profile.derive_backbone()}")
+        print(f"  Graph Type: {profile.graph_type}")
+        print(f"  Max Tokens: {profile.max_tokens}")
+        print(f"  Max Length: {profile.max_length}")
+    print()
+    return 0
+
+
+def _collect_hyperparams(args: argparse.Namespace) -> int:
+    """Collect suggested hyperparameters for each sample."""
+    profiles = build_default_profiles(finetuned_root=Path(args.finetuned_root))
     
-    profile = profiles[dataset_key]
-    LOGGER.info("Loading model and dataset for %s", dataset_key)
+    profile_key = args.dataset
+    if profile_key not in profiles:
+        LOGGER.error("Unknown dataset profile '%s'. Use --list-datasets to see available profiles.", profile_key)
+        return 1
     
-    model_bundle = load_finetuned_model(profile, device=device)
-    dataset = load_dataset_split(profile)
+    profile = profiles[profile_key]
     
     request = LLMExplainerRequest(
         profile=profile,
-        device=device,
-        sampling_override=sampling_override,
-        max_samples=max_samples,
-        sufficiency_threshold=sufficiency_threshold,
-        top_k_nodes=top_k_nodes,
-        insights_root=insights_root,
-        output_basename=output_basename,
-        store_raw=store_raw,
-        num_shards=num_shards,
-        shard_index=shard_index,
-        fair_comparison=fair_comparison,
+        device=args.device,
+        sampling_override=args.sampling_override,
+        max_samples=args.max_samples,
+        sufficiency_threshold=args.sufficiency_threshold,
+        top_k_nodes=args.top_k,
+        insights_root=Path(args.output_dir) if args.output_dir else DEFAULT_INSIGHTS_ROOT,
+        output_basename=args.output_basename,
+        store_raw=not args.no_raw,
+        fair_comparison=getattr(args, "fair", False),
+        target_forward_passes=getattr(args, "target_forward_passes", 2000),
     )
     
-    LOGGER.info("Running TokenSHAP explanations (advisor=%s)", use_advisor)
-    records, summaries, json_path, csv_path, raw_json, raw_pickle = token_shap_explain(
-        request=request,
-        model_bundle=model_bundle,
-        dataset=dataset,
-        progress=True,
-        use_advisor=use_advisor,
-    )
-    
-    LOGGER.info("Processed %d samples", len(records))
-    LOGGER.info("Summary JSON: %s", json_path)
-    LOGGER.info("Summary CSV: %s", csv_path)
-    LOGGER.info("Raw records JSON: %s", raw_json)
-    if raw_pickle:
-        LOGGER.info("Raw records pickle: %s", raw_pickle)
-
-
-def run_hyperparam_collection(
-    dataset_key: str,
-    *,
-    device: Optional[str] = None,
-    max_samples: Optional[int] = None,
-    output_path: Optional[Path] = None,
-    finetuned_root: Path = DEFAULT_FINETUNED_ROOT,
-    insights_root: Path = DEFAULT_INSIGHTS_ROOT,
-    fair_comparison: bool = False,
-) -> None:
-    """
-    Collect suggested hyperparameters for all samples without running explanations.
-    
-    This is useful for analyzing what hyperparameters the advisor suggests
-    for different sentences in the dataset.
-    
-    Args:
-        dataset_key: Key for the dataset profile (e.g., "stanfordnlp/sst2")
-        device: Device to use (cuda/cpu), auto-detected if None
-        max_samples: Maximum number of samples to analyze
-        output_path: Custom path for output JSON
-        finetuned_root: Root directory for finetuned models
-        insights_root: Root directory for output insights
-    """
-    profiles = build_default_profiles(finetuned_root=finetuned_root)
-    if dataset_key not in profiles:
-        available = ", ".join(profiles.keys())
-        raise ValueError(
-            f"Unknown dataset key '{dataset_key}'. Available: {available}"
-        )
-    
-    profile = profiles[dataset_key]
-    LOGGER.info("Loading model and dataset for %s", dataset_key)
-    
-    model_bundle = load_finetuned_model(profile, device=device)
+    LOGGER.info("Loading model and dataset for profile '%s'...", profile_key)
+    model_bundle = load_finetuned_model(profile, device=request.resolve_device())
     dataset = load_dataset_split(profile)
     
-    request = LLMExplainerRequest(
-        profile=profile,
-        device=device,
-        max_samples=max_samples,
-        insights_root=insights_root,
-        fair_comparison=fair_comparison,
-    )
+    output_path = Path(args.hyperparams_output) if args.hyperparams_output else None
     
-    LOGGER.info("Collecting hyperparameters for all samples")
-    saved_path, per_sample = collect_token_shap_hyperparams(
-        request=request,
-        model_bundle=model_bundle,
-        dataset=dataset,
+    LOGGER.info("Collecting hyperparameters...")
+    hparam_path, per_sample = collect_token_shap_hyperparams(
+        request,
+        model_bundle,
+        dataset,
         output_path=output_path,
-        max_samples=max_samples,
-        progress=True,
+        max_samples=args.max_samples,
+        progress=not args.no_progress,
     )
     
-    LOGGER.info("Collected hyperparameters for %d samples", len(per_sample))
-    LOGGER.info("Saved to: %s", saved_path)
+    print(f"\nCollected hyperparameters for {len(per_sample)} samples.")
+    print(f"Saved to: {hparam_path}")
+    return 0
 
 
-def main():
-    """CLI entry point."""
-    parser = argparse.ArgumentParser(
-        description="Run TokenSHAP explainability on finetuned LLMs"
+def _explain(args: argparse.Namespace) -> int:
+    """Run TokenSHAP explainability on the specified dataset."""
+    profiles = build_default_profiles(finetuned_root=Path(args.finetuned_root))
+    
+    profile_key = args.dataset
+    if profile_key not in profiles:
+        LOGGER.error("Unknown dataset profile '%s'. Use --list-datasets to see available profiles.", profile_key)
+        return 1
+    
+    profile = profiles[profile_key]
+    
+    request = LLMExplainerRequest(
+        profile=profile,
+        device=args.device,
+        sampling_override=args.sampling_override,
+        max_samples=args.max_samples,
+        sufficiency_threshold=args.sufficiency_threshold,
+        top_k_nodes=args.top_k,
+        insights_root=Path(args.output_dir) if args.output_dir else DEFAULT_INSIGHTS_ROOT,
+        output_basename=args.output_basename,
+        store_raw=not args.no_raw,
+        fair_comparison=getattr(args, "fair", False),
+        target_forward_passes=getattr(args, "target_forward_passes", 2000),
     )
+    
+    LOGGER.info("Loading model and dataset for profile '%s'...", profile_key)
+    model_bundle = load_finetuned_model(profile, device=request.resolve_device())
+    dataset = load_dataset_split(profile)
+    
+    if request.fair_comparison:
+        LOGGER.info("Fair comparison mode enabled with target_forward_passes=%d", request.target_forward_passes)
+    
+    LOGGER.info("Running TokenSHAP explainability...")
+    (
+        records,
+        summaries,
+        summary_json,
+        summary_csv,
+        raw_json,
+        raw_pickle,
+    ) = token_shap_explain(
+        request,
+        model_bundle,
+        dataset,
+        progress=not args.no_progress,
+        use_advisor=not args.no_advisor,
+    )
+    
+    print(f"\nExplainability complete!")
+    print(f"  Processed {len(records)} samples")
+    print(f"  Summary JSON: {summary_json}")
+    print(f"  Summary CSV: {summary_csv}")
+    if raw_json:
+        print(f"  Raw JSON: {raw_json}")
+    if raw_pickle:
+        print(f"  Raw pickle: {raw_pickle}")
+    
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the CLI argument parser."""
+    parser = argparse.ArgumentParser(
+        description="LLM explainability using TokenSHAP on finetuned transformers.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    
+    # List datasets command
+    list_parser = subparsers.add_parser(
+        "list-datasets",
+        help="List available dataset profiles",
+    )
+    list_parser.add_argument(
+        "--finetuned-root",
+        default=str(DEFAULT_FINETUNED_ROOT),
+        help="Root directory for finetuned LLM checkpoints",
+    )
+    
+    # Collect hyperparams command
+    collect_parser = subparsers.add_parser(
+        "collect-hyperparams",
+        help="Collect suggested hyperparameters for each sample",
+    )
+    collect_parser.add_argument(
+        "dataset",
+        help="Dataset profile key (e.g., 'setfit/ag_news', 'stanfordnlp/sst2')",
+    )
+    collect_parser.add_argument(
+        "--finetuned-root",
+        default=str(DEFAULT_FINETUNED_ROOT),
+        help="Root directory for finetuned LLM checkpoints",
+    )
+    collect_parser.add_argument(
+        "--hyperparams-output",
+        help="Path to save hyperparameters JSON",
+    )
+    collect_parser.add_argument(
+        "--device",
+        help="Device to use (cuda/cpu)",
+    )
+    collect_parser.add_argument(
+        "--max-samples",
+        type=int,
+        help="Maximum number of samples to process",
+    )
+    collect_parser.add_argument(
+        "--sampling-override",
+        type=float,
+        help="Override sampling ratio for all samples",
+    )
+    collect_parser.add_argument(
+        "--sufficiency-threshold",
+        type=float,
+        default=0.9,
+        help="Sufficiency threshold for minimal coalition",
+    )
+    collect_parser.add_argument(
+        "--top-k",
+        type=int,
+        default=5,
+        help="Number of top important tokens to extract",
+    )
+    collect_parser.add_argument(
+        "--output-dir",
+        help="Override output directory",
+    )
+    collect_parser.add_argument(
+        "--output-basename",
+        help="Override output file basename",
+    )
+    collect_parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable progress bars",
+    )
+    collect_parser.add_argument(
+        "--no-raw",
+        action="store_true",
+        help="Do not store raw pickle files",
+    )
+    collect_parser.add_argument(
+        "--fair",
+        action="store_true",
+        help="Use fair comparison mode with formula-based sampling ratios (default: 2000 forward passes)",
+    )
+    collect_parser.add_argument(
+        "--target-forward-passes",
+        type=int,
+        default=2000,
+        help="Target number of forward passes for fair comparison mode (default: 2000)",
+    )
     
     # Explain command
     explain_parser = subparsers.add_parser(
         "explain",
-        help="Run TokenSHAP explanations",
+        help="Run TokenSHAP explainability on a dataset",
     )
     explain_parser.add_argument(
         "dataset",
-        type=str,
-        help="Dataset key (e.g., stanfordnlp/sst2, setfit/ag_news)",
+        help="Dataset profile key (e.g., 'setfit/ag_news', 'stanfordnlp/sst2')",
+    )
+    explain_parser.add_argument(
+        "--finetuned-root",
+        default=str(DEFAULT_FINETUNED_ROOT),
+        help="Root directory for finetuned LLM checkpoints",
     )
     explain_parser.add_argument(
         "--device",
-        type=str,
-        default=None,
         help="Device to use (cuda/cpu)",
     )
     explain_parser.add_argument(
         "--max-samples",
         type=int,
-        default=None,
-        help="Maximum number of samples to explain",
+        help="Maximum number of samples to process",
     )
     explain_parser.add_argument(
-        "--sampling-ratio",
+        "--sampling-override",
         type=float,
-        default=None,
-        help="Override sampling ratio (disables advisor)",
+        help="Override sampling ratio for all samples",
+    )
+    explain_parser.add_argument(
+        "--sufficiency-threshold",
+        type=float,
+        default=0.9,
+        help="Sufficiency threshold for minimal coalition",
     )
     explain_parser.add_argument(
         "--top-k",
         type=int,
         default=5,
-        help="Number of top tokens to highlight",
+        help="Number of top important tokens to extract",
     )
     explain_parser.add_argument(
-        "--no-advisor",
+        "--output-dir",
+        help="Override output directory",
+    )
+    explain_parser.add_argument(
+        "--output-basename",
+        help="Override output file basename",
+    )
+    explain_parser.add_argument(
+        "--no-progress",
         action="store_true",
-        help="Disable hyperparameter advisor",
+        help="Disable progress bars",
     )
     explain_parser.add_argument(
         "--no-raw",
         action="store_true",
-        help="Don't store raw coalition data",
+        help="Do not store raw pickle files",
     )
     explain_parser.add_argument(
-        "--num-shards",
-        type=int,
-        default=1,
-        help="Number of shards for parallel processing",
-    )
-    explain_parser.add_argument(
-        "--shard-index",
-        type=int,
-        default=0,
-        help="Index of this shard (0-based, must be < num-shards)",
+        "--no-advisor",
+        action="store_true",
+        help="Disable hyperparameter advisor (use fixed sampling ratios)",
     )
     explain_parser.add_argument(
         "--fair",
         action="store_true",
-        help="Enable fair multimodal hyperparameter alignment",
+        help="Use fair comparison mode with formula-based sampling ratios (default: 2000 forward passes)",
     )
-    
-    # Hyperparams command
-    hyperparams_parser = subparsers.add_parser(
-        "hyperparams",
-        help="Collect suggested hyperparameters for all samples",
-    )
-    hyperparams_parser.add_argument(
-        "dataset",
-        type=str,
-        help="Dataset key (e.g., stanfordnlp/sst2, setfit/ag_news)",
-    )
-    hyperparams_parser.add_argument(
-        "--device",
-        type=str,
-        default=None,
-        help="Device to use (cuda/cpu)",
-    )
-    hyperparams_parser.add_argument(
-        "--max-samples",
+    explain_parser.add_argument(
+        "--target-forward-passes",
         type=int,
-        default=None,
-        help="Maximum number of samples to analyze",
-    )
-    hyperparams_parser.add_argument(
-        "--output",
-        type=Path,
-        default=None,
-        help="Custom output path for hyperparameters JSON",
-    )
-    hyperparams_parser.add_argument(
-        "--fair",
-        action="store_true",
-        help="Enable fair multimodal hyperparameter alignment",
+        default=2000,
+        help="Target number of forward passes for fair comparison mode (default: 2000)",
     )
     
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """Main CLI entry point."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
     
-    if args.command == "explain":
-        run_token_shap(
-            dataset_key=args.dataset,
-            device=args.device,
-            max_samples=args.max_samples,
-            sampling_override=args.sampling_ratio,
-            top_k_nodes=args.top_k,
-            use_advisor=not args.no_advisor,
-            store_raw=not args.no_raw,
-            num_shards=args.num_shards,
-            shard_index=args.shard_index,
-            fair_comparison=args.fair,
-        )
-    elif args.command == "hyperparams":
-        run_hyperparam_collection(
-            dataset_key=args.dataset,
-            device=args.device,
-            max_samples=args.max_samples,
-            output_path=args.output,
-            fair_comparison=args.fair,
-        )
-    else:
+    if not args.command:
         parser.print_help()
+        return 1
+    
+    if args.command == "list-datasets":
+        return _list_datasets(args)
+    elif args.command == "collect-hyperparams":
+        return _collect_hyperparams(args)
+    elif args.command == "explain":
+        return _explain(args)
+    else:
+        parser.error(f"Unknown command: {args.command}")
+        return 1
 
 
 if __name__ == "__main__":
-    main()
-
+    sys.exit(main())

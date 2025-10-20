@@ -1,235 +1,128 @@
-"""Word-level aggregation for token-level importance scores.
-
-This module provides utilities to aggregate subword token scores into word-level
-scores for more human-readable explanations.
-"""
+"""Word-level aggregation of subword token importance scores."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Sequence
+
+from src.Insights.records import ExplanationRecord
 
 
-@dataclass(frozen=True)
-class WordSpan:
-    """Represents a word composed of one or more tokens."""
-    
-    word_text: str
-    token_indices: Tuple[int, ...]
-    start_char: int
-    end_char: int
-
-
-def detect_word_boundaries(
+def _aggregate_subwords_to_words(
     tokens: Sequence[str],
-    original_text: Optional[str] = None,
-) -> List[WordSpan]:
+    importance: Sequence[float],
+    *,
+    aggregation: str = "mean",
+) -> tuple[List[str], List[float]]:
     """
-    Detect word boundaries from subword tokens.
-    
-    This handles common tokenization patterns:
-    - BERT WordPiece: "##" prefix for continuation
-    - GPT/RoBERTa BPE: "Ġ" prefix for word start
-    - SentencePiece: "▁" prefix for word start
-    
+    Aggregate subword tokens (e.g., WordPiece) into word-level importance.
+
     Args:
-        tokens: List of tokens (may include subword markers)
-        original_text: Optional original text for character position mapping
-    
+        tokens: List of subword tokens
+        importance: Importance scores for each token
+        aggregation: How to aggregate ('mean', 'max', 'sum')
+
     Returns:
-        List of WordSpan objects representing complete words
+        Tuple of (word_list, word_importance)
     """
-    words: List[WordSpan] = []
-    current_word_tokens: List[int] = []
-    current_word_text_parts: List[str] = []
-    
-    for idx, token in enumerate(tokens):
-        # Check if this is a continuation token (WordPiece style)
-        is_continuation = token.startswith("##")
-        
-        # Clean token text
-        clean_token = token
+    if not tokens or not importance:
+        return [], []
+
+    words: List[str] = []
+    word_importance: List[float] = []
+    current_word_tokens: List[str] = []
+    current_word_scores: List[float] = []
+
+    for token, score in zip(tokens, importance):
+        # Check if token is a continuation (starts with ##)
         if token.startswith("##"):
-            clean_token = token[2:]  # Remove ##
-        elif token.startswith("Ġ"):
-            clean_token = token[1:]  # Remove Ġ (GPT-style)
-        elif token.startswith("▁"):
-            clean_token = token[1:]  # Remove ▁ (SentencePiece)
-        
-        # If this is a continuation, add to current word
-        if is_continuation and current_word_tokens:
-            current_word_tokens.append(idx)
-            current_word_text_parts.append(clean_token)
+            # Continuation of previous word
+            current_word_tokens.append(token[2:])  # Remove ##
+            current_word_scores.append(score)
         else:
-            # Start a new word
-            # First, save the previous word if it exists
+            # Start of new word - finalize previous word if exists
             if current_word_tokens:
-                word_text = "".join(current_word_text_parts)
-                words.append(WordSpan(
-                    word_text=word_text,
-                    token_indices=tuple(current_word_tokens),
-                    start_char=-1,  # Character positions not tracked here
-                    end_char=-1,
-                ))
-            
+                word = "".join(current_word_tokens)
+                if aggregation == "mean":
+                    agg_score = sum(current_word_scores) / len(current_word_scores)
+                elif aggregation == "max":
+                    agg_score = max(current_word_scores)
+                elif aggregation == "sum":
+                    agg_score = sum(current_word_scores)
+                else:
+                    agg_score = sum(current_word_scores) / len(current_word_scores)
+
+                words.append(word)
+                word_importance.append(agg_score)
+
             # Start new word
-            current_word_tokens = [idx]
-            current_word_text_parts = [clean_token]
-    
-    # Don't forget the last word
+            current_word_tokens = [token]
+            current_word_scores = [score]
+
+    # Finalize last word
     if current_word_tokens:
-        word_text = "".join(current_word_text_parts)
-        words.append(WordSpan(
-            word_text=word_text,
-            token_indices=tuple(current_word_tokens),
-            start_char=-1,
-            end_char=-1,
-        ))
-    
-    return words
-
-
-def aggregate_token_scores_to_words(
-    token_importance: Sequence[float],
-    tokens: Sequence[str],
-    aggregation: str = "mean",
-) -> Tuple[List[WordSpan], List[float]]:
-    """
-    Aggregate token-level importance scores to word-level scores.
-    
-    Args:
-        token_importance: Importance score for each token
-        tokens: List of tokens
-        aggregation: Aggregation method - "mean", "sum", "max", or "first"
-    
-    Returns:
-        Tuple of (word_spans, word_importance_scores)
-    """
-    word_spans = detect_word_boundaries(tokens)
-    word_scores: List[float] = []
-    
-    for word_span in word_spans:
-        # Get scores for all tokens in this word
-        token_scores = [
-            token_importance[idx]
-            for idx in word_span.token_indices
-            if idx < len(token_importance)
-        ]
-        
-        if not token_scores:
-            word_scores.append(0.0)
-            continue
-        
-        # Aggregate scores
+        word = "".join(current_word_tokens)
         if aggregation == "mean":
-            score = sum(token_scores) / len(token_scores)
-        elif aggregation == "sum":
-            score = sum(token_scores)
+            agg_score = sum(current_word_scores) / len(current_word_scores)
         elif aggregation == "max":
-            score = max(token_scores)
-        elif aggregation == "first":
-            score = token_scores[0]
+            agg_score = max(current_word_scores)
+        elif aggregation == "sum":
+            agg_score = sum(current_word_scores)
         else:
-            raise ValueError(f"Unknown aggregation method: {aggregation}")
-        
-        word_scores.append(score)
-    
-    return word_spans, word_scores
+            agg_score = sum(current_word_scores) / len(current_word_scores)
 
+        words.append(word)
+        word_importance.append(agg_score)
 
-def get_top_words(
-    token_importance: Sequence[float],
-    tokens: Sequence[str],
-    k: int = 5,
-    aggregation: str = "mean",
-) -> Tuple[List[str], List[float], List[Tuple[int, ...]]]:
-    """
-    Get top-k most important words with their scores.
-    
-    Args:
-        token_importance: Importance score for each token
-        tokens: List of tokens
-        k: Number of top words to return
-        aggregation: How to aggregate token scores ("mean", "sum", "max", "first")
-    
-    Returns:
-        Tuple of (top_words, top_scores, top_token_indices)
-    """
-    word_spans, word_scores = aggregate_token_scores_to_words(
-        token_importance, tokens, aggregation
-    )
-    
-    # Sort by importance
-    scored_words = list(zip(word_spans, word_scores))
-    scored_words.sort(key=lambda x: x[1], reverse=True)
-    
-    # Get top k
-    top_k = scored_words[:k]
-    
-    top_words = [w.word_text for w, _ in top_k]
-    top_scores = [s for _, s in top_k]
-    top_token_indices = [w.token_indices for w, _ in top_k]
-    
-    return top_words, top_scores, top_token_indices
+    return words, word_importance
 
 
 def create_word_level_summary(
-    record,
+    record: ExplanationRecord,
+    *,
     aggregation: str = "mean",
     top_k: int = 5,
 ) -> Dict[str, object]:
     """
-    Create a word-level summary from a token-level ExplanationRecord.
-    
+    Create a word-level summary from token-level explanation.
+
     Args:
-        record: ExplanationRecord with token-level data
-        aggregation: How to aggregate token scores
-        top_k: Number of top words to include
-    
+        record: Explanation record with token-level data
+        aggregation: Aggregation method ('mean', 'max', 'sum')
+        top_k: Number of top words to extract
+
     Returns:
-        Dictionary with word-level fields
+        Dictionary with word-level metrics
     """
-    from .token_shap_runner import _extract_importances
-    
-    # Get token-level data
-    token_text = record.extras.get("token_text", []) if hasattr(record, "extras") else []
-    if not token_text:
-        return {
-            "word_level_available": False,
-            "top_words": None,
-            "top_word_scores": None,
-        }
-    
-    token_importance = record.node_importance
-    if not token_importance:
-        return {
-            "word_level_available": False,
-            "top_words": None,
-            "top_word_scores": None,
-        }
-    
-    # Aggregate to word level
-    word_spans, word_scores = aggregate_token_scores_to_words(
-        token_importance, token_text, aggregation
+    if not record.extras or not isinstance(record.extras, dict):
+        return {}
+
+    tokens = record.extras.get("token_text", [])
+    importance = record.node_importance
+
+    if not tokens or not importance or len(tokens) != len(importance):
+        return {}
+
+    words, word_scores = _aggregate_subwords_to_words(
+        tokens,
+        importance,
+        aggregation=aggregation,
     )
-    
-    # Get top words
-    top_words, top_scores, top_token_indices = get_top_words(
-        token_importance, token_text, k=top_k, aggregation=aggregation
+
+    if not words:
+        return {}
+
+    # Sort by importance and get top k
+    word_score_pairs = sorted(
+        zip(words, word_scores),
+        key=lambda x: x[1],
+        reverse=True,
     )
-    
+    top_words = [word for word, _ in word_score_pairs[:top_k]]
+    top_word_scores = [score for _, score in word_score_pairs[:top_k]]
+
     return {
-        "word_level_available": True,
-        "num_words": len(word_spans),
-        "words": [w.word_text for w in word_spans],
-        "word_scores": word_scores,
+        "num_words": len(words),
         "top_words": top_words,
-        "top_word_scores": top_scores,
-        "top_word_token_indices": top_token_indices,
-        "aggregation_method": aggregation,
+        "top_word_scores": top_word_scores,
+        "word_aggregation_method": aggregation,
     }
-
-
-
-
-

@@ -102,7 +102,7 @@ class SimpleGraphDataset(Dataset):
             try:
                 # Load file to get number of graphs
                 if self.file_type == "pt":
-                    batch = torch.load(fp, map_location='cpu')
+                    batch = torch.load(fp, map_location='cpu', weights_only=False)
                 else:
                     with open(fp, 'rb') as f:
                         batch = pickle.load(f)
@@ -207,7 +207,7 @@ class SimpleGraphDataset(Dataset):
     def _load_file_direct(self, path: str) -> Any:
         """Load file directly from disk without caching."""
         if self.file_type == "pt":
-            return torch.load(path, map_location='cpu')
+            return torch.load(path, map_location='cpu', weights_only=False)
         else:
             with open(path, 'rb') as f:
                 return pickle.load(f)
@@ -222,7 +222,7 @@ class SimpleGraphDataset(Dataset):
             #print(f"Loading {os.path.basename(path)} ({file_size:.2f} MB)...")
             
             if self.file_type == 'pt':
-                data = torch.load(path, map_location='cpu')
+                data = torch.load(path, map_location='cpu', weights_only=False)
             else:  # pkl
                 with open(path, 'rb') as f:
                     data = pickle.load(f)
@@ -259,7 +259,7 @@ class SimpleGraphDataset(Dataset):
         try:
             # Load the file
             if self.file_type == 'pt':
-                batch = torch.load(file_path, map_location='cpu')
+                batch = torch.load(file_path, map_location='cpu', weights_only=False)
             else:
                 with open(file_path, 'rb') as f:
                     batch = pickle.load(f)
@@ -844,7 +844,7 @@ class GNNTrainer:
 
     def load_model(self, path: str):
         """Load model, optimizer, and scheduler state from checkpoint."""
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         state_dict = checkpoint.get('model_state_dict', checkpoint)
         self.model.load_state_dict(state_dict)
 
@@ -1080,7 +1080,7 @@ class GNNTrainer:
 
         # Load best model for testing
         if self.best_model_path.exists():
-            checkpoint = torch.load(self.best_model_path, map_location=self.device)
+            checkpoint = torch.load(self.best_model_path, map_location=self.device, weights_only=False)
             self.model.load_state_dict(checkpoint.get('model_state_dict', checkpoint))
 
             # Safely get values with defaults

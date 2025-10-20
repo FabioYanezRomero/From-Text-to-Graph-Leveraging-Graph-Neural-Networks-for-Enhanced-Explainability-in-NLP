@@ -19,7 +19,7 @@ class FairnessConfig:
     min_top_k: int = 1
 
 
-class FairMultimodalHyperparameterAdvisor:gsdfg
+class FairMultimodalHyperparameterAdvisor:
     """Provide aligned hyperparameters across explainers for fair benchmarking."""
 
     def __init__(self, config: FairnessConfig | None = None) -> None:

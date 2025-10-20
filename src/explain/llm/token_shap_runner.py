@@ -20,6 +20,7 @@ from src.explain.common.fairness import FairMultimodalHyperparameterAdvisor
 from src.utils.energy import EnergyMonitor
 
 from .config import LLMExplainerRequest, TOKEN_SHAP_DEFAULTS
+from .fair_sampling import compute_fair_hyperparams
 from .hyperparam_advisor import (
     DatasetContext,
     ModelSpec,

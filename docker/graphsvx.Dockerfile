@@ -36,6 +36,10 @@ RUN python3 -m pip install torch-scatter torch-sparse torch-cluster torch-spline
 # Install other Python dependencies for GraphSVX
 RUN python3 -m pip install -r requirements.txt
 
+# Copy and install application requirements
+COPY requirements.txt /app/requirements.txt
+RUN python3 -m pip install -r /app/requirements.txt
+
 # Optional: install Jupyter for interactive use
 RUN python3 -m pip install jupyter
 
