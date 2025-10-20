@@ -20,6 +20,8 @@ from .semantic_score import (
     generate_token_score_ranking,
     plot_token_score_density,
     plot_token_score_difference,
+    generate_token_position_differences,
+    plot_token_position_difference,
 )
 from .semantic_token_frequency import (
     generate_token_frequency_charts,
@@ -44,6 +46,8 @@ __all__ = [
     "generate_token_score_densities",
     "plot_token_score_difference",
     "generate_token_score_differences",
+    "plot_token_position_difference",
+    "generate_token_position_differences",
     "plot_token_rank_histogram",
     "generate_token_rank_histograms",
     "generate_token_frequency_charts",

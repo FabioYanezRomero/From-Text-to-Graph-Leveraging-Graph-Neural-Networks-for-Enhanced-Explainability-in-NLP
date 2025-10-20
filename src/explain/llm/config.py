@@ -4,6 +4,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Optional, Sequence
 
+# Default hyperparameters for TokenSHAP
+TOKEN_SHAP_DEFAULTS: Dict[str, float] = {
+    "sampling_ratio": 0.1,
+    "num_samples_override": None,
+    "top_k_nodes": 5,
+}
+
 
 @dataclass(frozen=True)
 class SamplingProfile:
@@ -40,7 +47,7 @@ class DatasetProfile:
     checkpoint_file: Optional[str] = None
     base_model_name: str = "google-bert/bert-base-uncased"
     backbone: Optional[str] = None
-    max_tokens: int = 21
+    max_tokens: int = 512  # Allow full sequences (increased from 21)
     max_length: int = 256
     max_samples: Optional[int] = None
     sampling: SamplingProfile = field(default_factory=SamplingProfile)
@@ -135,6 +142,9 @@ class LLMExplainerRequest:
     insights_root: Path = DEFAULT_INSIGHTS_ROOT
     output_basename: Optional[str] = None
     store_raw: bool = True
+    num_shards: int = 1
+    shard_index: int = 0
+    fair_comparison: bool = False
 
     def resolve_device(self) -> str:
         if self.device:
@@ -179,5 +189,4 @@ def torch_cuda_available() -> bool:
         return torch.cuda.is_available()
     except Exception:
         return False
-
 

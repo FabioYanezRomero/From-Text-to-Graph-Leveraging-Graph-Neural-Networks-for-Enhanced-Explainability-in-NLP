@@ -34,6 +34,7 @@ class ExplainerRequest:
     profile: Optional[str] = None
     num_shards: int = 1
     shard_index: int = 0
+    fair_comparison: bool = False
 
     def resolved_method(self) -> str:
         """Infer the explainer to use when not explicitly provided."""
@@ -96,6 +97,7 @@ def clone_request_with_method(request: ExplainerRequest, method: str) -> Explain
         profile=request.profile,
         num_shards=request.num_shards,
         shard_index=request.shard_index,
+        fair_comparison=request.fair_comparison,
     )
 
 

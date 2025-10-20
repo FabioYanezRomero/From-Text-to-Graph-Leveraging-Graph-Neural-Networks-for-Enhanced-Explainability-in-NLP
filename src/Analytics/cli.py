@@ -77,6 +77,33 @@ def _handle_outliers(args: argparse.Namespace) -> None:
     """Detect outliers and produce cohort comparisons."""
     raise NotImplementedError("Outlier analytics disabled.")
 
+def _handle_faithfulness(args: argparse.Namespace) -> None:
+    """Compute aggregated faithfulness metrics using insertion AUC."""
+    from .faithfulness_metrics import run_faithfulness_aggregate
+
+    output_dir = _resolve_output_dir(args)
+    summary = run_faithfulness_aggregate(
+        args.insight_paths,
+        output_dir,
+        baseline=args.baseline,
+        group_key=args.group_key,
+    )
+    (output_dir / "faithfulness_summary.json").write_text(
+        json.dumps(summary, indent=2),
+        encoding="utf-8",
+    )
+
+def _handle_llm(args: argparse.Namespace) -> None:
+    """Generate token-focused analytics for LLM explanations."""
+    from .llm_analysis import run_llm_token_analysis
+
+    output_dir = _resolve_output_dir(args)
+    summary = run_llm_token_analysis(args.insight_paths, output_dir, args.top_k, args.stopwords)
+    (output_dir / "llm_analysis_summary.json").write_text(
+        json.dumps(summary, indent=2),
+        encoding="utf-8",
+    )
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the analytics CLI parser."""
     from . import structural_visualisation
@@ -157,6 +184,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_arguments(insertion_parser)
     insertion_parser.set_defaults(func=_handle_insertion)
+
+    # Faithfulness aggregation
+    faithfulness_parser = subparsers.add_parser(
+        "faithfulness",
+        help="Aggregate faithfulness metrics (insertion AUC based).",
+    )
+    add_common_arguments(faithfulness_parser)
+    faithfulness_parser.add_argument(
+        "--baseline",
+        type=float,
+        default=0.5,
+        help="Baseline AUC used when computing faithfulness differences (default: 0.5).",
+    )
+    faithfulness_parser.set_defaults(func=_handle_faithfulness)
+
+    # LLM token analytics
+    llm_parser = subparsers.add_parser(
+        "llm",
+        help="Run token-level analytics for LLM explanation exports.",
+    )
+    add_common_arguments(llm_parser, include_group=False)
+    llm_parser.add_argument(
+        "--top-k",
+        type=int,
+        default=12,
+        help="Number of highest-scoring words retained per record (<=0 keeps all).",
+    )
+    llm_parser.add_argument(
+        "--stopwords",
+        type=Path,
+        help="Optional newline-delimited stopword list applied before ranking tokens.",
+    )
+    llm_parser.set_defaults(func=_handle_llm)
 
     return parser
 

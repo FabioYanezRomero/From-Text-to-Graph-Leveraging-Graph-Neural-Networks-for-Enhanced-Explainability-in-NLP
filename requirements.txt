@@ -22,6 +22,7 @@ pyyaml
 joblib
 ipywidgets
 jupyter
+codecarbon
 
 # Development and testing
 pytest

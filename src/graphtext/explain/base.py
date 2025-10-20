@@ -29,6 +29,7 @@ class ExplainConfig:
     profile: Optional[str] = None
     num_shards: int = 1
     shard_index: int = 0
+    fair_comparison: bool = False
 
     def to_request(self) -> ExplainerRequest:
         return ExplainerRequest(
@@ -45,6 +46,7 @@ class ExplainConfig:
             profile=self.profile,
             num_shards=self.num_shards,
             shard_index=self.shard_index,
+            fair_comparison=self.fair_comparison,
         )
 
 

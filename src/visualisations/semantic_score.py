@@ -425,12 +425,23 @@ def _plot_metric_difference(
     fig.savefig(output_file, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
+    abs_difference = np.abs(difference)
+    abs_area = float(np.trapz(abs_difference, grid))
+    std_difference = float(difference.std(ddof=0)) if difference.size else 0.0
+    mean_difference = float(difference.mean()) if difference.size else 0.0
+    max_abs_difference = float(abs_difference.max()) if difference.size else 0.0
+
     stats = {
         "area": float(np.trapz(difference, grid)),
         "positive_mass": float(np.trapz(np.clip(difference, 0.0, None), grid)),
         "negative_mass": float(np.trapz(np.clip(-difference, 0.0, None), grid)),
         "max_difference": float(difference.max() if difference.size else 0.0),
         "min_difference": float(difference.min() if difference.size else 0.0),
+        "abs_area": abs_area,
+        "std_difference": std_difference,
+        "mean_difference": mean_difference,
+        "max_abs_difference": max_abs_difference,
+        "range_difference": float((difference.max() - difference.min()) if difference.size else 0.0),
     }
     return output_file, stats
 
@@ -448,7 +459,7 @@ def plot_token_score_difference(
 
     correct_values = correct_frame["score"].dropna().astype(float).clip(0.0, 1.0).to_numpy()
     incorrect_values = incorrect_frame["score"].dropna().astype(float).clip(0.0, 1.0).to_numpy()
-    if correct_values.size == 0 and incorrect_values.size == 0:
+    if correct_values.size == 0 or incorrect_values.size == 0:
         return None
 
     grid = np.linspace(0.0, 1.0, 256)
@@ -477,9 +488,11 @@ def generate_token_score_differences(
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
 
+    dataset_slug = root.parent.name if root.parent != root else root.name
     groups = _group_correct_incorrect(root, _iter_token_csvs(root, pattern))
     produced: List[Path] = []
-    summary_rows: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    difference_rows: List[Dict[str, object]] = []
+
     for subset in groups.values():
         correct_path = subset.get("correct")
         incorrect_path = subset.get("incorrect")
@@ -510,28 +523,32 @@ def generate_token_score_differences(
         if result is not None:
             plot_path, stats = result
             produced.append(plot_path)
-            dataset_key = (
-                correct_path.relative_to(root).parts[0]
-                if correct_path.is_relative_to(root) and correct_path.relative_to(root).parts
-                else "root"
-            )
-            summary_rows[dataset_key].append(
-                {
-                    "dataset": dataset_key,
-                    "scope": safe_name,
-                    "metric": "score",
-                    **stats,
-                }
-            )
 
-    for dataset_key, rows in summary_rows.items():
-        if not rows:
-            continue
-        summary_dir = (out_dir / dataset_key) if out_dir else root
+            record = {
+                "dataset": dataset_slug,
+                "scope": safe_name,
+                "metric": "score",
+                **stats,
+            }
+            difference_rows.append(record)
+
+            target_dir.mkdir(parents=True, exist_ok=True)
+            per_scope_path = target_dir / f"{safe_name}_difference_metrics.csv"
+            pd.DataFrame([record]).to_csv(per_scope_path, index=False)
+            produced.append(per_scope_path)
+
+            for csv_path in (Path(correct_path), Path(incorrect_path)):
+                sibling_path = csv_path.with_name(csv_path.stem + "_difference_metrics.csv")
+                pd.DataFrame([record]).to_csv(sibling_path, index=False)
+                produced.append(sibling_path)
+
+    if difference_rows:
+        summary_dir = out_dir if out_dir else root.parent
         summary_dir.mkdir(parents=True, exist_ok=True)
         summary_path = summary_dir / "score_difference_metrics.csv"
-        pd.DataFrame(rows).to_csv(summary_path, index=False)
+        pd.DataFrame(difference_rows).to_csv(summary_path, index=False)
         produced.append(summary_path)
+
     return produced
 
 
@@ -548,7 +565,7 @@ def plot_token_position_difference(
 
     correct_values = correct_frame["position"].dropna().astype(float).clip(0.0, 1.0).to_numpy()
     incorrect_values = incorrect_frame["position"].dropna().astype(float).clip(0.0, 1.0).to_numpy()
-    if correct_values.size == 0 and incorrect_values.size == 0:
+    if correct_values.size == 0 or incorrect_values.size == 0:
         return None
 
     grid = np.linspace(0.0, 1.0, 256)
@@ -579,7 +596,9 @@ def generate_token_position_differences(
 
     produced: List[Path] = []
     correct_incorrect = _group_correct_incorrect(root, _iter_token_csvs(root, pattern))
-    summary_rows: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    dataset_slug = root.parent.name if root.parent != root else root.name
+    difference_rows: List[Dict[str, object]] = []
+
     for entry in correct_incorrect.values():
         correct_path = entry.get("correct")
         incorrect_path = entry.get("incorrect")
@@ -610,28 +629,32 @@ def generate_token_position_differences(
         if result is not None:
             plot_path, stats = result
             produced.append(plot_path)
-            dataset_key = (
-                correct_path.relative_to(root).parts[0]
-                if correct_path.is_relative_to(root) and correct_path.relative_to(root).parts
-                else "root"
-            )
-            summary_rows[dataset_key].append(
-                {
-                    "dataset": dataset_key,
-                    "scope": safe_name,
-                    "metric": "position",
-                    **stats,
-                }
-            )
 
-    for dataset_key, rows in summary_rows.items():
-        if not rows:
-            continue
-        summary_dir = (out_dir / dataset_key) if out_dir else root
+            record = {
+                "dataset": dataset_slug,
+                "scope": safe_name,
+                "metric": "position",
+                **stats,
+            }
+            difference_rows.append(record)
+
+            target_dir.mkdir(parents=True, exist_ok=True)
+            per_scope_path = target_dir / f"{safe_name}_difference_metrics.csv"
+            pd.DataFrame([record]).to_csv(per_scope_path, index=False)
+            produced.append(per_scope_path)
+
+            for csv_path in (Path(correct_path), Path(incorrect_path)):
+                sibling_path = csv_path.with_name(csv_path.stem + "_difference_metrics.csv")
+                pd.DataFrame([record]).to_csv(sibling_path, index=False)
+                produced.append(sibling_path)
+
+    if difference_rows:
+        summary_dir = out_dir if out_dir else root.parent
         summary_dir.mkdir(parents=True, exist_ok=True)
         summary_path = summary_dir / "position_difference_metrics.csv"
-        pd.DataFrame(rows).to_csv(summary_path, index=False)
+        pd.DataFrame(difference_rows).to_csv(summary_path, index=False)
         produced.append(summary_path)
+
     return produced
 
 

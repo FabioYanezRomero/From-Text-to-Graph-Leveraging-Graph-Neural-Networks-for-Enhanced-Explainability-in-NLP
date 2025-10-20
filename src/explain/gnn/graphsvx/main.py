@@ -16,6 +16,8 @@ import torch
 from torch_geometric.data import Data
 from tqdm import tqdm
 
+from src.explain.common.fairness import FairMultimodalHyperparameterAdvisor
+from src.utils.energy import EnergyMonitor
 from src.explain.gnn.config import (
     DEFAULT_GNN_ROOT,
     DEFAULT_GRAPH_DATA_ROOT,
@@ -59,6 +61,7 @@ class GraphSHAPExplainer:
         probs = torch.softmax(logits, dim=1)
         predicted_class = int(torch.argmax(probs, dim=1))
         predicted_confidence = float(probs[0, predicted_class])
+        predicted_distribution = probs[0].detach().cpu().tolist()
 
         num_nodes = data.x.size(0)
         special_indices = []
@@ -149,6 +152,7 @@ class GraphSHAPExplainer:
             "original_prediction": {
                 "class": predicted_class,
                 "confidence": predicted_confidence,
+                "distribution": predicted_distribution,
             },
             "num_nodes": num_nodes,
             "num_edges": data.num_edges,
@@ -187,20 +191,21 @@ def _build_node_masks(
     return mask_keep, mask_drop
 
 
-def _confidence_with_mask(
+def _prediction_with_mask(
     model: torch.nn.Module,
     data: Data,
     mask: torch.Tensor,
     *,
     device: torch.device,
     predicted_class: int,
-) -> float:
+) -> Tuple[float, List[float]]:
     masked = data.clone().to(device)
     masked.x = masked.x.clone()
     masked.x[~mask] = 0
     logits = model(data=masked)
     probs = torch.softmax(logits, dim=1)
-    return float(probs[0, predicted_class])
+    distribution = probs[0].detach().cpu().tolist()
+    return float(probs[0, predicted_class]), distribution
 
 
 @dataclass
@@ -280,6 +285,7 @@ def collect_hyperparams(
         profile=request.profile,
         num_shards=request.num_shards,
         shard_index=request.shard_index,
+        fair_comparison=request.fair_comparison,
     )
 
     dataset, loader = load_graph_split(updated_request, batch_size=1, shuffle=False)
@@ -290,12 +296,16 @@ def collect_hyperparams(
     locked_overrides.update(profile_overrides)
     locked_overrides.update(updated_request.hyperparams or {})
 
-    architecture_spec = _extract_architecture_spec(model, train_args)
-    advisor = GraphSVXHyperparameterAdvisor(
-        architecture=architecture_spec,
-        context=_make_context(updated_request),
-        locked_params=locked_overrides,
-    )
+    fair_mode = bool(updated_request.fair_comparison)
+    fairness_advisor = FairMultimodalHyperparameterAdvisor() if fair_mode else None
+    advisor: Optional[GraphSVXHyperparameterAdvisor] = None
+    if not fair_mode:
+        architecture_spec = _extract_architecture_spec(model, train_args)
+        advisor = GraphSVXHyperparameterAdvisor(
+            architecture=architecture_spec,
+            context=_make_context(updated_request),
+            locked_params=locked_overrides,
+        )
 
     if output_path is not None:
         artifact_dir = output_path.parent
@@ -325,7 +335,14 @@ def collect_hyperparams(
         if max_graphs is not None and index >= max_graphs:
             break
         data: Data = batch
-        params = advisor.suggest(data)
+        if fairness_advisor is not None:
+            params = fairness_advisor.graphsvx(
+                num_nodes=int(getattr(data, "num_nodes", 0)),
+                keep_special_tokens=True,
+            )
+        else:
+            assert advisor is not None
+            params = advisor.suggest(data)
         per_graph.append(
             {
                 "graph_index": index,
@@ -343,8 +360,8 @@ def collect_hyperparams(
         "backbone": updated_request.backbone,
         "num_shards": updated_request.num_shards,
         "shard_index": updated_request.shard_index,
-        "base_defaults": dict(advisor.base_defaults),
-        "locked_overrides": dict(advisor.locked_params),
+        "base_defaults": fairness_advisor.describe() if fairness_advisor else dict(advisor.base_defaults),
+        "locked_overrides": {} if fairness_advisor else dict(advisor.locked_params),
         "per_graph": per_graph,
     }
 
@@ -406,6 +423,7 @@ def explain_request(
         profile=request.profile,
         num_shards=request.num_shards,
         shard_index=request.shard_index,
+        fair_comparison=request.fair_comparison,
     )
 
     dataset, loader = load_graph_split(updated_request, batch_size=1, shuffle=False)
@@ -418,12 +436,16 @@ def explain_request(
     if hyperparams:
         combined_overrides.update(hyperparams)
 
-    architecture_spec = _extract_architecture_spec(model, train_args)
-    advisor = GraphSVXHyperparameterAdvisor(
-        architecture=architecture_spec,
-        context=_make_context(updated_request),
-        locked_params=combined_overrides,
-    )
+    fair_mode = bool(updated_request.fair_comparison)
+    fairness_advisor = FairMultimodalHyperparameterAdvisor() if fair_mode else None
+    advisor: Optional[GraphSVXHyperparameterAdvisor] = None
+    if not fair_mode:
+        architecture_spec = _extract_architecture_spec(model, train_args)
+        advisor = GraphSVXHyperparameterAdvisor(
+            architecture=architecture_spec,
+            context=_make_context(updated_request),
+            locked_params=combined_overrides,
+        )
 
     artifact_dir = run_dir / "explanations" / "graphsvx" / _make_slug(updated_request)
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -449,80 +471,99 @@ def explain_request(
 
     results: List[GraphSVXResult] = []
     per_graph_hparams: List[Dict[str, object]] = []
-    for index, batch in enumerate(iterable):
-        if max_graphs is not None and index >= max_graphs:
-            break
-        data: Data = batch.to(device)
-        label = int(data.y.item()) if hasattr(data, "y") and data.y is not None else None
-        source = "advisor"
-        candidate = precomputed_lookup.get(index)
-        if candidate is not None:
-            graph_params = advisor.sanitise_for_graph(candidate, batch)
-            source = "precomputed"
-        else:
-            graph_params = advisor.suggest(batch)
+    energy_data: Dict[str, object] = {}
 
-        explanation = explainer.analyze(
-            data,
-            sampling_ratio=graph_params["sampling_ratio"],
-            num_samples_override=graph_params.get("num_samples_override"),
-            keep_special_tokens=graph_params["keep_special_tokens"],
-        )
+    with EnergyMonitor("GraphSVX", output_dir=artifact_dir) as energy_monitor:
+        for index, batch in enumerate(iterable):
+            if max_graphs is not None and index >= max_graphs:
+                break
+            data: Data = batch.to(device)
+            label = int(data.y.item()) if hasattr(data, "y") and data.y is not None else None
+            source = "advisor"
+            candidate = precomputed_lookup.get(index)
+            if fairness_advisor is not None:
+                if candidate is not None:
+                    warnings.warn(
+                        "Ignoring precomputed hyperparameters when fair comparison mode is enabled.",
+                    )
+                graph_params = fairness_advisor.graphsvx(
+                    num_nodes=int(getattr(batch, "num_nodes", 0)),
+                    keep_special_tokens=True,
+                )
+                source = "fair_advisor"
+            else:
+                if candidate is not None:
+                    graph_params = advisor.sanitise_for_graph(candidate, batch)  # type: ignore[union-attr]
+                    source = "precomputed"
+                else:
+                    graph_params = advisor.suggest(batch)  # type: ignore[union-attr]
 
-        combinations = explanation.get("combinations")
-        if isinstance(combinations, pd.DataFrame):
-            combos_path = artifact_dir / f"graph_{index:04d}_coalitions.csv"
-            combinations.to_csv(combos_path, index=False)
-            explanation["combinations_path"] = str(combos_path)
-            explanation.pop("combinations")
-
-        importance_tensor: torch.Tensor = explanation["node_importance"]
-        ordered = torch.argsort(importance_tensor, descending=True)
-        explanation["top_nodes"] = ordered[: graph_params["top_k_nodes"]].tolist()
-        top_nodes_list = explanation["top_nodes"]
-
-        mask_keep, mask_drop = _build_node_masks(
-            data.num_nodes,
-            top_nodes_list,
-            keep_special_tokens=graph_params["keep_special_tokens"],
-            device=device,
-        )
-
-        predicted_class = explanation["original_prediction"]["class"]
-        masked_conf = _confidence_with_mask(
-            explainer.model,
-            data,
-            mask_keep,
-            device=device,
-            predicted_class=predicted_class,
-        )
-        maskout_conf = _confidence_with_mask(
-            explainer.model,
-            data,
-            mask_drop,
-            device=device,
-            predicted_class=predicted_class,
-        )
-        kept_ratio = float(mask_keep.sum().item() / max(data.num_nodes, 1))
-        related_pred = {
-            "masked": masked_conf,
-            "maskout": maskout_conf,
-            "origin": explanation["original_prediction"]["confidence"],
-            "sparsity": kept_ratio,
-        }
-        explanation["related_prediction"] = related_pred
-
-        results.append(
-            GraphSVXResult(
-                graph_index=index,
-                label=label,
-                explanation=explanation,
-                hyperparams=dict(graph_params),
-                source=source,
-                related_prediction=related_pred,
+            explanation = explainer.analyze(
+                data,
+                sampling_ratio=graph_params["sampling_ratio"],
+                num_samples_override=graph_params.get("num_samples_override"),
+                keep_special_tokens=graph_params["keep_special_tokens"],
             )
-        )
-        per_graph_hparams.append({"graph_index": index, "source": source, **graph_params})
+
+            combinations = explanation.get("combinations")
+            if isinstance(combinations, pd.DataFrame):
+                combos_path = artifact_dir / f"graph_{index:04d}_coalitions.csv"
+                combinations.to_csv(combos_path, index=False)
+                explanation["combinations_path"] = str(combos_path)
+                explanation.pop("combinations")
+
+            importance_tensor: torch.Tensor = explanation["node_importance"]
+            ordered = torch.argsort(importance_tensor, descending=True)
+            explanation["top_nodes"] = ordered[: graph_params["top_k_nodes"]].tolist()
+            top_nodes_list = explanation["top_nodes"]
+
+            mask_keep, mask_drop = _build_node_masks(
+                data.num_nodes,
+                top_nodes_list,
+                keep_special_tokens=graph_params["keep_special_tokens"],
+                device=device,
+            )
+
+            predicted_class = explanation["original_prediction"]["class"]
+            masked_conf, masked_dist = _prediction_with_mask(
+                explainer.model,
+                data,
+                mask_keep,
+                device=device,
+                predicted_class=predicted_class,
+            )
+            maskout_conf, maskout_dist = _prediction_with_mask(
+                explainer.model,
+                data,
+                mask_drop,
+                device=device,
+                predicted_class=predicted_class,
+            )
+            kept_ratio = float(mask_keep.sum().item() / max(data.num_nodes, 1))
+            related_pred = {
+                "masked": masked_conf,
+                "maskout": maskout_conf,
+                "origin": explanation["original_prediction"]["confidence"],
+                "sparsity": kept_ratio,
+                "origin_distribution": explanation["original_prediction"].get("distribution"),
+                "masked_distribution": masked_dist,
+                "maskout_distribution": maskout_dist,
+            }
+            explanation["related_prediction"] = related_pred
+
+            results.append(
+                GraphSVXResult(
+                    graph_index=index,
+                    label=label,
+                    explanation=explanation,
+                    hyperparams=dict(graph_params),
+                    source=source,
+                    related_prediction=related_pred,
+                )
+            )
+            per_graph_hparams.append({"graph_index": index, "source": source, **graph_params})
+
+        energy_data = energy_monitor.result
 
     summary = {
         "method": "graphsvx",
@@ -534,16 +575,21 @@ def explain_request(
         "shard_index": updated_request.shard_index,
         "num_graphs": len(results),
         "hyperparams": {
-            "base_defaults": dict(advisor.base_defaults),
-            "locked_overrides": dict(advisor.locked_params),
+            "base_defaults": fairness_advisor.describe() if fairness_advisor else dict(advisor.base_defaults),
+            "locked_overrides": {} if fairness_advisor else dict(advisor.locked_params),
             "precomputed_source": str(precomputed_source) if precomputed_source else None,
             "per_graph": per_graph_hparams,
         },
+        "energy": energy_data,
         "graphs": [entry.to_json() for entry in results],
     }
 
     summary_path = artifact_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2))
+
+    if energy_data:
+        energy_path = artifact_dir / "energy_metrics.json"
+        energy_path.write_text(json.dumps(energy_data, indent=2))
 
     raw_path: Optional[Path] = artifact_dir / "results.pkl"
     try:
@@ -564,6 +610,7 @@ def _env_request() -> ExplainerRequest:
     device = os.getenv("GRAPHTEXT_DEVICE")
     gnn_root = Path(os.getenv("GRAPHTEXT_GNN_ROOT", str(DEFAULT_GNN_ROOT)))
     data_root = Path(os.getenv("GRAPHTEXT_GRAPH_ROOT", str(DEFAULT_GRAPH_DATA_ROOT)))
+    fair_flag = os.getenv("GRAPHTEXT_FAIR_COMPARISON")
 
     return ExplainerRequest(
         dataset=dataset,
@@ -573,6 +620,7 @@ def _env_request() -> ExplainerRequest:
         device=device,
         gnn_root=gnn_root,
         graph_data_root=data_root,
+        fair_comparison=bool(int(fair_flag)) if fair_flag is not None else False,
     )
 
 
@@ -594,6 +642,7 @@ def main(argv: Optional[List[str]] = None) -> None:  # pragma: no cover - CLI he
     parser.add_argument("--num-shards", type=int, help="Total number of shards for parallel execution.")
     parser.add_argument("--shard-index", type=int, help="Index of this shard (0-based).")
     parser.add_argument("--max-graphs", type=int, help="Limit the number of graphs processed (for smoke tests).")
+    parser.add_argument("--fair", action="store_true", help="Enable fair multimodal advisor alignment.")
     args = parser.parse_args(argv)
 
     request = _env_request()
@@ -620,6 +669,8 @@ def main(argv: Optional[List[str]] = None) -> None:  # pragma: no cover - CLI he
         overrides["num_shards"] = args.num_shards
     if args.shard_index is not None:
         overrides["shard_index"] = args.shard_index
+    if args.fair:
+        overrides["fair_comparison"] = True
     max_graphs = args.max_graphs if args.max_graphs and args.max_graphs > 0 else None
 
     if overrides:

@@ -1,3 +1,5 @@
-"""
-Utility functions for the Clean_Code package.
-"""
+"""Utility helpers exposed by the utils package."""
+
+from .energy import EnergyMonitor
+
+__all__ = ["EnergyMonitor"]

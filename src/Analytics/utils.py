@@ -136,9 +136,27 @@ def load_insights(paths: Sequence[str]) -> InsightFrame:
     token_rows = []
     for idx, row in frame.iterrows():
         for token in row["top_tokens"]:
-            token_rows.append({"graph_index": row["graph_index"], "token": token, "source": "top", "label": row["label"]})
+            token_rows.append(
+                {
+                    "graph_index": row["graph_index"],
+                    "token": token,
+                    "source": "top",
+                    "label": row["label"],
+                    "dataset": row.get("dataset"),
+                    "graph_type": row.get("graph_type"),
+                }
+            )
         for token in row["minimal_coalition_tokens"]:
-            token_rows.append({"graph_index": row["graph_index"], "token": token, "source": "minimal", "label": row["label"]})
+            token_rows.append(
+                {
+                    "graph_index": row["graph_index"],
+                    "token": token,
+                    "source": "minimal",
+                    "label": row["label"],
+                    "dataset": row.get("dataset"),
+                    "graph_type": row.get("graph_type"),
+                }
+            )
     token_frame = pd.DataFrame(token_rows)
     return InsightFrame(data=frame, token_frame=token_frame)
 

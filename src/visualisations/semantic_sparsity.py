@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import matplotlib
 
@@ -46,11 +46,19 @@ def _plot_kde(series: pd.Series, title: str, output_path: Path, *, bw_adjust: fl
     return output_path
 
 
-def _plot_difference(correct: pd.Series, incorrect: pd.Series, title: str, output_path: Path, *, bw_adjust: float = 1.0, dpi: int = 300) -> Path:
+def _plot_difference(
+    correct: pd.Series,
+    incorrect: pd.Series,
+    title: str,
+    output_path: Path,
+    *,
+    bw_adjust: float = 1.0,
+    dpi: int = 300,
+) -> Optional[Tuple[Path, Dict[str, float]]]:
     correct = correct.dropna()
     incorrect = incorrect.dropna()
-    if correct.empty and incorrect.empty:
-        return output_path
+    if correct.empty or incorrect.empty:
+        return None
     grid = np.linspace(0.0, 1.0, 256)
 
     def _kde(values: np.ndarray) -> np.ndarray:
@@ -80,7 +88,21 @@ def _plot_difference(correct: pd.Series, incorrect: pd.Series, title: str, outpu
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
-    return output_path
+
+    abs_delta = np.abs(delta)
+    stats = {
+        "area": float(np.trapz(delta, grid)),
+        "positive_mass": float(np.trapz(np.clip(delta, 0.0, None), grid)),
+        "negative_mass": float(np.trapz(np.clip(-delta, 0.0, None), grid)),
+        "max_difference": float(delta.max() if delta.size else 0.0),
+        "min_difference": float(delta.min() if delta.size else 0.0),
+        "abs_area": float(np.trapz(abs_delta, grid)),
+        "std_difference": float(delta.std(ddof=0)) if delta.size else 0.0,
+        "mean_difference": float(delta.mean()) if delta.size else 0.0,
+        "max_abs_difference": float(abs_delta.max()) if delta.size else 0.0,
+        "range_difference": float((delta.max() - delta.min()) if delta.size else 0.0),
+    }
+    return output_path, stats
 
 
 def generate_sparsity_visuals(
@@ -96,6 +118,9 @@ def generate_sparsity_visuals(
         out_dir.mkdir(parents=True, exist_ok=True)
 
     produced: List[Path] = []
+    dataset_slug = Path(root_dir).name
+    difference_rows: List[Dict[str, float]] = []
+
     for csv_path in _iter_summary_csvs(root_dir, pattern):
         frame = pd.read_csv(csv_path)
         if "sparsity" not in frame.columns:
@@ -114,6 +139,9 @@ def generate_sparsity_visuals(
         )
 
         if "is_correct" in frame.columns:
+            relative = csv_path.relative_to(root_dir)
+            dataset_key = relative.parts[0] if relative.parts else "root"
+
             for correctness_flag, subset in frame.groupby("is_correct", dropna=False):
                 if pd.isna(correctness_flag):
                     continue
@@ -146,15 +174,18 @@ def generate_sparsity_visuals(
             # overall correctness comparison (all labels)
             correct_series = pd.to_numeric(frame.loc[frame.get("is_correct") == True, "sparsity"], errors="coerce")
             incorrect_series = pd.to_numeric(frame.loc[frame.get("is_correct") == False, "sparsity"], errors="coerce")
-            produced.append(
-                _plot_difference(
-                    correct_series,
-                    incorrect_series,
-                    f"Sparsity KDE (correct vs incorrect) - {csv_path.stem}",
-                    base_dir / f"{csv_path.stem}_correct_vs_incorrect_sparsity_kde.png",
-                    dpi=dpi,
-                )
+            overall_result = _plot_difference(
+                correct_series,
+                incorrect_series,
+                f"Sparsity KDE (correct vs incorrect) - {csv_path.stem}",
+                base_dir / f"{csv_path.stem}_correct_vs_incorrect_sparsity_kde.png",
+                dpi=dpi,
             )
+            if overall_result is not None:
+                path, stats = overall_result
+                produced.append(path)
+                stats.update({"dataset": dataset_slug, "scope": "overall", "metric": "sparsity"})
+                difference_rows.append(stats)
 
             if "label" in frame.columns:
                 for label, subset in frame.groupby("label", dropna=False):
@@ -172,15 +203,18 @@ def generate_sparsity_visuals(
                             dpi=dpi,
                         )
                     )
-                    produced.append(
-                        _plot_difference(
-                            correct_subset,
-                            incorrect_subset,
-                            f"Sparsity KDE (label {label}, correct vs incorrect) - {csv_path.stem}",
-                            label_dir / f"{csv_path.stem}_class{label_id}_correct_vs_incorrect_sparsity_kde.png",
-                            dpi=dpi,
-                        )
+                    label_result = _plot_difference(
+                        correct_subset,
+                        incorrect_subset,
+                        f"Sparsity KDE (label {label}, correct vs incorrect) - {csv_path.stem}",
+                        label_dir / f"{csv_path.stem}_class{label_id}_correct_vs_incorrect_sparsity_kde.png",
+                        dpi=dpi,
                     )
+                    if label_result is not None:
+                        path, stats = label_result
+                        produced.append(path)
+                        stats.update({"dataset": dataset_slug, "scope": f"class_{label_id}", "metric": "sparsity"})
+                        difference_rows.append(stats)
         else:
             produced.append(
                 _plot_kde(
@@ -190,5 +224,12 @@ def generate_sparsity_visuals(
                     dpi=dpi,
                 )
             )
+
+    if difference_rows:
+        metrics_dir = out_dir if out_dir else root_dir
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        metrics_path = metrics_dir / "sparsity_difference_metrics.csv"
+        pd.DataFrame(difference_rows).to_csv(metrics_path, index=False)
+        produced.append(metrics_path)
 
     return [p for p in produced if isinstance(p, Path)]

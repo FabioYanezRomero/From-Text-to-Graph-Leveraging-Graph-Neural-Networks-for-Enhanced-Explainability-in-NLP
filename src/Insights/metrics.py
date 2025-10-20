@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
+import itertools
+
 import networkx as nx
 
 from .records import Coalition, ExplanationRecord
@@ -11,6 +13,11 @@ try:
     from .providers import GraphInfo  # type: ignore
 except ImportError:  # pragma: no cover
     GraphInfo = None  # type: ignore
+
+try:
+    from .llm_providers import TokenInfo  # type: ignore
+except ImportError:  # pragma: no cover
+    TokenInfo = None  # type: ignore
 
 
 def _compute_auc(values: Mapping[int, float], *, max_size: Optional[int]) -> Optional[float]:
@@ -87,8 +94,75 @@ def deletion_curve(record: ExplanationRecord, *, normalize: bool = True) -> Curv
     if maskout is None:
         return CurveResult(values={}, origin=origin, normalized=normalize, auc=None)
 
-    curve = {0: maskout / origin} if normalize and origin else {0: maskout}
-    return CurveResult(values=curve, origin=origin, normalized=normalize, auc=None)
+    curve: Dict[int, float] = {}
+    if normalize and origin:
+        curve[0] = 1.0
+        value = maskout / origin if origin else 0.0
+    else:
+        curve[0] = origin if origin is not None else maskout
+        value = maskout
+
+    num_nodes = record.num_nodes
+    sparsity = record.related_prediction.sparsity
+    removal_size: Optional[int] = None
+    if sparsity is not None and num_nodes:
+        removal_size = max(0, min(num_nodes, int(round((1.0 - sparsity) * num_nodes))))
+    elif num_nodes:
+        removal_size = num_nodes
+
+    if removal_size is not None and removal_size > 0:
+        curve[removal_size] = value
+        max_size = max(removal_size, 1)
+    else:
+        max_size = num_nodes or 1
+
+    auc = _compute_auc(curve, max_size=max_size)
+    return CurveResult(values=curve, origin=origin, normalized=normalize, auc=auc)
+
+
+def _normalised_drop(baseline: Optional[float], value: Optional[float], *, normalise: bool = True) -> Optional[float]:
+    if baseline is None or value is None:
+        return None
+    drop = baseline - value
+    if not normalise or baseline == 0:
+        return drop
+    return drop / abs(baseline)
+
+
+def fidelity_plus(record: ExplanationRecord, *, normalise: bool = True) -> Optional[float]:
+    """Normalised drop when retaining only the important elements (sufficiency)."""
+
+    return _normalised_drop(record.related_prediction.origin, record.related_prediction.masked, normalise=normalise)
+
+
+def fidelity_minus(record: ExplanationRecord, *, normalise: bool = True) -> Optional[float]:
+    """Normalised drop when masking out the important elements (necessity)."""
+
+    return _normalised_drop(record.related_prediction.origin, record.related_prediction.maskout, normalise=normalise)
+
+
+def faithfulness(record: ExplanationRecord, *, normalise: bool = True) -> Optional[float]:
+    """Contrast between keeping and dropping important elements."""
+
+    masked = record.related_prediction.masked
+    maskout = record.related_prediction.maskout
+    origin = record.related_prediction.origin
+    if masked is None or maskout is None:
+        return None
+    score = masked - maskout
+    if not normalise or origin in (None, 0):
+        return score
+    return score / abs(origin)
+
+
+def deletion_auc(record: ExplanationRecord, *, normalise: bool = True) -> Optional[float]:
+    """Convenience wrapper that returns the deletion AUC."""
+
+    return deletion_curve(record, normalize=normalise).auc
+
+
+def insertion_auc(record: ExplanationRecord, *, normalize: bool = True) -> Optional[float]:
+    return insertion_curve(record, normalize=normalize).auc
 
 
 def jaccard_overlap(nodes_a: Sequence[int], nodes_b: Sequence[int]) -> Optional[float]:
@@ -174,6 +248,19 @@ def induced_subgraph_metrics(graph: nx.Graph, nodes: Sequence[int]) -> Dict[str,
     return metrics
 
 
+def stability_average(records: Sequence[ExplanationRecord], *, k: int = 10) -> Optional[float]:
+    """Average pairwise stability (Jaccard of top-k nodes) across records."""
+
+    pairs = list(itertools.combinations(records, 2))
+    if not pairs:
+        return None
+    scores = [stability_jaccard(a, b, k=k) for a, b in pairs]
+    scores = [score for score in scores if score is not None]
+    if not scores:
+        return None
+    return sum(scores) / len(scores)
+
+
 def centrality_alignment(
     node_importance: Mapping[int, float],
     centrality_scores: Mapping[int, float],
@@ -242,9 +329,14 @@ def summarize_record(
     node_text: Optional[Sequence[str]] = None
     graph_payload = graph or (graph_provider(record) if graph_provider else None)
 
+    # Handle both GraphInfo (for GNN explanations) and TokenInfo (for LLM explanations)
     if GraphInfo is not None and isinstance(graph_payload, GraphInfo):
         graph_obj = graph_payload.graph
         node_text = tuple(graph_payload.node_text)
+    elif TokenInfo is not None and isinstance(graph_payload, TokenInfo):
+        # For LLM explanations, we have tokens but no graph structure
+        graph_obj = None
+        node_text = tuple(graph_payload.token_text)
     else:
         graph_obj = graph_payload  # type: ignore[assignment]
     minimal = record.minimal_coalition(sufficiency_threshold)
@@ -263,10 +355,20 @@ def summarize_record(
         "origin_confidence": record.related_prediction.origin,
         "masked_confidence": record.related_prediction.masked,
         "maskout_confidence": record.related_prediction.maskout,
+        "origin_distribution": list(record.related_prediction.origin_distribution)
+        if record.related_prediction.origin_distribution is not None
+        else None,
+        "masked_distribution": list(record.related_prediction.masked_distribution)
+        if record.related_prediction.masked_distribution is not None
+        else None,
+        "maskout_distribution": list(record.related_prediction.maskout_distribution)
+        if record.related_prediction.maskout_distribution is not None
+        else None,
         "sparsity": record.related_prediction.sparsity,
         "minimal_coalition_size": minimal.size if minimal else None,
         "minimal_coalition_confidence": minimal.confidence if minimal else None,
         "insertion_auc": insertion.auc,
+        "deletion_auc": deletion.auc,
         "insertion_curve": insertion.as_series(),
         "deletion_curve": deletion.as_series(),
         "top_nodes": list(top_nodes(record, k=top_k)),
@@ -279,13 +381,17 @@ def summarize_record(
     else:
         summary["top_tokens"] = None
 
+    # Handle minimal coalition tokens
+    if minimal and node_text:
+        summary["minimal_coalition_tokens"] = [node_text[idx] for idx in minimal.nodes if 0 <= idx < len(node_text)]
+    else:
+        summary["minimal_coalition_tokens"] = None
+
+    # Structural metrics only available for graph-based explanations
     if minimal and graph_obj is not None:
         summary["structural_metrics"] = induced_subgraph_metrics(graph_obj, minimal.nodes)
-        if node_text:
-            summary["minimal_coalition_tokens"] = [node_text[idx] for idx in minimal.nodes if 0 <= idx < len(node_text)]
     else:
         summary["structural_metrics"] = None
-        summary["minimal_coalition_tokens"] = None
 
     if graph_obj is not None and centrality_funcs and record.node_importance:
         importance_map = {idx: float(score) for idx, score in enumerate(record.node_importance)}
@@ -299,6 +405,10 @@ def summarize_record(
         summary["centrality_alignment"] = centrality_results
     else:
         summary["centrality_alignment"] = None
+
+    summary["fidelity_plus"] = fidelity_plus(record)
+    summary["fidelity_minus"] = fidelity_minus(record)
+    summary["faithfulness"] = faithfulness(record)
 
     return summary
 

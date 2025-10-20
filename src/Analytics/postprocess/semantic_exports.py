@@ -25,8 +25,8 @@ def _load_csv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-def _write_csv(df: pd.DataFrame, path: Path) -> None:
-    if df.empty:
+def _write_csv(df: pd.DataFrame, path: Path, *, allow_empty: bool = False) -> None:
+    if df.empty and not allow_empty:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(path, index=False)
@@ -60,12 +60,22 @@ def export_tokens(folder: Path, token_df: pd.DataFrame, token_root: Path) -> Non
         return
     dest = token_root / folder.name / "csv"
     _write_csv(token_df, dest / "tokens.csv")
-    for suffix, subset in _split_by_correct(token_df).items():
-        _write_csv(subset, dest / f"tokens_{suffix}.csv")
+    split_correct = _split_by_correct(token_df)
+    for suffix, subset in split_correct.items():
+        _write_csv(subset, dest / f"tokens_{suffix}.csv", allow_empty=True)
+    for required in ("correct", "incorrect"):
+        if required not in split_correct:
+            empty = token_df.iloc[0:0]
+            _write_csv(empty, dest / f"tokens_{required}.csv", allow_empty=True)
     for label_slug, subset in _split_by_label(token_df).items():
-        _write_csv(subset, dest / f"tokens_{label_slug}.csv")
-        for suffix, split_subset in _split_by_correct(subset).items():
-            _write_csv(split_subset, dest / f"tokens_{label_slug}_{suffix}.csv")
+        _write_csv(subset, dest / f"tokens_{label_slug}.csv", allow_empty=True)
+        label_split = _split_by_correct(subset)
+        for suffix, split_subset in label_split.items():
+            _write_csv(split_subset, dest / f"tokens_{label_slug}_{suffix}.csv", allow_empty=True)
+        for required in ("correct", "incorrect"):
+            if required not in label_split:
+                empty = subset.iloc[0:0]
+                _write_csv(empty, dest / f"tokens_{label_slug}_{required}.csv", allow_empty=True)
 
 
 def export_summary(folder: Path, summary_df: pd.DataFrame, sparsity_root: Path, confidence_root: Path) -> None:
@@ -75,11 +85,11 @@ def export_summary(folder: Path, summary_df: pd.DataFrame, sparsity_root: Path, 
         dest = root / folder.name / "csv"
         _write_csv(summary_df, dest / "summary.csv")
         for suffix, subset in _split_by_correct(summary_df).items():
-            _write_csv(subset, dest / f"summary_{suffix}.csv")
+            _write_csv(subset, dest / f"summary_{suffix}.csv", allow_empty=True)
         for label_slug, subset in _split_by_label(summary_df).items():
-            _write_csv(subset, dest / f"summary_{label_slug}.csv")
+            _write_csv(subset, dest / f"summary_{label_slug}.csv", allow_empty=True)
             for suffix, split_subset in _split_by_correct(subset).items():
-                _write_csv(split_subset, dest / f"summary_{label_slug}_{suffix}.csv")
+                _write_csv(split_subset, dest / f"summary_{label_slug}_{suffix}.csv", allow_empty=True)
 
 
 def export_aggregate(folder: Path, aggregate_df: pd.DataFrame, score_root: Path) -> None:

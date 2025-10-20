@@ -14,6 +14,7 @@ from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from tqdm import tqdm
 
+from src.explain.common.fairness import FairMultimodalHyperparameterAdvisor
 from src.explain.gnn.config import (
     DEFAULT_GNN_ROOT,
     DEFAULT_GRAPH_DATA_ROOT,
@@ -215,6 +216,7 @@ def collect_hyperparams(
         profile=request.profile,
         num_shards=request.num_shards,
         shard_index=request.shard_index,
+        fair_comparison=request.fair_comparison,
     )
 
     dataset, loader = load_graph_split(updated_request, batch_size=1, shuffle=False)
@@ -226,10 +228,14 @@ def collect_hyperparams(
     locked_overrides.update(updated_request.hyperparams or {})
 
     architecture_spec = _extract_architecture_spec(model, train_args)
-    advisor = SubgraphXHyperparameterAdvisor(
-        architecture=architecture_spec,
-        locked_params=locked_overrides,
-    )
+    fair_mode = bool(updated_request.fair_comparison)
+    fairness_advisor = FairMultimodalHyperparameterAdvisor() if fair_mode else None
+    advisor: Optional[SubgraphXHyperparameterAdvisor] = None
+    if not fair_mode:
+        advisor = SubgraphXHyperparameterAdvisor(
+            architecture=architecture_spec,
+            locked_params=locked_overrides,
+        )
 
     if output_path is not None:
         artifact_dir = output_path.parent
@@ -254,7 +260,14 @@ def collect_hyperparams(
     per_graph: List[Dict[str, object]] = []
     for index, batch in enumerate(iterable):
         data: Data = batch
-        params = advisor.suggest(data)
+        if fairness_advisor is not None:
+            params = fairness_advisor.subgraphx(
+                num_nodes=int(getattr(data, "num_nodes", 0)),
+                num_layers=architecture_spec.num_layers,
+            )
+        else:
+            assert advisor is not None
+            params = advisor.suggest(data)
         params["max_nodes"] = max(2, min(int(params["max_nodes"]), int(getattr(data, "num_nodes", 0) or params["max_nodes"])))
         per_graph.append(
             {
@@ -273,8 +286,8 @@ def collect_hyperparams(
         "backbone": updated_request.backbone,
         "num_shards": updated_request.num_shards,
         "shard_index": updated_request.shard_index,
-        "base_defaults": dict(advisor.base_defaults),
-        "locked_overrides": dict(advisor.locked_params),
+        "base_defaults": fairness_advisor.describe() if fairness_advisor else dict(advisor.base_defaults),
+        "locked_overrides": {} if fairness_advisor else dict(advisor.locked_params),
         "per_graph": per_graph,
     }
 
@@ -327,6 +340,7 @@ def explain_request(
         profile=request.profile,
         num_shards=request.num_shards,
         shard_index=request.shard_index,
+        fair_comparison=request.fair_comparison,
     )
 
     dataset, loader = load_graph_split(updated_request, batch_size=1, shuffle=False)
@@ -341,10 +355,14 @@ def explain_request(
         combined_overrides.update(hyperparams)
 
     architecture_spec = _extract_architecture_spec(model, train_args)
-    advisor = SubgraphXHyperparameterAdvisor(
-        architecture=architecture_spec,
-        locked_params=combined_overrides,
-    )
+    fair_mode = bool(updated_request.fair_comparison)
+    fairness_advisor = FairMultimodalHyperparameterAdvisor() if fair_mode else None
+    advisor: Optional[SubgraphXHyperparameterAdvisor] = None
+    if not fair_mode:
+        advisor = SubgraphXHyperparameterAdvisor(
+            architecture=architecture_spec,
+            locked_params=combined_overrides,
+        )
 
     artifact_dir = run_dir / "explanations" / "subgraphx" / _make_slug(updated_request)
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -353,6 +371,7 @@ def explain_request(
 
     results: List[SubgraphXResult] = []
     per_graph_hparams: List[Dict[str, float]] = []
+    energy_data: Dict[str, object] = {}
     if progress:
         desc = f"SubgraphX[{updated_request.shard_index + 1}/{updated_request.num_shards}]"
         iterable = tqdm(
@@ -365,38 +384,52 @@ def explain_request(
     else:
         iterable = loader
 
-    for index, batch in enumerate(iterable):
-        data: Data = batch.to(wrapper.device)
-        label = int(data.y.item()) if hasattr(data, "y") and data.y is not None else None
-        source = "advisor"
-        candidate = precomputed_lookup.get(index)
-        if candidate is not None:
-            graph_params = advisor.sanitise_for_graph(candidate, data)
-            source = "precomputed"
-        else:
-            graph_params = advisor.suggest(data)
-        graph_params["max_nodes"] = max(2, min(graph_params["max_nodes"], data.num_nodes))
-        graph_dir = artifact_dir / f"graph_{index:05d}"
-        explainer = _prepare_explainer(wrapper, train_args, graph_dir, graph_params)
-        explanation, related_pred = explainer.explain(
-            x=data.x,
-            edge_index=data.edge_index,
-            label=label,
-            max_nodes=graph_params["max_nodes"],
-        )
-        final_params = dict(graph_params)
-        results.append(
-            SubgraphXResult(
-                graph_index=index,
+    with EnergyMonitor("SubgraphX", output_dir=artifact_dir) as energy_monitor:
+        for index, batch in enumerate(iterable):
+            data: Data = batch.to(wrapper.device)
+            label = int(data.y.item()) if hasattr(data, "y") and data.y is not None else None
+            source = "advisor"
+            candidate = precomputed_lookup.get(index)
+            if fairness_advisor is not None:
+                if candidate is not None:
+                    warnings.warn(
+                        "Ignoring precomputed hyperparameters when fair comparison mode is enabled.",
+                    )
+                graph_params = fairness_advisor.subgraphx(
+                    num_nodes=data.num_nodes,
+                    num_layers=architecture_spec.num_layers,
+                )
+                source = "fair_advisor"
+            else:
+                if candidate is not None:
+                    graph_params = advisor.sanitise_for_graph(candidate, data)  # type: ignore[union-attr]
+                    source = "precomputed"
+                else:
+                    graph_params = advisor.suggest(data)  # type: ignore[union-attr]
+            graph_params["max_nodes"] = max(2, min(graph_params["max_nodes"], data.num_nodes))
+            graph_dir = artifact_dir / f"graph_{index:05d}"
+            explainer = _prepare_explainer(wrapper, train_args, graph_dir, graph_params)
+            explanation, related_pred = explainer.explain(
+                x=data.x,
+                edge_index=data.edge_index,
                 label=label,
-                explanation=explanation,
-                related_prediction=related_pred,
-                num_nodes=data.num_nodes,
-                num_edges=data.num_edges,
-                hyperparams=final_params,
+                max_nodes=graph_params["max_nodes"],
             )
-        )
-        per_graph_hparams.append({"graph_index": index, "source": source, **final_params})
+            final_params = dict(graph_params)
+            results.append(
+                SubgraphXResult(
+                    graph_index=index,
+                    label=label,
+                    explanation=explanation,
+                    related_prediction=related_pred,
+                    num_nodes=data.num_nodes,
+                    num_edges=data.num_edges,
+                    hyperparams=final_params,
+                )
+            )
+            per_graph_hparams.append({"graph_index": index, "source": source, **final_params})
+
+        energy_data = energy_monitor.result
 
     summary = {
         "method": "subgraphx",
@@ -408,16 +441,21 @@ def explain_request(
         "shard_index": updated_request.shard_index,
         "num_graphs": len(results),
         "hyperparams": {
-            "base_defaults": dict(advisor.base_defaults),
-            "locked_overrides": dict(advisor.locked_params),
+            "base_defaults": fairness_advisor.describe() if fairness_advisor else dict(advisor.base_defaults),
+            "locked_overrides": {} if fairness_advisor else dict(advisor.locked_params),
             "precomputed_source": str(precomputed_source) if precomputed_source else None,
             "per_graph": per_graph_hparams,
         },
+        "energy": energy_data,
         "graphs": [entry.to_json() for entry in results],
     }
 
     summary_path = artifact_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2))
+
+    if energy_data:
+        energy_path = artifact_dir / "energy_metrics.json"
+        energy_path.write_text(json.dumps(energy_data, indent=2))
 
     raw_path: Optional[Path] = artifact_dir / "results.pkl"
     try:
@@ -438,6 +476,7 @@ def _env_request() -> ExplainerRequest:
     device = os.getenv("GRAPHTEXT_DEVICE")
     gnn_root = Path(os.getenv("GRAPHTEXT_GNN_ROOT", str(DEFAULT_GNN_ROOT)))
     data_root = Path(os.getenv("GRAPHTEXT_GRAPH_ROOT", str(DEFAULT_GRAPH_DATA_ROOT)))
+    fair_flag = os.getenv("GRAPHTEXT_FAIR_COMPARISON")
 
     return ExplainerRequest(
         dataset=dataset,
@@ -447,6 +486,7 @@ def _env_request() -> ExplainerRequest:
         device=device,
         gnn_root=gnn_root,
         graph_data_root=data_root,
+        fair_comparison=bool(int(fair_flag)) if fair_flag is not None else False,
     )
 
 
@@ -484,6 +524,7 @@ def main(argv: Optional[List[str]] = None) -> None:  # pragma: no cover - CLI he
     parser.add_argument("--num-shards", type=int, help="Total shards when running in parallel.")
     parser.add_argument("--shard-index", type=int, help="Index of this shard (0-based).")
     parser.add_argument("--batch-size", type=int, help="Override batch size for data loader.")
+    parser.add_argument("--fair", action="store_true", help="Enable fair multimodal advisor alignment.")
     args = parser.parse_args(argv)
 
     request = _env_request()
@@ -511,6 +552,8 @@ def main(argv: Optional[List[str]] = None) -> None:  # pragma: no cover - CLI he
         overrides["num_shards"] = args.num_shards
     if args.shard_index is not None:
         overrides["shard_index"] = args.shard_index
+    if args.fair:
+        overrides["fair_comparison"] = True
 
     if overrides:
         request = replace(request, **overrides)

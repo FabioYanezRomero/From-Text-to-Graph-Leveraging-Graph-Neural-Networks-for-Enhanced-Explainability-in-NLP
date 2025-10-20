@@ -12,16 +12,33 @@ class RelatedPrediction:
     masked: Optional[float] = None
     maskout: Optional[float] = None
     sparsity: Optional[float] = None
+    origin_distribution: Optional[Tuple[float, ...]] = None
+    masked_distribution: Optional[Tuple[float, ...]] = None
+    maskout_distribution: Optional[Tuple[float, ...]] = None
 
     @classmethod
     def from_mapping(cls, data: Optional[Mapping[str, Any]]) -> "RelatedPrediction":
         if not data:
             return cls()
+
+        def _coerce_sequence(key: str) -> Optional[Tuple[float, ...]]:
+            values = data.get(key)
+            if values is None:
+                return None
+            if isinstance(values, (list, tuple)):
+                try:
+                    return tuple(float(v) for v in values)
+                except (TypeError, ValueError):
+                    return None
+            return None
         return cls(
             origin=data.get("origin"),
             masked=data.get("masked"),
             maskout=data.get("maskout"),
             sparsity=data.get("sparsity"),
+            origin_distribution=_coerce_sequence("origin_distribution"),
+            masked_distribution=_coerce_sequence("masked_distribution"),
+            maskout_distribution=_coerce_sequence("maskout_distribution"),
         )
 
 
@@ -75,7 +92,7 @@ class ExplanationRecord:
         num_nodes / num_edges: Graph sizes captured by the explainer artefact.
         node_importance: Continuous importance scores per node (GraphSVX-style).
         top_nodes: Ranked list of high-importance nodes.
-        related_prediction: Faithfulness metrics (origin/masked/maskout/sparsity).
+        related_prediction: Faithfulness metrics (origin/masked/maskout/sparsity/distributions).
         hyperparams: Hyper-parameters used by the explainer.
         coalitions: List of coalitions evaluated by the explainer.
         extras: Additional raw fields not explicitly modelled above.
@@ -149,6 +166,15 @@ class ExplanationRecord:
                 "masked": self.related_prediction.masked,
                 "maskout": self.related_prediction.maskout,
                 "sparsity": self.related_prediction.sparsity,
+                "origin_distribution": list(self.related_prediction.origin_distribution)
+                if self.related_prediction.origin_distribution is not None
+                else None,
+                "masked_distribution": list(self.related_prediction.masked_distribution)
+                if self.related_prediction.masked_distribution is not None
+                else None,
+                "maskout_distribution": list(self.related_prediction.maskout_distribution)
+                if self.related_prediction.maskout_distribution is not None
+                else None,
             },
             "hyperparams": self.hyperparams,
             "coalitions": [
