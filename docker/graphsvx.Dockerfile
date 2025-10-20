@@ -25,12 +25,12 @@ WORKDIR /graphsvx
 # Clone GraphSVX repository
 RUN git clone https://github.com/AlexDuvalinho/GraphSVX.git .
 
-# Upgrade pip and install PyTorch and dependencies (CPU version)
+# Upgrade pip and install PyTorch and dependencies (CUDA 12.1 version for GPU support)
 RUN python3 -m pip install --upgrade pip && \
-    python3 -m pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cpu
+    python3 -m pip install torch==2.3.1+cu121 torchvision==0.18.1+cu121 --index-url https://download.pytorch.org/whl/cu121
 
-# Install torch-geometric and dependencies (CPU wheels)
-RUN python3 -m pip install torch-scatter torch-sparse torch-cluster torch-spline-conv -f https://data.pyg.org/whl/torch-2.6.0+cpu.html && \
+# Install torch-geometric and dependencies (CUDA 12.1 wheels)
+RUN python3 -m pip install torch-scatter torch-sparse torch-cluster torch-spline-conv -f https://data.pyg.org/whl/torch-2.3.1+cu121.html && \
     python3 -m pip install torch-geometric
 
 # Install other Python dependencies for GraphSVX

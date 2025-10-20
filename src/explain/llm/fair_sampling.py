@@ -9,7 +9,7 @@ from typing import Dict
 def compute_fair_sampling_ratio(
     num_tokens: int,
     *,
-    target_samples: int = 2000,
+    target_samples: int = 400,
     min_ratio: float = 0.001,
     max_ratio: float = 1.0,
 ) -> float:
@@ -48,7 +48,7 @@ def compute_fair_sampling_ratio(
 def compute_fair_hyperparams(
     num_tokens: int,
     *,
-    target_samples: int = 2000,
+    target_samples: int = 400,
 ) -> Dict[str, float]:
     """
     Compute fair comparison hyperparameters for a given token count.

@@ -6,7 +6,7 @@ The TokenSHAP explainer now supports a **fair comparison mode** that ensures con
 
 ## Default Configuration
 
-- **Target Forward Passes**: 2000 (default)
+- **Target Forward Passes**: 400 (default, optimized for SubgraphX tractability)
 - **Sampling Strategy**: Formula-based, token-count adaptive
 - **Formula**: `sampling_ratio = target_samples / 2^num_tokens`
 
@@ -15,14 +15,14 @@ The TokenSHAP explainer now supports a **fair comparison mode** that ensures con
 ### Command Line
 
 ```bash
-# Use fair comparison with default 2000 forward passes
+# Use fair comparison with default 400 forward passes
 python -m src.explain.llm.main explain 'setfit/ag_news' --fair
 
-# Override target forward passes
-python -m src.explain.llm.main explain 'stanfordnlp/sst2' --fair --target-forward-passes 5000
+# Override target forward passes (e.g., higher budget)
+python -m src.explain.llm.main explain 'stanfordnlp/sst2' --fair --target-forward-passes 1000
 
 # Collect hyperparameters in fair mode
-python -m src.explain.llm.main collect-hyperparams 'setfit/ag_news' --fair --target-forward-passes 2000
+python -m src.explain.llm.main collect-hyperparams 'setfit/ag_news' --fair --target-forward-passes 400
 ```
 
 ### Docker (via run_all_explainers.sh)
@@ -42,13 +42,13 @@ bash run_all_explainers.sh
 - **Problem**: Inconsistent computational budgets
 
 ### With Fair Mode (--fair)
-- Fixed computational budget: 2000 forward passes per sample
-- Sampling ratio computed as: `2000 / 2^num_tokens`
+- Fixed computational budget: 400 forward passes per sample (default)
+- Sampling ratio computed as: `400 / 2^num_tokens`
 - **Example**:
-  - 5 tokens: ratio = 2000/32 = 62.5 → capped at 1.0 (all combos)
-  - 10 tokens: ratio = 2000/1024 ≈ 1.95 → capped at 1.0
-  - 15 tokens: ratio = 2000/32768 ≈ 0.061
-  - 20 tokens: ratio = 2000/1048576 ≈ 0.0019
+  - 5 tokens: ratio = 400/32 = 12.5 → capped at 1.0 (all combos)
+  - 10 tokens: ratio = 400/1024 ≈ 0.39
+  - 15 tokens: ratio = 400/32768 ≈ 0.012
+  - 20 tokens: ratio = 400/1048576 ≈ 0.00038
 
 ### Clamping
 - Minimum ratio: 0.001
@@ -77,7 +77,7 @@ TOKEN_SHAP_DEFAULTS: Dict[str, float] = {
     "sampling_ratio": 0.1,
     "min_samples": 50,
     "max_samples": 2048,
-    "target_forward_passes": 2000,  # Default for fair mode
+    "target_forward_passes": 400,  # Default for fair mode (optimized for SubgraphX)
 }
 ```
 
@@ -87,7 +87,7 @@ Contains the formula implementation:
 def compute_fair_sampling_ratio(
     num_tokens: int,
     *,
-    target_samples: int = 2000,  # Configurable
+    target_samples: int = 400,  # Configurable (default optimized for SubgraphX)
     min_ratio: float = 0.001,
     max_ratio: float = 1.0,
 ) -> float:
@@ -102,9 +102,9 @@ def compute_fair_sampling_ratio(
 
 | Method | Fair Mode | Computational Budget | Sampling Strategy |
 |--------|-----------|---------------------|-------------------|
-| **TokenSHAP** | `--fair` | 2000 forward passes | Formula: `2000 / 2^n` |
-| **GraphSVX** | `--fair` | 2000 samples | Adaptive SHAP sampling |
-| **SubgraphX** | `--fair` | Controlled rollouts | MCTS with budget |
+| **TokenSHAP** | `--fair` | 400 forward passes | Formula: `400 / 2^n` |
+| **GraphSVX** | `--fair` | 400 samples | Adaptive SHAP sampling |
+| **SubgraphX** | `--fair` | 400 total (rollout×samples) | MCTS with budget |
 
 ## Analytics Compatibility
 

@@ -11,7 +11,7 @@ from typing import Dict, Tuple
 class FairnessConfig:
     """Configuration parameters for the fair multimodal advisor."""
 
-    compute_budget: int = 2000
+    compute_budget: int = 400  # Reduced from 2000 to make SubgraphX tractable
     sparsity_ratio: float = 0.2
     graph_sampling_ratio: float = 0.25
     expand_atoms: int = 1
@@ -49,10 +49,10 @@ class FairMultimodalHyperparameterAdvisor:
         """Select a rollout value (dividing the budget) based on graph size."""
 
         if num_nodes <= 30:
-            return 50  # 50 * 40 = 2000
+            return 10  # 10 * 40 = 400
         if num_nodes <= 100:
-            return 40  # 40 * 50 = 2000
-        return 20  # 20 * 100 = 2000
+            return 10  # 10 * 40 = 400
+        return 8  # 8 * 50 = 400
 
     # ------------------------------------------------------------------
     # Public API used by explainability modules

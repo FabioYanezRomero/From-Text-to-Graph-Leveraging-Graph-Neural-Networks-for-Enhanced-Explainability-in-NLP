@@ -92,7 +92,7 @@ TOKEN_SHAP_DEFAULTS: Dict[str, float] = {
     "sampling_ratio": 0.1,
     "min_samples": 50,
     "max_samples": 2048,
-    "target_forward_passes": 2000,  # Default target for fair comparison mode
+    "target_forward_passes": 400,  # Default target for fair comparison mode (reduced to match SubgraphX tractability)
 }
 
 
@@ -153,7 +153,7 @@ class LLMExplainerRequest:
     num_shards: int = 1
     shard_index: int = 0
     fair_comparison: bool = False
-    target_forward_passes: int = 2000
+    target_forward_passes: int = 400  # Reduced to match SubgraphX tractability
 
     def resolve_device(self) -> str:
         if self.device:

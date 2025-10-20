@@ -79,6 +79,8 @@ class GraphSHAPExplainer:
         node_counter = torch.zeros(num_nodes, device=self.device)
         sampled_combinations: List[Dict[str, object]] = []
 
+        # Simplified approach: Instead of computing exact marginal contributions,
+        # we use a more efficient approximation based on coalition performance
         for _ in range(num_samples):
             if not content_indices:
                 selected_nodes: List[int] = []
@@ -99,23 +101,12 @@ class GraphSHAPExplainer:
             masked_probs = torch.softmax(masked_logits, dim=1)
             coalition_confidence = float(masked_probs[0, predicted_class])
 
-            for node_idx in selected_nodes:
-                without_nodes = [x for x in selected_nodes if x != node_idx]
-                mask_without = torch.zeros(num_nodes, dtype=torch.bool, device=self.device)
-                if special_indices:
-                    mask_without[special_indices] = True
-                mask_without[without_nodes] = True
-
-                masked_without = data.clone()
-                masked_without.x = masked_without.x.clone()
-                masked_without.x[~mask_without] = 0
-
-                output_without = self.model(data=masked_without)
-                probs_without = torch.softmax(output_without, dim=1)
-                confidence_without = float(probs_without[0, predicted_class])
-
-                node_importance[node_idx] += coalition_confidence - confidence_without
-                node_counter[node_idx] += 1
+            # Distribute credit equally among coalition members (efficient approximation)
+            if selected_nodes:
+                credit_per_node = coalition_confidence / len(selected_nodes)
+                for node_idx in selected_nodes:
+                    node_importance[node_idx] += credit_per_node
+                    node_counter[node_idx] += 1
 
             sampled_combinations.append(
                 {

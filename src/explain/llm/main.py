@@ -235,13 +235,13 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument(
         "--fair",
         action="store_true",
-        help="Use fair comparison mode with formula-based sampling ratios (default: 2000 forward passes)",
+        help="Use fair comparison mode with formula-based sampling ratios (default: 400 forward passes)",
     )
     collect_parser.add_argument(
         "--target-forward-passes",
         type=int,
-        default=2000,
-        help="Target number of forward passes for fair comparison mode (default: 2000)",
+        default=400,
+        help="Target number of forward passes for fair comparison mode (default: 400)",
     )
     
     # Explain command
@@ -310,13 +310,13 @@ def build_parser() -> argparse.ArgumentParser:
     explain_parser.add_argument(
         "--fair",
         action="store_true",
-        help="Use fair comparison mode with formula-based sampling ratios (default: 2000 forward passes)",
+        help="Use fair comparison mode with formula-based sampling ratios (default: 400 forward passes)",
     )
     explain_parser.add_argument(
         "--target-forward-passes",
         type=int,
-        default=2000,
-        help="Target number of forward passes for fair comparison mode (default: 2000)",
+        default=400,
+        help="Target number of forward passes for fair comparison mode (default: 400)",
     )
     
     return parser

@@ -9,7 +9,8 @@ set -euo pipefail
 # - SubgraphX (GNN) on constituency and syntactic graphs
 # - TokenSHAP (LLM) on finetuned transformers
 #
-# All methods use --fair flag for 2000 forward passes (default)
+# All methods use --fair flag for 400 forward passes (default)
+# Reduced from 2000 to make SubgraphX tractable while maintaining fairness
 # ==============================================================================
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,8 +20,12 @@ FAIR_FLAG="--fair"
 # Optional: Override to disable fair mode
 # FAIR_FLAG=""
 
-# Optional: Set custom target forward passes
-# FAIR_FLAG="--fair --target-forward-passes 5000"
+# Optional: Set custom target forward passes (e.g., higher budget)
+# FAIR_FLAG="--fair --target-forward-passes 1000"
+
+# Optional: Limit graphs for testing (e.g., first 100 samples)
+# Comment out to process all graphs
+MAX_GRAPHS_FLAG="--max-graphs 100"
 
 run_in_container() {
     local service=$1
@@ -30,11 +35,8 @@ run_in_container() {
     echo "===================================================================="
     echo "[${service}] ${cmd}"
     echo "===================================================================="
-    if [[ "${use_gpu}" == "true" ]]; then
-        ${COMPOSE_CMD} run --rm --gpus all --entrypoint /bin/bash "${service}" -c "cd /app && ${cmd}"
-    else
-        ${COMPOSE_CMD} run --rm --entrypoint /bin/bash "${service}" -c "cd /app && ${cmd}"
-    fi
+    # GPU access is configured in docker-compose.yml via deploy.resources.reservations
+    ${COMPOSE_CMD} run --rm --entrypoint /bin/bash "${service}" -c "cd /app && ${cmd}"
 }
 
 run_graphsvx() {
@@ -42,8 +44,8 @@ run_graphsvx() {
     local backbone=$2
     local graph_type=$3
     local split=$4
-    local cmd="python -m src.explain.gnn.graphsvx.main --dataset '${dataset}' --graph-type '${graph_type}' --backbone '${backbone}' --split '${split}' ${FAIR_FLAG}"
-    run_in_container graphsvx false "${cmd}"
+    local cmd="python -m src.explain.gnn.graphsvx.main --dataset '${dataset}' --graph-type '${graph_type}' --backbone '${backbone}' --split '${split}' ${FAIR_FLAG} ${MAX_GRAPHS_FLAG}"
+    run_in_container graphsvx true "${cmd}"
 }
 
 run_subgraphx() {
@@ -51,13 +53,13 @@ run_subgraphx() {
     local backbone=$2
     local graph_type=$3
     local split=$4
-    local cmd="python -m src.explain.gnn.subgraphx.main --dataset '${dataset}' --graph-type '${graph_type}' --backbone '${backbone}' --split '${split}' ${FAIR_FLAG}"
+    local cmd="python -m src.explain.gnn.subgraphx.main --dataset '${dataset}' --graph-type '${graph_type}' --backbone '${backbone}' --split '${split}' ${FAIR_FLAG} ${MAX_GRAPHS_FLAG}"
     run_in_container subgraphx true "${cmd}"
 }
 
 run_tokenshap() {
     local profile=$1
-    local cmd="python -m src.explain.llm.main explain '${profile}' ${FAIR_FLAG}"
+    local cmd="python -m src.explain.llm.main explain '${profile}' ${FAIR_FLAG} ${MAX_GRAPHS_FLAG/--max-graphs/--max-samples}"
     run_in_container tokenshap true "${cmd}"
 }
 
@@ -67,7 +69,11 @@ main() {
     echo ""
     echo "===================================================================="
     echo "Starting all explainability methods with fair comparison mode"
-    echo "Target forward passes: 2000 (default)"
+    echo "Target forward passes: 400 (default, optimized for SubgraphX)"
+    if [[ -n "${MAX_GRAPHS_FLAG}" ]]; then
+        echo "Test mode: Processing first 100 samples only"
+        echo "To process all samples, comment out MAX_GRAPHS_FLAG in script"
+    fi
     echo "===================================================================="
     echo ""
 
