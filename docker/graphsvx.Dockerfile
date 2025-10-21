@@ -27,7 +27,7 @@ RUN git clone https://github.com/AlexDuvalinho/GraphSVX.git .
 
 # Upgrade pip and install PyTorch and dependencies (CUDA 12.1 version for GPU support)
 RUN python3 -m pip install --upgrade pip && \
-    python3 -m pip install torch==2.3.1+cu121 torchvision==0.18.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+    python3 -m pip install torch==2.3.1+cu121 torchvision==0.18.1+cu121 torchaudio==2.3.1+cu121 --index-url https://download.pytorch.org/whl/cu121
 
 # Install torch-geometric and dependencies (CUDA 12.1 wheels)
 RUN python3 -m pip install torch-scatter torch-sparse torch-cluster torch-spline-conv -f https://data.pyg.org/whl/torch-2.3.1+cu121.html && \
@@ -35,6 +35,17 @@ RUN python3 -m pip install torch-scatter torch-sparse torch-cluster torch-spline
 
 # Install other Python dependencies for GraphSVX
 RUN python3 -m pip install -r requirements.txt
+
+# Ensure CUDA-enabled PyTorch remains installed (GraphSVX requirements may pin CPU wheels)
+RUN python3 -m pip install --upgrade \
+    torch==2.3.1+cu121 \
+    torchvision==0.18.1+cu121 \
+    torchaudio==2.3.1+cu121 \
+    --index-url https://download.pytorch.org/whl/cu121 && \
+    python3 -m pip install --upgrade \
+    torch-scatter torch-sparse torch-cluster torch-spline-conv \
+    -f https://data.pyg.org/whl/torch-2.3.1+cu121.html && \
+    python3 -m pip install --upgrade torch-geometric
 
 # Copy and install application requirements
 COPY requirements.txt /app/requirements.txt

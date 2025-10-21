@@ -15,6 +15,17 @@ class RelatedPrediction:
     origin_distribution: Optional[Tuple[float, ...]] = None
     masked_distribution: Optional[Tuple[float, ...]] = None
     maskout_distribution: Optional[Tuple[float, ...]] = None
+    origin_second_class: Optional[int] = None
+    origin_second_confidence: Optional[float] = None
+    origin_contrastivity: Optional[float] = None
+    masked_second_confidence: Optional[float] = None
+    masked_contrastivity: Optional[float] = None
+    maskout_second_confidence: Optional[float] = None
+    maskout_contrastivity: Optional[float] = None
+    maskout_progression_confidence: Optional[Tuple[float, ...]] = None
+    maskout_progression_drop: Optional[Tuple[float, ...]] = None
+    sufficiency_progression_confidence: Optional[Tuple[float, ...]] = None
+    sufficiency_progression_drop: Optional[Tuple[float, ...]] = None
 
     @classmethod
     def from_mapping(cls, data: Optional[Mapping[str, Any]]) -> "RelatedPrediction":
@@ -39,6 +50,17 @@ class RelatedPrediction:
             origin_distribution=_coerce_sequence("origin_distribution"),
             masked_distribution=_coerce_sequence("masked_distribution"),
             maskout_distribution=_coerce_sequence("maskout_distribution"),
+            origin_second_class=data.get("origin_second_class"),
+            origin_second_confidence=data.get("origin_second_confidence"),
+            origin_contrastivity=data.get("origin_contrastivity"),
+            masked_second_confidence=data.get("masked_second_confidence"),
+            masked_contrastivity=data.get("masked_contrastivity"),
+            maskout_second_confidence=data.get("maskout_second_confidence"),
+            maskout_contrastivity=data.get("maskout_contrastivity"),
+            maskout_progression_confidence=_coerce_sequence("maskout_progression_confidence"),
+            maskout_progression_drop=_coerce_sequence("maskout_progression_drop"),
+            sufficiency_progression_confidence=_coerce_sequence("sufficiency_progression_confidence"),
+            sufficiency_progression_drop=_coerce_sequence("sufficiency_progression_drop"),
         )
 
 
@@ -106,8 +128,9 @@ class ExplanationRecord:
     label: Optional[int]
     prediction_class: Optional[int]
     prediction_confidence: Optional[float]
-    num_nodes: Optional[int]
-    num_edges: Optional[int]
+    is_correct: Optional[bool] = None
+    num_nodes: Optional[int] = None
+    num_edges: Optional[int] = None
     node_importance: Optional[Sequence[float]] = None
     top_nodes: Tuple[int, ...] = field(default_factory=tuple)
     related_prediction: RelatedPrediction = field(default_factory=RelatedPrediction)
@@ -157,25 +180,45 @@ class ExplanationRecord:
             "label": self.label,
             "prediction_class": self.prediction_class,
             "prediction_confidence": self.prediction_confidence,
+            "is_correct": self.is_correct,
             "num_nodes": self.num_nodes,
             "num_edges": self.num_edges,
             "node_importance": list(self.node_importance) if self.node_importance is not None else None,
             "top_nodes": list(self.top_nodes),
-            "related_prediction": {
-                "origin": self.related_prediction.origin,
-                "masked": self.related_prediction.masked,
-                "maskout": self.related_prediction.maskout,
-                "sparsity": self.related_prediction.sparsity,
-                "origin_distribution": list(self.related_prediction.origin_distribution)
-                if self.related_prediction.origin_distribution is not None
-                else None,
-                "masked_distribution": list(self.related_prediction.masked_distribution)
-                if self.related_prediction.masked_distribution is not None
-                else None,
-                "maskout_distribution": list(self.related_prediction.maskout_distribution)
-                if self.related_prediction.maskout_distribution is not None
-                else None,
-            },
+        "related_prediction": {
+            "origin": self.related_prediction.origin,
+            "masked": self.related_prediction.masked,
+            "maskout": self.related_prediction.maskout,
+            "sparsity": self.related_prediction.sparsity,
+            "origin_distribution": list(self.related_prediction.origin_distribution)
+            if self.related_prediction.origin_distribution is not None
+            else None,
+            "masked_distribution": list(self.related_prediction.masked_distribution)
+            if self.related_prediction.masked_distribution is not None
+            else None,
+            "maskout_distribution": list(self.related_prediction.maskout_distribution)
+            if self.related_prediction.maskout_distribution is not None
+            else None,
+            "origin_second_class": self.related_prediction.origin_second_class,
+            "origin_second_confidence": self.related_prediction.origin_second_confidence,
+            "origin_contrastivity": self.related_prediction.origin_contrastivity,
+            "masked_second_confidence": self.related_prediction.masked_second_confidence,
+            "masked_contrastivity": self.related_prediction.masked_contrastivity,
+            "maskout_second_confidence": self.related_prediction.maskout_second_confidence,
+            "maskout_contrastivity": self.related_prediction.maskout_contrastivity,
+            "maskout_progression_confidence": list(self.related_prediction.maskout_progression_confidence)
+            if self.related_prediction.maskout_progression_confidence is not None
+            else None,
+            "maskout_progression_drop": list(self.related_prediction.maskout_progression_drop)
+            if self.related_prediction.maskout_progression_drop is not None
+            else None,
+            "sufficiency_progression_confidence": list(self.related_prediction.sufficiency_progression_confidence)
+            if self.related_prediction.sufficiency_progression_confidence is not None
+            else None,
+            "sufficiency_progression_drop": list(self.related_prediction.sufficiency_progression_drop)
+            if self.related_prediction.sufficiency_progression_drop is not None
+            else None,
+        },
             "hyperparams": self.hyperparams,
             "coalitions": [
                 {

@@ -49,6 +49,7 @@ services:
       context: .
       dockerfile: docker/graphsvx.Dockerfile
     container_name: graphsvx
+    gpus: all
     volumes:
       - type: bind
         source: .

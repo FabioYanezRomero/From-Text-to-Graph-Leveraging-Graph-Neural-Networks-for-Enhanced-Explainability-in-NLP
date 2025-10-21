@@ -54,6 +54,17 @@ def _collect_hyperparams(args: argparse.Namespace) -> int:
         return 1
     
     profile = profiles[profile_key]
+
+    if args.num_shards < 1:
+        LOGGER.error("num-shards must be at least 1 (received %d).", args.num_shards)
+        return 1
+    if args.shard_index < 0 or args.shard_index >= args.num_shards:
+        LOGGER.error(
+            "shard-index must be in the range [0, %d) (received %d).",
+            args.num_shards,
+            args.shard_index,
+        )
+        return 1
     
     request = LLMExplainerRequest(
         profile=profile,
@@ -67,6 +78,8 @@ def _collect_hyperparams(args: argparse.Namespace) -> int:
         store_raw=not args.no_raw,
         fair_comparison=getattr(args, "fair", False),
         target_forward_passes=getattr(args, "target_forward_passes", 2000),
+        num_shards=args.num_shards,
+        shard_index=args.shard_index,
     )
     
     LOGGER.info("Loading model and dataset for profile '%s'...", profile_key)
@@ -100,6 +113,17 @@ def _explain(args: argparse.Namespace) -> int:
         return 1
     
     profile = profiles[profile_key]
+
+    if args.num_shards < 1:
+        LOGGER.error("num-shards must be at least 1 (received %d).", args.num_shards)
+        return 1
+    if args.shard_index < 0 or args.shard_index >= args.num_shards:
+        LOGGER.error(
+            "shard-index must be in the range [0, %d) (received %d).",
+            args.num_shards,
+            args.shard_index,
+        )
+        return 1
     
     request = LLMExplainerRequest(
         profile=profile,
@@ -113,6 +137,8 @@ def _explain(args: argparse.Namespace) -> int:
         store_raw=not args.no_raw,
         fair_comparison=getattr(args, "fair", False),
         target_forward_passes=getattr(args, "target_forward_passes", 2000),
+        num_shards=args.num_shards,
+        shard_index=args.shard_index,
     )
     
     LOGGER.info("Loading model and dataset for profile '%s'...", profile_key)
@@ -198,6 +224,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum number of samples to process",
     )
     collect_parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Total number of parallel shards to split the dataset",
+    )
+    collect_parser.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="Index of this shard (0-based)",
+    )
+    collect_parser.add_argument(
         "--sampling-override",
         type=float,
         help="Override sampling ratio for all samples",
@@ -266,6 +304,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-samples",
         type=int,
         help="Maximum number of samples to process",
+    )
+    explain_parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Total number of parallel shards to split the dataset",
+    )
+    explain_parser.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="Index of this shard (0-based)",
     )
     explain_parser.add_argument(
         "--sampling-override",

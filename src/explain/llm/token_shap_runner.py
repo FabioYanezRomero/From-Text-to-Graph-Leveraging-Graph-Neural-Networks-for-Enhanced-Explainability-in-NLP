@@ -4,9 +4,10 @@ import json
 import logging
 import pickle
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import torch
@@ -16,7 +17,7 @@ from src.Insights.llm_providers import LLMExplanationProvider
 from src.Insights.metrics import summarize_records
 from src.Insights.records import Coalition, ExplanationRecord, RelatedPrediction
 from src.Insights.reporting import export_summaries_csv, export_summaries_json
-from src.explain.common.fairness import FairMultimodalHyperparameterAdvisor
+from src.explain.common.fairness import FairMultimodalHyperparameterAdvisor, FairnessConfig
 from src.utils.energy import EnergyMonitor
 
 from .config import LLMExplainerRequest, TOKEN_SHAP_DEFAULTS
@@ -30,6 +31,61 @@ from .model_loader import ModelBundle
 from .word_aggregation import create_word_level_summary
 
 LOGGER = logging.getLogger(__name__)
+
+
+@contextmanager
+def _suppress_token_shap_progress():
+    try:
+        import token_shap.tokenshap as token_shap_module  # type: ignore
+    except Exception:  # pragma: no cover - defensive guard
+        yield
+        return
+
+    original_tqdm = getattr(token_shap_module, "tqdm", None)
+    if original_tqdm is None:  # pragma: no cover - unlikely fallback
+        yield
+        return
+
+    def _noop(iterable, **kwargs):
+        return iterable
+
+    token_shap_module.tqdm = _noop  # type: ignore[attr-defined]
+    try:
+        yield
+    finally:
+        token_shap_module.tqdm = original_tqdm  # type: ignore[attr-defined]
+
+
+def _contrastive_stats(
+    distribution: Optional[Sequence[float]],
+    target_class: Optional[int],
+) -> Tuple[Optional[int], Optional[float], Optional[float]]:
+    if distribution is None:
+        return None, None, None
+    try:
+        values = [float(v) for v in distribution]
+    except (TypeError, ValueError):
+        return None, None, None
+    if not values:
+        return None, None, None
+
+    if target_class is not None and 0 <= int(target_class) < len(values):
+        target_idx = int(target_class)
+        target_conf = values[target_idx]
+        others = [(idx, val) for idx, val in enumerate(values) if idx != target_idx]
+        if not others:
+            return None, None, None
+        second_idx, second_val = max(others, key=lambda item: item[1])
+        contrast = target_conf - second_val if target_conf is not None else None
+        return second_idx, second_val, contrast
+
+    ordered = sorted(enumerate(values), key=lambda item: item[1], reverse=True)
+    if len(ordered) < 2:
+        return None, None, None
+    _, best_val = ordered[0]
+    second_idx, second_val = ordered[1]
+    contrast = best_val - second_val if best_val is not None else None
+    return second_idx, second_val, contrast
 
 def _parse_response_scores(response: str) -> Tuple[int, float]:
     """Extract predicted class and confidence from TokenSHAP response string."""
@@ -156,6 +212,13 @@ def _build_record(
     hyperparams_payload = dict(hyperparams)
     hyperparams_payload.setdefault("sampling_ratio", sampling_ratio)
 
+    is_correct: Optional[bool] = None
+    if label is not None and predicted_class is not None:
+        try:
+            is_correct = int(label) == int(predicted_class)
+        except (TypeError, ValueError):
+            is_correct = label == predicted_class
+
     record = ExplanationRecord(
         dataset=request.insight_dataset(),
         graph_type=request.graph_type(),
@@ -165,6 +228,7 @@ def _build_record(
         label=label,
         prediction_class=predicted_class,
         prediction_confidence=float(confidence),
+        is_correct=is_correct,
         num_nodes=len(token_text),
         num_edges=0,
         node_importance=importance.astype(float).tolist(),
@@ -202,7 +266,13 @@ def token_shap_explain(
 
     tokenizer = model_bundle.tokenizer
     device = model_bundle.device
-    fairness_advisor = FairMultimodalHyperparameterAdvisor() if request.fair_comparison else None
+    fairness_advisor = (
+        FairMultimodalHyperparameterAdvisor(
+            FairnessConfig(compute_budget=int(max(1, request.target_forward_passes)))
+        )
+        if request.fair_comparison
+        else None
+    )
     if fairness_advisor is not None:
         max_tokens_estimate = min(request.profile.max_tokens, request.profile.max_length)
         fair_defaults = fairness_advisor.tokenshap(num_tokens=max_tokens_estimate)
@@ -334,6 +404,29 @@ def token_shap_explain(
         sharded_dataset = list(enumerate(dataset))
         total_samples = len(sharded_dataset)
 
+    max_samples_limit = request.effective_max_samples()
+    if max_samples_limit is not None:
+        sharded_dataset = sharded_dataset[:max_samples_limit]
+        total_samples = len(sharded_dataset)
+        LOGGER.info(
+            "Shard %d/%d: Limiting to %d samples (requested max=%s).",
+            shard_index + 1,
+            num_shards,
+            total_samples,
+            max_samples_limit,
+        )
+    else:
+        LOGGER.info(
+            "Shard %d/%d: Processing %d samples (no max limit provided).",
+            shard_index + 1,
+            num_shards,
+            total_samples,
+        )
+
+    processed = 0
+    skipped = 0
+    max_samples = max_samples_limit
+
     iterator = iter(sharded_dataset)
     if progress:
         desc = f"TokenSHAP[{request.profile.key}]"
@@ -348,9 +441,6 @@ def token_shap_explain(
             dynamic_ncols=True,
         )
 
-    processed = 0
-    skipped = 0
-    max_samples = request.effective_max_samples()
     energy_monitor = EnergyMonitor("TokenSHAP", output_dir=output_dir)
     energy_monitor.__enter__()
     try:
@@ -360,128 +450,176 @@ def token_shap_explain(
             prompt = entry[request.profile.text_field]
             label = entry.get(request.profile.label_field)
             tokens = splitter.split(prompt)
-        num_tokens = len(tokens)
-        if num_tokens == 0 or num_tokens > request.max_tokens():
-            skipped += 1
-            continue
+            num_tokens = len(tokens)
+            if num_tokens == 0 or num_tokens > request.max_tokens():
+                skipped += 1
+                continue
 
-        # Use advisor if available, otherwise fall back to request's sampling strategy
-        fairness_params: Optional[Dict[str, float]] = None
-        if fairness_advisor is not None:
-            fairness_params = fairness_advisor.tokenshap(num_tokens=num_tokens)
-            ratio = float(fairness_params["sampling_ratio"])
-            hyperparams = dict(fairness_params)
-        elif advisor is not None:
-            suggested_params = advisor.suggest(tokens)
-            ratio = suggested_params["sampling_ratio"]
-            # Store all suggested hyperparameters for later analysis
-            hyperparams = dict(suggested_params)
-            hyperparams.setdefault("sampling_ratio", ratio)
-        else:
-            ratio = request.sampling_ratio(num_tokens)
-            hyperparams = {"sampling_ratio": ratio}
-        
-        # Log warning for sequences that may cause OOM, but process anyway
-        max_combinations = 2 ** num_tokens
-        if max_combinations > 65536:  # 2^16
-            LOGGER.warning(
-                "Sample %d: %d tokens = 2^%d = %s combinations (ratio=%.4f). "
-                "TokenSHAP generates all combinations before sampling - may cause OOM!",
-                index, num_tokens, num_tokens, f"{max_combinations:,}", ratio
+            # Use advisor if available, otherwise fall back to request's sampling strategy
+            fairness_params: Optional[Dict[str, float]] = None
+            if fairness_advisor is not None:
+                fairness_params = fairness_advisor.tokenshap(num_tokens=num_tokens)
+                ratio = float(fairness_params["sampling_ratio"])
+                if num_tokens >= 63:
+                    estimated_budget = fairness_params.get("target_forward_passes", request.target_forward_passes)
+                else:
+                    total_coalitions = max(1, (2 ** num_tokens) - 1)
+                    estimated_budget = min(
+                        fairness_params.get("target_forward_passes", request.target_forward_passes),
+                        ratio * total_coalitions,
+                    )
+                LOGGER.info(
+                    "FairTokenSHAP: graph=%d tokens=%d sampling_ratio=%.6f (~%.0f forward passes)",
+                    index,
+                    num_tokens,
+                    ratio,
+                    estimated_budget,
+                )
+                hyperparams = dict(fairness_params)
+            elif advisor is not None:
+                suggested_params = advisor.suggest(tokens)
+                ratio = suggested_params["sampling_ratio"]
+                # Store all suggested hyperparameters for later analysis
+                hyperparams = dict(suggested_params)
+                hyperparams.setdefault("sampling_ratio", ratio)
+            else:
+                ratio = request.sampling_ratio(num_tokens)
+                hyperparams = {"sampling_ratio": ratio}
+            
+            max_combinations = 2 ** num_tokens
+            
+            start = time.perf_counter()
+            # TokenSHAP may show internal progress bars for combinations
+            # NOTE: TokenSHAP.analyze() only accepts sampling_ratio parameter
+            # It does NOT support explicit num_samples limit like GraphSVX
+            try:
+                with _suppress_token_shap_progress():
+                    df = explainer.analyze(
+                        prompt,
+                        sampling_ratio=ratio,
+                        print_highlight_text=False,
+                        show_progress=False,
+                    )
+            except TypeError:
+                with _suppress_token_shap_progress():
+                    df = explainer.analyze(
+                        prompt,
+                        sampling_ratio=ratio,
+                        print_highlight_text=False,
+                    )
+            elapsed = time.perf_counter() - start
+            if not isinstance(df, pd.DataFrame):
+                LOGGER.warning("TokenSHAP returned non DataFrame output for index %s", index)
+                continue
+
+            parsed_class, parsed_confidence = _parse_response_scores(df.iloc[0]["Response"])
+            importance = _extract_importances(df, num_tokens=num_tokens)
+            coalitions = _coalitions_from_dataframe(df, num_tokens=num_tokens)
+
+            target_top_k = fairness_params.get("top_k_tokens") if fairness_params else request.top_k_nodes
+            target_top_k = max(1, min(int(target_top_k), num_tokens))
+            top_indices = tuple(_top_nodes(importance, k=target_top_k))
+            valid_top_indices = tuple(idx for idx in top_indices if 0 <= idx < num_tokens)
+            important_index_set = set(valid_top_indices)
+
+            origin_class, origin_confidence, origin_distribution = hf_model.predict(prompt)
+            if origin_class != parsed_class or abs(origin_confidence - parsed_confidence) > 1e-5:
+                LOGGER.debug(
+                    "TokenSHAP response mismatch at index %d: parsed=(%s, %.6f) model=(%s, %.6f)",
+                    index,
+                    parsed_class,
+                    parsed_confidence,
+                    origin_class,
+                    origin_confidence,
+                )
+
+            masked_tokens = [tokens[idx] for idx in range(num_tokens) if idx in important_index_set]
+            if not masked_tokens and tokens:
+                masked_tokens = [tokens[idx] for idx in valid_top_indices if 0 <= idx < num_tokens]
+            if not masked_tokens:
+                masked_tokens = tokens
+
+            maskout_tokens = [tokens[idx] for idx in range(num_tokens) if idx not in important_index_set]
+            if not maskout_tokens:
+                maskout_tokens = tokens
+
+            masked_prompt = splitter.join(masked_tokens)
+            maskout_prompt = splitter.join(maskout_tokens)
+
+            _, _, masked_distribution = hf_model.predict(masked_prompt)
+            _, _, maskout_distribution = hf_model.predict(maskout_prompt)
+
+            target_class = origin_class
+            masked_confidence = masked_distribution[target_class] if masked_distribution else None
+            maskout_confidence = maskout_distribution[target_class] if maskout_distribution else None
+            sparsity = (len(important_index_set) / num_tokens) if num_tokens else None
+
+            origin_second_class, origin_second_conf, origin_contrast = _contrastive_stats(origin_distribution, origin_class)
+            _, masked_second_conf, masked_contrast = _contrastive_stats(masked_distribution, origin_class)
+            _, maskout_second_conf, maskout_contrast = _contrastive_stats(maskout_distribution, origin_class)
+
+            progression_conf: List[float] = []
+            progression_drop: List[float] = []
+            if origin_confidence is not None and origin_class is not None and valid_top_indices:
+                removal: List[int] = []
+                for node_idx in valid_top_indices:
+                    if node_idx < 0 or node_idx >= len(tokens):
+                        continue
+                    removal.append(node_idx)
+                    filtered = [tok for idx_tok, tok in enumerate(tokens) if idx_tok not in removal]
+                    masked_prompt_k = splitter.join(filtered)
+                    _, _, dist_k = hf_model.predict(masked_prompt_k)
+                    if dist_k is None or len(dist_k) <= origin_class:
+                        continue
+                    conf_k = dist_k[origin_class]
+                    progression_conf.append(float(conf_k))
+                    progression_drop.append(float(origin_confidence - conf_k))
+
+            related_prediction = RelatedPrediction(
+                origin=float(origin_confidence),
+                masked=float(masked_confidence) if masked_confidence is not None else None,
+                maskout=float(maskout_confidence) if maskout_confidence is not None else None,
+                sparsity=sparsity,
+                origin_distribution=tuple(float(v) for v in origin_distribution),
+                masked_distribution=tuple(float(v) for v in masked_distribution) if masked_distribution else None,
+                maskout_distribution=tuple(float(v) for v in maskout_distribution) if maskout_distribution else None,
+                origin_second_class=origin_second_class,
+                origin_second_confidence=origin_second_conf,
+                origin_contrastivity=origin_contrast,
+                masked_second_confidence=masked_second_conf,
+                masked_contrastivity=masked_contrast,
+                maskout_second_confidence=maskout_second_conf,
+                maskout_contrastivity=maskout_contrast,
+                maskout_progression_confidence=tuple(progression_conf) if progression_conf else None,
+                maskout_progression_drop=tuple(progression_drop) if progression_drop else None,
             )
-        
-        start = time.perf_counter()
-        # TokenSHAP may show internal progress bars for combinations
-        # NOTE: TokenSHAP.analyze() only accepts sampling_ratio parameter
-        # It does NOT support explicit num_samples limit like GraphSVX
-        df = explainer.analyze(
-            prompt, 
-            sampling_ratio=ratio,
-            print_highlight_text=False,
-        )
-        elapsed = time.perf_counter() - start
-        if not isinstance(df, pd.DataFrame):
-            LOGGER.warning("TokenSHAP returned non DataFrame output for index %s", index)
-            continue
 
-        parsed_class, parsed_confidence = _parse_response_scores(df.iloc[0]["Response"])
-        importance = _extract_importances(df, num_tokens=num_tokens)
-        coalitions = _coalitions_from_dataframe(df, num_tokens=num_tokens)
-
-        target_top_k = fairness_params.get("top_k_tokens") if fairness_params else request.top_k_nodes
-        target_top_k = max(1, min(int(target_top_k), num_tokens))
-        top_indices = tuple(_top_nodes(importance, k=target_top_k))
-        valid_top_indices = tuple(idx for idx in top_indices if 0 <= idx < num_tokens)
-        important_index_set = set(valid_top_indices)
-
-        origin_class, origin_confidence, origin_distribution = hf_model.predict(prompt)
-        if origin_class != parsed_class or abs(origin_confidence - parsed_confidence) > 1e-5:
-            LOGGER.debug(
-                "TokenSHAP response mismatch at index %d: parsed=(%s, %.6f) model=(%s, %.6f)",
-                index,
-                parsed_class,
-                parsed_confidence,
-                origin_class,
-                origin_confidence,
+            record = _build_record(
+                request=request,
+                graph_index=index,
+                prompt=prompt,
+                label=label,
+                token_text=tokens,
+                importance=importance,
+                predicted_class=origin_class,
+                confidence=origin_confidence,
+                sampling_ratio=ratio,
+                elapsed_time=elapsed,
+                coalitions=coalitions,
+                top_indices=valid_top_indices,
+                related_prediction=related_prediction,
+                hyperparams=hyperparams,
+                masked_prompt=masked_prompt,
+                maskout_prompt=maskout_prompt,
             )
+            records.append(record)
 
-        masked_tokens = [tokens[idx] for idx in range(num_tokens) if idx in important_index_set]
-        if not masked_tokens and tokens:
-            masked_tokens = [tokens[idx] for idx in valid_top_indices if 0 <= idx < num_tokens]
-        if not masked_tokens:
-            masked_tokens = tokens
-
-        maskout_tokens = [tokens[idx] for idx in range(num_tokens) if idx not in important_index_set]
-        if not maskout_tokens:
-            maskout_tokens = tokens
-
-        masked_prompt = splitter.join(masked_tokens)
-        maskout_prompt = splitter.join(maskout_tokens)
-
-        _, _, masked_distribution = hf_model.predict(masked_prompt)
-        _, _, maskout_distribution = hf_model.predict(maskout_prompt)
-
-        target_class = origin_class
-        masked_confidence = masked_distribution[target_class] if masked_distribution else None
-        maskout_confidence = maskout_distribution[target_class] if maskout_distribution else None
-        sparsity = (len(important_index_set) / num_tokens) if num_tokens else None
-
-        related_prediction = RelatedPrediction(
-            origin=float(origin_confidence),
-            masked=float(masked_confidence) if masked_confidence is not None else None,
-            maskout=float(maskout_confidence) if maskout_confidence is not None else None,
-            sparsity=sparsity,
-            origin_distribution=tuple(float(v) for v in origin_distribution),
-            masked_distribution=tuple(float(v) for v in masked_distribution) if masked_distribution else None,
-            maskout_distribution=tuple(float(v) for v in maskout_distribution) if maskout_distribution else None,
-        )
-
-        record = _build_record(
-            request=request,
-            graph_index=index,
-            prompt=prompt,
-            label=label,
-            token_text=tokens,
-            importance=importance,
-            predicted_class=origin_class,
-            confidence=origin_confidence,
-            sampling_ratio=ratio,
-            elapsed_time=elapsed,
-            coalitions=coalitions,
-            top_indices=valid_top_indices,
-            related_prediction=related_prediction,
-            hyperparams=hyperparams,
-            masked_prompt=masked_prompt,
-            maskout_prompt=maskout_prompt,
-        )
-        records.append(record)
-
-        if request.store_raw:
-            coalitions_dir = output_dir / "coalitions"
-            coalitions_dir.mkdir(parents=True, exist_ok=True)
-            csv_path = coalitions_dir / f"graph_{index:04d}_coalitions.csv"
-            df.to_csv(csv_path, index=False)
-            record.extras["coalitions_path"] = str(csv_path)
+            if request.store_raw:
+                coalitions_dir = output_dir / "coalitions"
+                coalitions_dir.mkdir(parents=True, exist_ok=True)
+                csv_path = coalitions_dir / f"graph_{index:04d}_coalitions.csv"
+                df.to_csv(csv_path, index=False)
+                record.extras["coalitions_path"] = str(csv_path)
 
             processed += 1
     finally:
@@ -511,9 +649,6 @@ def token_shap_explain(
             request.max_tokens(),
         )
     
-    if not records:
-        return [], [], output_dir, Path(), Path(), None, None
-
     # Use LLMExplanationProvider to automatically extract token text
     llm_provider = LLMExplanationProvider()
     
@@ -597,7 +732,13 @@ def collect_token_shap_hyperparams(
         Tuple of (output_path, per_sample_data)
     """
     tokenizer = model_bundle.tokenizer
-    fairness_advisor = FairMultimodalHyperparameterAdvisor() if request.fair_comparison else None
+    fairness_advisor = (
+        FairMultimodalHyperparameterAdvisor(
+            FairnessConfig(compute_budget=int(max(1, request.target_forward_passes)))
+        )
+        if request.fair_comparison
+        else None
+    )
     
     advisor: Optional[TokenSHAPHyperparameterAdvisor] = None
     if fairness_advisor is None:
@@ -653,22 +794,42 @@ def collect_token_shap_hyperparams(
     
     # Collect hyperparameters for each sample
     per_sample: List[Dict[str, object]] = []
+
+    shard_index = request.shard_index
+    num_shards = request.num_shards
+    dataset_length = len(dataset)
+    dataset_indices: List[int]
+    if num_shards > 1:
+        dataset_indices = list(range(shard_index, dataset_length, num_shards))
+        LOGGER.info(
+            "Shard %d/%d: Collecting hyperparameters for %d candidate samples (every %d-th sample starting from %d)",
+            shard_index + 1,
+            num_shards,
+            len(dataset_indices),
+            num_shards,
+            shard_index,
+        )
+    else:
+        dataset_indices = list(range(dataset_length))
     
-    effective_max = max_samples or request.effective_max_samples()
-    total = len(dataset) if effective_max is None else min(len(dataset), effective_max)
+    effective_max = max_samples if max_samples is not None else request.effective_max_samples()
+    if effective_max is not None:
+        dataset_indices = dataset_indices[:effective_max]
     
-    iterator = enumerate(dataset)
+    iterator = dataset_indices
     if progress:
+        desc = f"CollectTokenSHAPParams[{request.profile.key}]"
+        if num_shards > 1:
+            desc = f"{desc}[{shard_index + 1}/{num_shards}]"
         iterator = tqdm(
-            iterator,
-            total=total,
-            desc=f"CollectTokenSHAPParams[{request.profile.key}]",
+            dataset_indices,
+            total=len(dataset_indices),
+            desc=desc,
             dynamic_ncols=True,
         )
     
-    for index, entry in iterator:
-        if effective_max is not None and index >= effective_max:
-            break
+    for index in iterator:
+        entry = dataset[index]
         
         prompt = entry[request.profile.text_field]
         tokens = splitter.split(prompt)

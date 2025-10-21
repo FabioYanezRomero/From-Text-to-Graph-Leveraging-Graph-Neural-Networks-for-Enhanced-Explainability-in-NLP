@@ -1,0 +1,629 @@
+[
+  {
+    "graph_index": 0,
+    "label": 1,
+    "num_nodes": 20,
+    "num_edges": 38,
+    "prediction": {
+      "class": 1,
+      "confidence": 0.8896181583404541,
+      "distribution": [
+        0.11038190126419067,
+        0.8896181583404541
+      ]
+    },
+    "prediction_class": 1,
+    "prediction_confidence": 0.8896181583404541,
+    "node_importance": [
+      0.0,
+      0.07821006327867508,
+      0.07703060656785965,
+      0.07931480556726456,
+      0.07670185714960098,
+      0.07818257808685303,
+      0.0770597755908966,
+      0.07957325130701065,
+      0.08042474091053009,
+      0.0816991925239563,
+      0.07955585420131683,
+      0.07749255001544952,
+      0.08405542373657227,
+      0.07277774810791016,
+      0.07737696170806885,
+      0.08085649460554123,
+      0.07686826586723328,
+      0.0746857076883316,
+      0.07669497281312943,
+      0.0
+    ],
+    "coalitions_path": "/app/outputs/gnn_models/stanfordnlp/sst2/window/20250920_150438/explanations/graphsvx/stanfordnlp_sst2_window_validation_shard4of4/graph_0000_coalitions.csv",
+    "top_nodes": [
+      12,
+      9,
+      15,
+      8
+    ],
+    "hyperparams": {
+      "sampling_ratio": 0.25,
+      "num_samples_override": 2000,
+      "keep_special_tokens": true,
+      "top_k_nodes": 4
+    },
+    "hyperparam_source": "fair_advisor",
+    "related_prediction": {
+      "masked": 0.8002642393112183,
+      "maskout": 0.7163475155830383,
+      "origin": 0.8896181583404541,
+      "sparsity": 0.3,
+      "origin_distribution": [
+        0.11038190126419067,
+        0.8896181583404541
+      ],
+      "masked_distribution": [
+        0.1997358202934265,
+        0.8002642393112183
+      ],
+      "maskout_distribution": [
+        0.28365248441696167,
+        0.7163475155830383
+      ],
+      "ranked_nodes": [
+        12,
+        9,
+        15,
+        8,
+        7,
+        10,
+        3,
+        1,
+        5,
+        11,
+        14,
+        6,
+        2,
+        16,
+        4,
+        18,
+        17,
+        13,
+        0,
+        19
+      ],
+      "origin_second_class": 0,
+      "origin_second_confidence": 0.11038190126419067,
+      "origin_contrastivity": 0.7792362570762634,
+      "masked_second_confidence": 0.1997358202934265,
+      "masked_contrastivity": 0.6005284190177917,
+      "maskout_second_confidence": 0.28365248441696167,
+      "maskout_contrastivity": 0.43269503116607666,
+      "maskout_progression_confidence": [
+        0.8310073018074036,
+        0.8105537295341492,
+        0.77105313539505,
+        0.7163475155830383
+      ],
+      "maskout_progression_drop": [
+        0.05861085653305054,
+        0.07906442880630493,
+        0.11856502294540405,
+        0.17327064275741577
+      ],
+      "sufficiency_progression_confidence": [
+        0.6304019093513489,
+        0.7056688070297241,
+        0.7738878726959229,
+        0.8002642393112183
+      ],
+      "sufficiency_progression_drop": [
+        0.2592162489891052,
+        0.18394935131072998,
+        0.11573028564453125,
+        0.08935391902923584
+      ]
+    },
+    "is_correct": true
+  },
+  {
+    "graph_index": 1,
+    "label": 0,
+    "num_nodes": 10,
+    "num_edges": 18,
+    "prediction": {
+      "class": 0,
+      "confidence": 0.9960806965827942,
+      "distribution": [
+        0.9960806965827942,
+        0.003919374663382769
+      ]
+    },
+    "prediction_class": 0,
+    "prediction_confidence": 0.9960806965827942,
+    "node_importance": [
+      0.0,
+      0.19968906044960022,
+      0.19579869508743286,
+      0.2017362266778946,
+      0.1880716234445572,
+      0.2089967429637909,
+      0.19609084725379944,
+      0.20479553937911987,
+      0.19712312519550323,
+      0.0
+    ],
+    "coalitions_path": "/app/outputs/gnn_models/stanfordnlp/sst2/window/20250920_150438/explanations/graphsvx/stanfordnlp_sst2_window_validation_shard4of4/graph_0001_coalitions.csv",
+    "top_nodes": [
+      5,
+      7
+    ],
+    "hyperparams": {
+      "sampling_ratio": 0.25,
+      "num_samples_override": 2000,
+      "keep_special_tokens": true,
+      "top_k_nodes": 2
+    },
+    "hyperparam_source": "fair_advisor",
+    "related_prediction": {
+      "masked": 0.7212971448898315,
+      "maskout": 0.9946464896202087,
+      "origin": 0.9960806965827942,
+      "sparsity": 0.4,
+      "origin_distribution": [
+        0.9960806965827942,
+        0.003919374663382769
+      ],
+      "masked_distribution": [
+        0.7212971448898315,
+        0.27870288491249084
+      ],
+      "maskout_distribution": [
+        0.9946464896202087,
+        0.005353458691388369
+      ],
+      "ranked_nodes": [
+        5,
+        7,
+        3,
+        1,
+        8,
+        6,
+        2,
+        4,
+        0,
+        9
+      ],
+      "origin_second_class": 1,
+      "origin_second_confidence": 0.003919374663382769,
+      "origin_contrastivity": 0.9921613219194114,
+      "masked_second_confidence": 0.27870288491249084,
+      "masked_contrastivity": 0.4425942599773407,
+      "maskout_second_confidence": 0.005353458691388369,
+      "maskout_contrastivity": 0.9892930309288204,
+      "maskout_progression_confidence": [
+        0.9949475526809692,
+        0.9946464896202087
+      ],
+      "maskout_progression_drop": [
+        0.0011331439018249512,
+        0.0014342069625854492
+      ],
+      "sufficiency_progression_confidence": [
+        0.7539111375808716,
+        0.7212971448898315
+      ],
+      "sufficiency_progression_drop": [
+        0.2421695590019226,
+        0.27478355169296265
+      ]
+    },
+    "is_correct": true
+  },
+  {
+    "graph_index": 2,
+    "label": 0,
+    "num_nodes": 30,
+    "num_edges": 58,
+    "prediction": {
+      "class": 0,
+      "confidence": 0.6655241250991821,
+      "distribution": [
+        0.6655241250991821,
+        0.33447587490081787
+      ]
+    },
+    "prediction_class": 0,
+    "prediction_confidence": 0.6655241250991821,
+    "node_importance": [
+      0.0,
+      0.041322968900203705,
+      0.04075872525572777,
+      0.0379764586687088,
+      0.042083822190761566,
+      0.04047374427318573,
+      0.04380469396710396,
+      0.040084704756736755,
+      0.04859510809183121,
+      0.03896009176969528,
+      0.03819406032562256,
+      0.03893498331308365,
+      0.039765674620866776,
+      0.036967888474464417,
+      0.03807230666279793,
+      0.04132263734936714,
+      0.0388418473303318,
+      0.03934828191995621,
+      0.04023881256580353,
+      0.03754312917590141,
+      0.04058733955025673,
+      0.03827418386936188,
+      0.040280476212501526,
+      0.04014253988862038,
+      0.03824668750166893,
+      0.04102591797709465,
+      0.037793442606925964,
+      0.040778715163469315,
+      0.03767847642302513,
+      0.0
+    ],
+    "coalitions_path": "/app/outputs/gnn_models/stanfordnlp/sst2/window/20250920_150438/explanations/graphsvx/stanfordnlp_sst2_window_validation_shard4of4/graph_0002_coalitions.csv",
+    "top_nodes": [
+      8,
+      6,
+      4,
+      1,
+      15,
+      25
+    ],
+    "hyperparams": {
+      "sampling_ratio": 0.25,
+      "num_samples_override": 2000,
+      "keep_special_tokens": true,
+      "top_k_nodes": 6
+    },
+    "hyperparam_source": "fair_advisor",
+    "related_prediction": {
+      "masked": 0.8025715351104736,
+      "maskout": 0.33506858348846436,
+      "origin": 0.6655241250991821,
+      "sparsity": 0.26666666666666666,
+      "origin_distribution": [
+        0.6655241250991821,
+        0.33447587490081787
+      ],
+      "masked_distribution": [
+        0.8025715351104736,
+        0.1974284052848816
+      ],
+      "maskout_distribution": [
+        0.33506858348846436,
+        0.6649314165115356
+      ],
+      "ranked_nodes": [
+        8,
+        6,
+        4,
+        1,
+        15,
+        25,
+        27,
+        2,
+        20,
+        5,
+        22,
+        18,
+        23,
+        7,
+        12,
+        17,
+        9,
+        11,
+        16,
+        21,
+        24,
+        10,
+        14,
+        3,
+        26,
+        28,
+        19,
+        13,
+        0,
+        29
+      ],
+      "origin_second_class": 1,
+      "origin_second_confidence": 0.33447587490081787,
+      "origin_contrastivity": 0.33104825019836426,
+      "masked_second_confidence": 0.1974284052848816,
+      "masked_contrastivity": 0.605143129825592,
+      "maskout_second_confidence": 0.6649314165115356,
+      "maskout_contrastivity": -0.3298628330230713,
+      "maskout_progression_confidence": [
+        0.5772780179977417,
+        0.46673280000686646,
+        0.41931843757629395,
+        0.3426794707775116,
+        0.3370582163333893,
+        0.33506858348846436
+      ],
+      "maskout_progression_drop": [
+        0.08824610710144043,
+        0.19879132509231567,
+        0.24620568752288818,
+        0.32284465432167053,
+        0.32846590876579285,
+        0.3304555416107178
+      ],
+      "sufficiency_progression_confidence": [
+        0.6665617823600769,
+        0.7415719628334045,
+        0.7528381943702698,
+        0.8046272397041321,
+        0.8048738837242126,
+        0.8025715351104736
+      ],
+      "sufficiency_progression_drop": [
+        -0.0010376572608947754,
+        -0.07604783773422241,
+        -0.08731406927108765,
+        -0.13910311460494995,
+        -0.13934975862503052,
+        -0.1370474100112915
+      ]
+    },
+    "is_correct": true
+  },
+  {
+    "graph_index": 3,
+    "label": 1,
+    "num_nodes": 22,
+    "num_edges": 42,
+    "prediction": {
+      "class": 1,
+      "confidence": 0.9999994039535522,
+      "distribution": [
+        5.443183681563823e-07,
+        0.9999994039535522
+      ]
+    },
+    "prediction_class": 1,
+    "prediction_confidence": 0.9999994039535522,
+    "node_importance": [
+      0.0,
+      0.08821072429418564,
+      0.09287047386169434,
+      0.09428824484348297,
+      0.09150753915309906,
+      0.09353121370077133,
+      0.09203791618347168,
+      0.09186307340860367,
+      0.09282196313142776,
+      0.08935143053531647,
+      0.0918489620089531,
+      0.09435460716485977,
+      0.08920583873987198,
+      0.0950106829404831,
+      0.09384343028068542,
+      0.09295127540826797,
+      0.09326561540365219,
+      0.08825424313545227,
+      0.09462089836597443,
+      0.09358106553554535,
+      0.09239894896745682,
+      0.0
+    ],
+    "coalitions_path": "/app/outputs/gnn_models/stanfordnlp/sst2/window/20250920_150438/explanations/graphsvx/stanfordnlp_sst2_window_validation_shard4of4/graph_0003_coalitions.csv",
+    "top_nodes": [
+      13,
+      18,
+      11,
+      3,
+      14
+    ],
+    "hyperparams": {
+      "sampling_ratio": 0.25,
+      "num_samples_override": 2000,
+      "keep_special_tokens": true,
+      "top_k_nodes": 5
+    },
+    "hyperparam_source": "fair_advisor",
+    "related_prediction": {
+      "masked": 0.9968731999397278,
+      "maskout": 0.999985933303833,
+      "origin": 0.9999994039535522,
+      "sparsity": 0.3181818181818182,
+      "origin_distribution": [
+        5.443183681563823e-07,
+        0.9999994039535522
+      ],
+      "masked_distribution": [
+        0.0031268082093447447,
+        0.9968731999397278
+      ],
+      "maskout_distribution": [
+        1.4101380656939e-05,
+        0.999985933303833
+      ],
+      "ranked_nodes": [
+        13,
+        18,
+        11,
+        3,
+        14,
+        19,
+        5,
+        16,
+        15,
+        2,
+        8,
+        20,
+        6,
+        7,
+        10,
+        4,
+        9,
+        12,
+        17,
+        1,
+        0,
+        21
+      ],
+      "origin_second_class": 0,
+      "origin_second_confidence": 5.443183681563823e-07,
+      "origin_contrastivity": 0.9999988596351841,
+      "masked_second_confidence": 0.0031268082093447447,
+      "masked_contrastivity": 0.993746391730383,
+      "maskout_second_confidence": 1.4101380656939e-05,
+      "maskout_contrastivity": 0.9999718319231761,
+      "maskout_progression_confidence": [
+        0.9999991655349731,
+        0.9999982118606567,
+        0.9999959468841553,
+        0.9999858140945435,
+        0.999985933303833
+      ],
+      "maskout_progression_drop": [
+        2.384185791015625e-07,
+        1.1920928955078125e-06,
+        3.4570693969726562e-06,
+        1.3589859008789062e-05,
+        1.3470649719238281e-05
+      ],
+      "sufficiency_progression_confidence": [
+        0.8657059073448181,
+        0.9583080410957336,
+        0.9850019812583923,
+        0.9971279501914978,
+        0.9968731999397278
+      ],
+      "sufficiency_progression_drop": [
+        0.13429349660873413,
+        0.041691362857818604,
+        0.014997422695159912,
+        0.0028714537620544434,
+        0.003126204013824463
+      ]
+    },
+    "is_correct": true
+  },
+  {
+    "graph_index": 4,
+    "label": 0,
+    "num_nodes": 19,
+    "num_edges": 36,
+    "prediction": {
+      "class": 0,
+      "confidence": 0.9984316229820251,
+      "distribution": [
+        0.9984316229820251,
+        0.0015682978555560112
+      ]
+    },
+    "prediction_class": 0,
+    "prediction_confidence": 0.9984316229820251,
+    "node_importance": [
+      0.0,
+      0.1005168929696083,
+      0.09863188117742538,
+      0.09988492727279663,
+      0.10187011957168579,
+      0.10324373096227646,
+      0.09979961812496185,
+      0.10170620679855347,
+      0.10035400837659836,
+      0.0978437066078186,
+      0.09811883419752121,
+      0.09965024143457413,
+      0.10122569650411606,
+      0.10007446259260178,
+      0.10205572843551636,
+      0.1046331450343132,
+      0.0990031361579895,
+      0.09592992812395096,
+      0.0
+    ],
+    "coalitions_path": "/app/outputs/gnn_models/stanfordnlp/sst2/window/20250920_150438/explanations/graphsvx/stanfordnlp_sst2_window_validation_shard4of4/graph_0004_coalitions.csv",
+    "top_nodes": [
+      15,
+      5,
+      14,
+      4
+    ],
+    "hyperparams": {
+      "sampling_ratio": 0.25,
+      "num_samples_override": 2000,
+      "keep_special_tokens": true,
+      "top_k_nodes": 4
+    },
+    "hyperparam_source": "fair_advisor",
+    "related_prediction": {
+      "masked": 0.9228938817977905,
+      "maskout": 0.9833365082740784,
+      "origin": 0.9984316229820251,
+      "sparsity": 0.3157894736842105,
+      "origin_distribution": [
+        0.9984316229820251,
+        0.0015682978555560112
+      ],
+      "masked_distribution": [
+        0.9228938817977905,
+        0.07710607349872589
+      ],
+      "maskout_distribution": [
+        0.9833365082740784,
+        0.016663413494825363
+      ],
+      "ranked_nodes": [
+        15,
+        5,
+        14,
+        4,
+        7,
+        12,
+        1,
+        8,
+        13,
+        3,
+        6,
+        11,
+        16,
+        2,
+        10,
+        9,
+        17,
+        0,
+        18
+      ],
+      "origin_second_class": 1,
+      "origin_second_confidence": 0.0015682978555560112,
+      "origin_contrastivity": 0.9968633251264691,
+      "masked_second_confidence": 0.07710607349872589,
+      "masked_contrastivity": 0.8457878082990646,
+      "maskout_second_confidence": 0.016663413494825363,
+      "maskout_contrastivity": 0.966673094779253,
+      "maskout_progression_confidence": [
+        0.9966314435005188,
+        0.9942542910575867,
+        0.9905799031257629,
+        0.9833365082740784
+      ],
+      "maskout_progression_drop": [
+        0.0018001794815063477,
+        0.0041773319244384766,
+        0.007851719856262207,
+        0.015095114707946777
+      ],
+      "sufficiency_progression_confidence": [
+        0.6507323980331421,
+        0.7793295979499817,
+        0.8596646785736084,
+        0.9228938817977905
+      ],
+      "sufficiency_progression_drop": [
+        0.34769922494888306,
+        0.21910202503204346,
+        0.13876694440841675,
+        0.07553774118423462
+      ]
+    },
+    "is_correct": true
+  }
+]

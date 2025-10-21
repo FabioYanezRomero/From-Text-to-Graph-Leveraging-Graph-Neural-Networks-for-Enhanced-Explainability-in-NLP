@@ -7,6 +7,57 @@ from torch_geometric.data import Batch, Data
 from dig.xgraph.method import SubgraphX
 
 
+def _contrastive_stats(
+    distribution: Optional[Sequence[float]],
+    target_class: Optional[int],
+) -> Tuple[Optional[int], Optional[float], Optional[float]]:
+    if distribution is None:
+        return None, None, None
+    try:
+        values = [float(v) for v in distribution]
+    except (TypeError, ValueError):
+        return None, None, None
+    if not values:
+        return None, None, None
+
+    if target_class is not None and 0 <= int(target_class) < len(values):
+        target_idx = int(target_class)
+        target_conf = values[target_idx]
+        others = [(idx, val) for idx, val in enumerate(values) if idx != target_idx]
+        if not others:
+            return None, None, None
+        second_idx, second_val = max(others, key=lambda item: item[1])
+        contrast = target_conf - second_val if target_conf is not None else None
+        return second_idx, second_val, contrast
+
+    ordered = sorted(enumerate(values), key=lambda item: item[1], reverse=True)
+    if len(ordered) < 2:
+        return None, None, None
+    _, best_val = ordered[0]
+    second_idx, second_val = ordered[1]
+    contrast = best_val - second_val if best_val is not None else None
+    return second_idx, second_val, contrast
+
+
+def _extract_node_tokens(data: Data) -> Optional[List[str]]:
+    token_keys = ("node_tokens", "tokens", "token_text", "words", "token_strings")
+    for key in token_keys:
+        value = getattr(data, key, None)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            return [str(item) for item in value]
+        if torch.is_tensor(value):
+            flat = value.detach().cpu().tolist()
+            if isinstance(flat, list):
+                return [str(item) for item in flat]
+    mapping = getattr(data, "token_map", None)
+    if isinstance(mapping, dict):
+        num_nodes = int(getattr(data, "num_nodes", len(mapping)))
+        return [str(mapping.get(idx)) for idx in range(num_nodes)]
+    return None
+
+
 class CustomSubgraphX(SubgraphX):
     """Augmented SubgraphX explainer that captures probability distributions."""
 
@@ -74,6 +125,10 @@ class CustomSubgraphX(SubgraphX):
         if not isinstance(related_pred, dict):
             return
 
+        base_data, coalition = self._extract_primary_data(results)
+        if isinstance(coalition, list):
+            related_pred.setdefault("top_nodes", [int(idx) for idx in coalition])
+
         origin_probs = self._predict_probs_from_inputs(x, edge_index)
         origin_distribution = origin_probs.detach().cpu().tolist()
         if origin_distribution:
@@ -98,6 +153,43 @@ class CustomSubgraphX(SubgraphX):
                 related_pred["maskout"] = float(maskout_distribution[target_index])
         else:
             related_pred.setdefault("maskout_distribution", None)
+
+        second_idx, second_conf, contrast = _contrastive_stats(origin_distribution, target_index)
+        related_pred["origin_second_class"] = second_idx
+        related_pred["origin_second_confidence"] = second_conf
+        related_pred["origin_contrastivity"] = contrast
+
+        if masked_distribution is not None:
+            _, masked_second_conf, masked_contrast = _contrastive_stats(masked_distribution, target_index)
+            related_pred["masked_second_confidence"] = masked_second_conf
+            related_pred["masked_contrastivity"] = masked_contrast
+        else:
+            related_pred.setdefault("masked_second_confidence", None)
+            related_pred.setdefault("masked_contrastivity", None)
+
+        if maskout_distribution is not None:
+            _, maskout_second_conf, maskout_contrast = _contrastive_stats(maskout_distribution, target_index)
+            related_pred["maskout_second_confidence"] = maskout_second_conf
+            related_pred["maskout_contrastivity"] = maskout_contrast
+        else:
+            related_pred.setdefault("maskout_second_confidence", None)
+            related_pred.setdefault("maskout_contrastivity", None)
+
+        node_tokens = None
+        if base_data is not None:
+            node_tokens = _extract_node_tokens(base_data)
+        if node_tokens:
+            related_pred["node_tokens"] = node_tokens
+            ranked_nodes = related_pred.get("top_nodes", [])
+            related_pred["ranked_tokens"] = [
+                node_tokens[idx] for idx in ranked_nodes if isinstance(idx, int) and 0 <= idx < len(node_tokens)
+            ]
+            related_pred["top_token_text"] = [
+                node_tokens[idx] for idx in related_pred.get("top_nodes", [])
+                if isinstance(idx, int) and 0 <= idx < len(node_tokens)
+            ]
+
+        related_pred.setdefault("ranked_nodes", related_pred.get("top_nodes", []))
 
     def _resolve_target_index(
         self, label: Optional[int], origin_probs: torch.Tensor
@@ -180,7 +272,7 @@ class CustomSubgraphX(SubgraphX):
 
     def _build_batch(self, data: Data, mask: torch.Tensor) -> Batch:
         masked = data.clone().cpu()
-        mask = mask.to(masked.x.dtype)
+        mask = mask.to(masked.x.device, dtype=masked.x.dtype)
         masked.x = masked.x * mask.unsqueeze(1)
 
         if self.subgraph_building_method == "split":
@@ -193,6 +285,70 @@ class CustomSubgraphX(SubgraphX):
 
         batch = Batch.from_data_list([masked])
         return batch.to(self.device)
+
+    def cumulative_maskout_confidence(
+        self,
+        data: Data,
+        ordered_nodes: Sequence[int],
+        target_index: Optional[int],
+    ) -> List[float]:
+        if target_index is None:
+            return []
+        num_nodes = getattr(data, "num_nodes", None) or data.x.size(0)
+        if num_nodes <= 0:
+            return []
+        drop_nodes: List[int] = []
+        confidences: List[float] = []
+        for node_idx in ordered_nodes:
+            if node_idx is None:
+                continue
+            try:
+                node_int = int(node_idx)
+            except (TypeError, ValueError):
+                continue
+            if node_int < 0 or node_int >= num_nodes:
+                continue
+            drop_nodes.append(node_int)
+            mask = torch.ones(num_nodes, dtype=torch.float32, device=self.device)
+            mask[drop_nodes] = 0.0
+            batch = self._build_batch(data, mask)
+            probs = self._predict_probs_from_inputs(batch)
+            if probs.numel() <= target_index:
+                continue
+            confidences.append(float(probs[target_index]))
+        return confidences
+
+    def cumulative_sufficiency_confidence(
+        self,
+        data: Data,
+        ordered_nodes: Sequence[int],
+        target_index: Optional[int],
+    ) -> List[float]:
+        if target_index is None:
+            return []
+        num_nodes = getattr(data, "num_nodes", None) or data.x.size(0)
+        if num_nodes <= 0:
+            return []
+        kept_nodes: List[int] = []
+        confidences: List[float] = []
+        for node_idx in ordered_nodes:
+            if node_idx is None:
+                continue
+            try:
+                node_int = int(node_idx)
+            except (TypeError, ValueError):
+                continue
+            if node_int < 0 or node_int >= num_nodes:
+                continue
+            kept_nodes.append(node_int)
+            mask = torch.zeros(num_nodes, dtype=torch.float32, device=self.device)
+            mask[kept_nodes] = 1.0
+            batch = self._build_batch(data, mask)
+            probs = self._predict_probs_from_inputs(batch)
+            if probs.numel() <= target_index:
+                continue
+            confidences.append(float(probs[target_index]))
+        return confidences
 
     def _predict_probs_from_inputs(self, *model_args, **model_kwargs) -> torch.Tensor:
         with torch.no_grad():

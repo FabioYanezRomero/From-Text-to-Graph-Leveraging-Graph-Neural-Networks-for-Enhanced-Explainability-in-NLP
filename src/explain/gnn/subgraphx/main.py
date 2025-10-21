@@ -7,14 +7,14 @@ import pickle
 import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from tqdm import tqdm
 
-from src.explain.common.fairness import FairMultimodalHyperparameterAdvisor
+from src.explain.common.fairness import FairMultimodalHyperparameterAdvisor, FairnessConfig
 from src.explain.gnn.config import (
     DEFAULT_GNN_ROOT,
     DEFAULT_GRAPH_DATA_ROOT,
@@ -23,6 +23,7 @@ from src.explain.gnn.config import (
     SUBGRAPHX_PROFILES,
 )
 from src.explain.gnn.model_loader import load_gnn_model, load_graph_split
+from src.utils.energy import EnergyMonitor
 from .hyperparam_advisor import (
     ArchitectureSpec,
     SubgraphXHyperparameterAdvisor,
@@ -65,6 +66,38 @@ import dig.xgraph.method.shapley  # type: ignore  # pylint: disable=import-error
 dig.xgraph.method.shapley.MarginalSubgraphDataset = MarginalSubgraphDataset  # type: ignore[attr-defined]
 
 
+def _contrastive_stats(
+    distribution: Optional[Sequence[float]],
+    target_class: Optional[int],
+) -> Tuple[Optional[int], Optional[float], Optional[float]]:
+    if distribution is None:
+        return None, None, None
+    try:
+        values = [float(v) for v in distribution]
+    except (TypeError, ValueError):
+        return None, None, None
+    if not values:
+        return None, None, None
+
+    if target_class is not None and 0 <= int(target_class) < len(values):
+        target_idx = int(target_class)
+        target_conf = values[target_idx]
+        others = [(idx, val) for idx, val in enumerate(values) if idx != target_idx]
+        if not others:
+            return None, None, None
+        second_idx, second_val = max(others, key=lambda item: item[1])
+        contrast = target_conf - second_val if target_conf is not None else None
+        return second_idx, second_val, contrast
+
+    ordered = sorted(enumerate(values), key=lambda item: item[1], reverse=True)
+    if len(ordered) < 2:
+        return None, None, None
+    _, best_val = ordered[0]
+    second_idx, second_val = ordered[1]
+    contrast = best_val - second_val if best_val is not None else None
+    return second_idx, second_val, contrast
+
+
 class UniversalDataModelWrapper(torch.nn.Module):
     """Normalise the model forward signature for DIG's expectations."""
 
@@ -105,6 +138,8 @@ class SubgraphXResult:
     num_nodes: int
     num_edges: int
     hyperparams: Dict[str, float]
+    prediction: Optional[Dict[str, object]] = None
+    is_correct: Optional[bool] = None
 
     def to_json(self) -> Dict[str, object]:  # pragma: no cover - serialisation helper
         return {
@@ -114,6 +149,10 @@ class SubgraphXResult:
             "num_edges": self.num_edges,
             "related_prediction": self.related_prediction,
             "hyperparams": dict(self.hyperparams),
+            "prediction": dict(self.prediction) if self.prediction else None,
+            "prediction_class": self.prediction.get("class") if self.prediction else None,
+            "prediction_confidence": self.prediction.get("confidence") if self.prediction else None,
+            "is_correct": self.is_correct,
         }
 
 
@@ -165,6 +204,25 @@ def _prepare_explainer(
     )
 
 
+def _extract_node_tokens(data: Data) -> Optional[List[str]]:
+    token_keys = ("node_tokens", "tokens", "token_text", "words", "token_strings")
+    for key in token_keys:
+        value = getattr(data, key, None)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            return [str(item) for item in value]
+        if torch.is_tensor(value):
+            flat = value.detach().cpu().tolist()
+            if isinstance(flat, list):
+                return [str(item) for item in flat]
+    mapping = getattr(data, "token_map", None)
+    if isinstance(mapping, dict):
+        num_nodes = int(getattr(data, "num_nodes", len(mapping)))
+        return [str(mapping.get(idx)) for idx in range(num_nodes)]
+    return None
+
+
 def _extract_architecture_spec(
     model: torch.nn.Module, args: Dict[str, object]
 ) -> ArchitectureSpec:
@@ -196,6 +254,8 @@ def collect_hyperparams(
     progress: bool = True,
     output_dir: Optional[Path] = None,
     output_path: Optional[Path] = None,
+    max_graphs: Optional[int] = None,
+    fairness_config: Optional[FairnessConfig] = None,
 ) -> Path:
     """Collect advisor-suggested hyperparameters for every graph in the split."""
 
@@ -229,7 +289,11 @@ def collect_hyperparams(
 
     architecture_spec = _extract_architecture_spec(model, train_args)
     fair_mode = bool(updated_request.fair_comparison)
-    fairness_advisor = FairMultimodalHyperparameterAdvisor() if fair_mode else None
+    fairness_advisor = (
+        FairMultimodalHyperparameterAdvisor(fairness_config)
+        if fair_mode
+        else None
+    )
     advisor: Optional[SubgraphXHyperparameterAdvisor] = None
     if not fair_mode:
         advisor = SubgraphXHyperparameterAdvisor(
@@ -245,6 +309,9 @@ def collect_hyperparams(
         output_path = artifact_dir / "hyperparams.json"
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
+    total = len(loader)
+    if max_graphs is not None and max_graphs > 0:
+        total = min(total, max_graphs)
     if progress:
         desc = f"CollectHParams[{updated_request.shard_index + 1}/{updated_request.num_shards}]"
         iterable = tqdm(
@@ -253,12 +320,15 @@ def collect_hyperparams(
             leave=False,
             position=updated_request.shard_index,
             dynamic_ncols=True,
+            total=total,
         )
     else:
         iterable = loader
 
     per_graph: List[Dict[str, object]] = []
     for index, batch in enumerate(iterable):
+        if max_graphs is not None and index >= max_graphs:
+            break
         data: Data = batch
         if fairness_advisor is not None:
             params = fairness_advisor.subgraphx(
@@ -320,6 +390,8 @@ def explain_request(
     hyperparams: Optional[Dict[str, float]] = None,
     precomputed_hparams: Optional[Dict[int, Dict[str, float]]] = None,
     precomputed_source: Optional[Path] = None,
+    max_graphs: Optional[int] = None,
+    fairness_config: Optional[FairnessConfig] = None,
 ) -> Tuple[List[SubgraphXResult], Path, Path, Optional[Path]]:
     """Run SubgraphX on the dataset implied by the request."""
 
@@ -356,7 +428,11 @@ def explain_request(
 
     architecture_spec = _extract_architecture_spec(model, train_args)
     fair_mode = bool(updated_request.fair_comparison)
-    fairness_advisor = FairMultimodalHyperparameterAdvisor() if fair_mode else None
+    fairness_advisor = (
+        FairMultimodalHyperparameterAdvisor(fairness_config)
+        if fair_mode
+        else None
+    )
     advisor: Optional[SubgraphXHyperparameterAdvisor] = None
     if not fair_mode:
         advisor = SubgraphXHyperparameterAdvisor(
@@ -372,6 +448,9 @@ def explain_request(
     results: List[SubgraphXResult] = []
     per_graph_hparams: List[Dict[str, float]] = []
     energy_data: Dict[str, object] = {}
+    total = len(loader)
+    if max_graphs is not None and max_graphs > 0:
+        total = min(total, max_graphs)
     if progress:
         desc = f"SubgraphX[{updated_request.shard_index + 1}/{updated_request.num_shards}]"
         iterable = tqdm(
@@ -380,12 +459,15 @@ def explain_request(
             leave=False,
             position=updated_request.shard_index,
             dynamic_ncols=True,
+            total=total,
         )
     else:
         iterable = loader
 
     with EnergyMonitor("SubgraphX", output_dir=artifact_dir) as energy_monitor:
         for index, batch in enumerate(iterable):
+            if max_graphs is not None and index >= max_graphs:
+                break
             data: Data = batch.to(wrapper.device)
             label = int(data.y.item()) if hasattr(data, "y") and data.y is not None else None
             source = "advisor"
@@ -416,6 +498,86 @@ def explain_request(
                 max_nodes=graph_params["max_nodes"],
             )
             final_params = dict(graph_params)
+            origin_distribution = related_pred.get("origin_distribution")
+            predicted_class: Optional[int] = None
+            predicted_confidence: Optional[float] = None
+            if origin_distribution:
+                try:
+                    max_index = max(range(len(origin_distribution)), key=lambda idx: origin_distribution[idx])
+                    predicted_class = int(max_index)
+                    predicted_confidence = float(origin_distribution[max_index])
+                except (ValueError, TypeError):
+                    predicted_class = None
+                    predicted_confidence = None
+
+            is_correct: Optional[bool] = None
+            if label is not None and predicted_class is not None:
+                try:
+                    is_correct = int(label) == predicted_class
+                except (TypeError, ValueError):
+                    is_correct = label == predicted_class
+
+            prediction_payload: Optional[Dict[str, object]] = None
+            if predicted_class is not None:
+                prediction_payload = {
+                    "class": predicted_class,
+                    "confidence": predicted_confidence,
+                    "distribution": list(origin_distribution) if origin_distribution is not None else None,
+                }
+
+            if predicted_class is not None and "predicted_class" not in related_pred:
+                related_pred["predicted_class"] = predicted_class
+            if predicted_confidence is not None and "predicted_confidence" not in related_pred:
+                related_pred["predicted_confidence"] = predicted_confidence
+
+            if "ranked_nodes" not in related_pred:
+                related_pred["ranked_nodes"] = list(related_pred.get("top_nodes", []))
+
+            second_idx, second_conf, contrast = _contrastive_stats(origin_distribution, predicted_class)
+            related_pred["origin_second_class"] = second_idx
+            related_pred["origin_second_confidence"] = second_conf
+            related_pred["origin_contrastivity"] = contrast
+
+            masked_distribution = related_pred.get("masked_distribution")
+            if masked_distribution is not None:
+                _, masked_second_conf, masked_contrast = _contrastive_stats(masked_distribution, predicted_class)
+                related_pred["masked_second_confidence"] = masked_second_conf
+                related_pred["masked_contrastivity"] = masked_contrast
+            else:
+                related_pred.setdefault("masked_second_confidence", None)
+                related_pred.setdefault("masked_contrastivity", None)
+
+            maskout_distribution = related_pred.get("maskout_distribution")
+            if maskout_distribution is not None:
+                _, maskout_second_conf, maskout_contrast = _contrastive_stats(maskout_distribution, predicted_class)
+                related_pred["maskout_second_confidence"] = maskout_second_conf
+                related_pred["maskout_contrastivity"] = maskout_contrast
+            else:
+                related_pred.setdefault("maskout_second_confidence", None)
+                related_pred.setdefault("maskout_contrastivity", None)
+
+            top_nodes_sequence = related_pred.get("top_nodes") or []
+            origin_confidence = related_pred.get("origin")
+            if origin_confidence is not None and predicted_class is not None and top_nodes_sequence:
+                progression_conf = explainer.cumulative_maskout_confidence(data, top_nodes_sequence, int(predicted_class))
+                related_pred["maskout_progression_confidence"] = progression_conf
+                related_pred["maskout_progression_drop"] = [origin_confidence - val for val in progression_conf]
+                suff_conf = explainer.cumulative_sufficiency_confidence(data, top_nodes_sequence, int(predicted_class))
+                related_pred["sufficiency_progression_confidence"] = suff_conf
+                related_pred["sufficiency_progression_drop"] = [origin_confidence - val for val in suff_conf]
+
+            node_tokens = _extract_node_tokens(data)
+            if node_tokens:
+                related_pred["node_tokens"] = node_tokens
+                ranked_nodes = related_pred.get("ranked_nodes", [])
+                related_pred["ranked_tokens"] = [
+                    node_tokens[idx] for idx in ranked_nodes if isinstance(idx, int) and 0 <= idx < len(node_tokens)
+                ]
+                related_pred["top_token_text"] = [
+                    node_tokens[idx] for idx in related_pred.get("top_nodes", [])
+                    if isinstance(idx, int) and 0 <= idx < len(node_tokens)
+                ]
+
             results.append(
                 SubgraphXResult(
                     graph_index=index,
@@ -425,6 +587,8 @@ def explain_request(
                     num_nodes=data.num_nodes,
                     num_edges=data.num_edges,
                     hyperparams=final_params,
+                    prediction=prediction_payload,
+                    is_correct=is_correct,
                 )
             )
             per_graph_hparams.append({"graph_index": index, "source": source, **final_params})
@@ -524,7 +688,14 @@ def main(argv: Optional[List[str]] = None) -> None:  # pragma: no cover - CLI he
     parser.add_argument("--num-shards", type=int, help="Total shards when running in parallel.")
     parser.add_argument("--shard-index", type=int, help="Index of this shard (0-based).")
     parser.add_argument("--batch-size", type=int, help="Override batch size for data loader.")
+    parser.add_argument("--max-graphs", type=int, help="Limit the number of graphs processed (for smoke tests).")
     parser.add_argument("--fair", action="store_true", help="Enable fair multimodal advisor alignment.")
+    parser.add_argument(
+        "--target-forward-passes",
+        type=int,
+        default=400,
+        help="Target forward pass budget when using --fair (default: 400).",
+    )
     args = parser.parse_args(argv)
 
     request = _env_request()
@@ -558,11 +729,18 @@ def main(argv: Optional[List[str]] = None) -> None:  # pragma: no cover - CLI he
     if overrides:
         request = replace(request, **overrides)
 
+    target_budget = args.target_forward_passes if args.target_forward_passes and args.target_forward_passes > 0 else 400
+    fairness_config = FairnessConfig(compute_budget=int(target_budget))
+
+    max_graphs = args.max_graphs if args.max_graphs and args.max_graphs > 0 else None
+
     if args.collect_only:
         output_path = collect_hyperparams(
             request,
             progress=not args.no_progress,
             output_path=args.hyperparams_out,
+            max_graphs=max_graphs,
+            fairness_config=fairness_config,
         )
         print(f"Saved SubgraphX hyperparameters to {output_path}")
         return
@@ -589,6 +767,8 @@ def main(argv: Optional[List[str]] = None) -> None:  # pragma: no cover - CLI he
         progress=not args.no_progress,
         precomputed_hparams=precomputed_lookup,
         precomputed_source=precomputed_source,
+        max_graphs=max_graphs,
+        fairness_config=fairness_config,
     )
 
     output_path = Path("subgraphx_results.json")

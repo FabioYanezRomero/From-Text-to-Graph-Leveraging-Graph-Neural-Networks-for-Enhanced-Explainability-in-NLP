@@ -349,6 +349,7 @@ def summarize_record(
         "label": record.label,
         "prediction_class": record.prediction_class,
         "prediction_confidence": record.prediction_confidence,
+        "is_correct": record.is_correct,
         "origin_confidence": record.related_prediction.origin,
         "masked_confidence": record.related_prediction.masked,
         "maskout_confidence": record.related_prediction.maskout,
@@ -371,6 +372,23 @@ def summarize_record(
         "top_nodes": list(top_nodes(record, k=top_k)),
         "num_nodes": record.num_nodes,
         "num_edges": record.num_edges,
+        "origin_contrastivity": record.related_prediction.origin_contrastivity,
+        "masked_contrastivity": record.related_prediction.masked_contrastivity,
+        "maskout_contrastivity": record.related_prediction.maskout_contrastivity,
+        "origin_second_class": record.related_prediction.origin_second_class,
+        "origin_second_confidence": record.related_prediction.origin_second_confidence,
+        "maskout_progression_confidence": list(record.related_prediction.maskout_progression_confidence)
+        if record.related_prediction.maskout_progression_confidence is not None
+        else None,
+        "maskout_progression_drop": list(record.related_prediction.maskout_progression_drop)
+        if record.related_prediction.maskout_progression_drop is not None
+        else None,
+        "sufficiency_progression_confidence": list(record.related_prediction.sufficiency_progression_confidence)
+        if record.related_prediction.sufficiency_progression_confidence is not None
+        else None,
+        "sufficiency_progression_drop": list(record.related_prediction.sufficiency_progression_drop)
+        if record.related_prediction.sufficiency_progression_drop is not None
+        else None,
     }
 
     if node_text:

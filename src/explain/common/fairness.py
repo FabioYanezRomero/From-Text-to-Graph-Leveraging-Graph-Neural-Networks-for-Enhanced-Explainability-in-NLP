@@ -96,12 +96,10 @@ class FairMultimodalHyperparameterAdvisor:
         if num_tokens <= 0:
             ratio = 1.0
         else:
-            # Use min exponent to avoid overflow; beyond 60 tokens the ratio becomes virtually zero.
-            if num_tokens > 60:
-                ratio = self.config.compute_budget / float((1 << 60) - 1)
-            else:
-                total_subsets = (1 << num_tokens) - 1
-                ratio = self.config.compute_budget / float(max(total_subsets, 1))
+            essential = num_tokens
+            total_subsets = max(1, (1 << num_tokens) - 1)
+            effective_budget = max(0, self.config.compute_budget - essential)
+            ratio = effective_budget / float(total_subsets)
             ratio = max(0.0, min(1.0, ratio))
         return {
             "sampling_ratio": ratio,

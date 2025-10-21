@@ -9,14 +9,14 @@ import random
 import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import torch
 from torch_geometric.data import Data
 from tqdm import tqdm
 
-from src.explain.common.fairness import FairMultimodalHyperparameterAdvisor
+from src.explain.common.fairness import FairMultimodalHyperparameterAdvisor, FairnessConfig
 from src.utils.energy import EnergyMonitor
 from src.explain.gnn.config import (
     DEFAULT_GNN_ROOT,
@@ -199,6 +199,59 @@ def _prediction_with_mask(
     return float(probs[0, predicted_class]), distribution
 
 
+def _extract_node_tokens(data: Data) -> Optional[List[str]]:
+    token_keys = ("node_tokens", "tokens", "token_text", "words", "token_strings")
+    for key in token_keys:
+        value = getattr(data, key, None)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            return [str(item) for item in value]
+        if torch.is_tensor(value):
+            flat = value.detach().cpu().tolist()
+            if isinstance(flat, list):
+                return [str(item) for item in flat]
+    mapping = getattr(data, "token_map", None)
+    if isinstance(mapping, dict):
+        num_nodes = int(getattr(data, "num_nodes", len(mapping)))
+        return [str(mapping.get(idx)) for idx in range(num_nodes)]
+    return None
+
+
+def _contrastive_stats(
+    distribution: Optional[Sequence[float]],
+    target_class: Optional[int],
+) -> Tuple[Optional[int], Optional[float], Optional[float]]:
+    if distribution is None:
+        return None, None, None
+    try:
+        values = [float(v) for v in distribution]
+    except (TypeError, ValueError):
+        return None, None, None
+    if not values:
+        return None, None, None
+
+    candidate_class = None
+    candidate_conf = None
+    if target_class is not None and 0 <= int(target_class) < len(values):
+        target_idx = int(target_class)
+        target_conf = values[target_idx]
+        others = [(idx, val) for idx, val in enumerate(values) if idx != target_idx]
+        if not others:
+            return None, None, None
+        second_idx, second_val = max(others, key=lambda item: item[1])
+        contrast = target_conf - second_val if target_conf is not None else None
+        return second_idx, second_val, contrast
+
+    ordered = sorted(enumerate(values), key=lambda item: item[1], reverse=True)
+    if len(ordered) < 2:
+        return None, None, None
+    _, best_val = ordered[0]
+    second_idx, second_val = ordered[1]
+    contrast = best_val - second_val if best_val is not None else None
+    return second_idx, second_val, contrast
+
+
 @dataclass
 class GraphSVXResult:
     graph_index: int
@@ -212,18 +265,30 @@ class GraphSVXResult:
 
     def to_json(self) -> Dict[str, object]:  # pragma: no cover - serialisation helper
         importance = self.explanation["node_importance"].tolist()
+        prediction = dict(self.explanation.get("original_prediction", {}))
+        predicted_class = prediction.get("class")
+        predicted_confidence = prediction.get("confidence")
+        is_correct: Optional[bool] = None
+        if self.label is not None and predicted_class is not None:
+            try:
+                is_correct = int(self.label) == int(predicted_class)
+            except (TypeError, ValueError):
+                is_correct = self.label == predicted_class
         return {
             "graph_index": self.graph_index,
             "label": self.label,
             "num_nodes": self.explanation["num_nodes"],
             "num_edges": self.explanation["num_edges"],
-            "prediction": self.explanation["original_prediction"],
+            "prediction": prediction,
+            "prediction_class": predicted_class,
+            "prediction_confidence": predicted_confidence,
             "node_importance": importance,
             "coalitions_path": self.explanation.get("combinations_path"),
             "top_nodes": self.explanation.get("top_nodes", []),
             "hyperparams": dict(self.hyperparams),
             "hyperparam_source": self.source,
             "related_prediction": dict(self.related_prediction),
+            "is_correct": is_correct,
         }
 
 def _make_slug(request: ExplainerRequest) -> str:
@@ -258,6 +323,7 @@ def collect_hyperparams(
     progress: bool = True,
     output_path: Optional[Path] = None,
     max_graphs: Optional[int] = None,
+    fairness_config: Optional[FairnessConfig] = None,
 ) -> Path:
     device = torch.device(request.device) if request.device else torch.device(
         "cuda" if torch.cuda.is_available() else "cpu"
@@ -288,7 +354,11 @@ def collect_hyperparams(
     locked_overrides.update(updated_request.hyperparams or {})
 
     fair_mode = bool(updated_request.fair_comparison)
-    fairness_advisor = FairMultimodalHyperparameterAdvisor() if fair_mode else None
+    fairness_advisor = (
+        FairMultimodalHyperparameterAdvisor(fairness_config)
+        if fair_mode
+        else None
+    )
     advisor: Optional[GraphSVXHyperparameterAdvisor] = None
     if not fair_mode:
         architecture_spec = _extract_architecture_spec(model, train_args)
@@ -396,6 +466,7 @@ def explain_request(
     precomputed_hparams: Optional[Dict[int, Dict[str, float]]] = None,
     precomputed_source: Optional[Path] = None,
     max_graphs: Optional[int] = None,
+    fairness_config: Optional[FairnessConfig] = None,
 ) -> Tuple[List[GraphSVXResult], Path, Path, Optional[Path]]:
     device = torch.device(request.device) if request.device else torch.device(
         "cuda" if torch.cuda.is_available() else "cpu"
@@ -428,7 +499,11 @@ def explain_request(
         combined_overrides.update(hyperparams)
 
     fair_mode = bool(updated_request.fair_comparison)
-    fairness_advisor = FairMultimodalHyperparameterAdvisor() if fair_mode else None
+    fairness_advisor = (
+        FairMultimodalHyperparameterAdvisor(fairness_config)
+        if fair_mode
+        else None
+    )
     advisor: Optional[GraphSVXHyperparameterAdvisor] = None
     if not fair_mode:
         architecture_spec = _extract_architecture_spec(model, train_args)
@@ -505,8 +580,20 @@ def explain_request(
 
             importance_tensor: torch.Tensor = explanation["node_importance"]
             ordered = torch.argsort(importance_tensor, descending=True)
+            ordered_list = ordered.tolist()
+            explanation["node_ranking"] = ordered_list
             explanation["top_nodes"] = ordered[: graph_params["top_k_nodes"]].tolist()
             top_nodes_list = explanation["top_nodes"]
+
+            node_tokens = _extract_node_tokens(data)
+            if node_tokens:
+                explanation["node_tokens"] = node_tokens
+                explanation["ranked_tokens"] = [
+                    node_tokens[idx] for idx in ordered_list if 0 <= idx < len(node_tokens)
+                ]
+                explanation["top_token_text"] = [
+                    node_tokens[idx] for idx in top_nodes_list if 0 <= idx < len(node_tokens)
+                ]
 
             mask_keep, mask_drop = _build_node_masks(
                 data.num_nodes,
@@ -515,7 +602,9 @@ def explain_request(
                 device=device,
             )
 
-            predicted_class = explanation["original_prediction"]["class"]
+            original_prediction = explanation.get("original_prediction", {})
+            origin_confidence = original_prediction.get("confidence")
+            predicted_class = original_prediction.get("class")
             masked_conf, masked_dist = _prediction_with_mask(
                 explainer.model,
                 data,
@@ -534,13 +623,113 @@ def explain_request(
             related_pred = {
                 "masked": masked_conf,
                 "maskout": maskout_conf,
-                "origin": explanation["original_prediction"]["confidence"],
+                "origin": origin_confidence,
                 "sparsity": kept_ratio,
                 "origin_distribution": explanation["original_prediction"].get("distribution"),
                 "masked_distribution": masked_dist,
                 "maskout_distribution": maskout_dist,
             }
+            is_correct: Optional[bool] = None
+            if label is not None and predicted_class is not None:
+                try:
+                    is_correct = int(label) == int(predicted_class)
+                except (TypeError, ValueError):
+                    is_correct = label == predicted_class
+            explanation["is_correct"] = is_correct
             explanation["related_prediction"] = related_pred
+
+            related_pred["ranked_nodes"] = ordered_list
+            if node_tokens:
+                related_pred["node_tokens"] = node_tokens
+                related_pred["ranked_tokens"] = [
+                    node_tokens[idx] for idx in ordered_list if 0 <= idx < len(node_tokens)
+                ]
+                related_pred["top_token_text"] = [
+                    node_tokens[idx] for idx in top_nodes_list if 0 <= idx < len(node_tokens)
+                ]
+
+            second_class, second_conf, contrast = _contrastive_stats(
+                explanation["original_prediction"].get("distribution"),
+                predicted_class,
+            )
+            related_pred["origin_second_class"] = second_class
+            related_pred["origin_second_confidence"] = second_conf
+            related_pred["origin_contrastivity"] = contrast
+
+            if masked_dist is not None:
+                _, masked_second_conf, masked_contrast = _contrastive_stats(masked_dist, predicted_class)
+                related_pred["masked_second_confidence"] = masked_second_conf
+                related_pred["masked_contrastivity"] = masked_contrast
+            else:
+                related_pred.setdefault("masked_second_confidence", None)
+                related_pred.setdefault("masked_contrastivity", None)
+
+            if maskout_dist is not None:
+                _, maskout_second_conf, maskout_contrast = _contrastive_stats(maskout_dist, predicted_class)
+                related_pred["maskout_second_confidence"] = maskout_second_conf
+                related_pred["maskout_contrastivity"] = maskout_contrast
+            else:
+                related_pred.setdefault("maskout_second_confidence", None)
+                related_pred.setdefault("maskout_contrastivity", None)
+
+            def _progressions(confidence_mask_fn, store_conf_key: str, store_drop_key: str) -> None:
+                if origin_confidence is None or predicted_class is None:
+                    related_pred.setdefault(store_conf_key, None)
+                    related_pred.setdefault(store_drop_key, None)
+                    return
+                progression_conf: List[float] = []
+                progression_drop: List[float] = []
+                kept: List[int] = []
+                for node_idx in top_nodes_list:
+                    if node_idx < 0 or node_idx >= data.num_nodes:
+                        continue
+                    kept.append(int(node_idx))
+                    conf_value = confidence_mask_fn(kept)
+                    if conf_value is None:
+                        continue
+                    progression_conf.append(conf_value)
+                    progression_drop.append(origin_confidence - conf_value)
+                related_pred[store_conf_key] = progression_conf if progression_conf else None
+                related_pred[store_drop_key] = progression_drop if progression_drop else None
+
+            def _maskout_conf(kept_nodes: List[int]) -> Optional[float]:
+                mask = torch.ones(data.num_nodes, dtype=torch.bool, device=device)
+                if graph_params["keep_special_tokens"] and data.num_nodes >= 2:
+                    mask[0] = True
+                    mask[-1] = True
+                for idx in kept_nodes:
+                    if graph_params["keep_special_tokens"] and data.num_nodes >= 2 and idx in (0, data.num_nodes - 1):
+                        continue
+                    mask[idx] = False
+                conf, _ = _prediction_with_mask(
+                    explainer.model,
+                    data,
+                    mask,
+                    device=device,
+                    predicted_class=int(predicted_class),
+                )
+                return conf
+
+            def _sufficiency_conf(kept_nodes: List[int]) -> Optional[float]:
+                mask = torch.zeros(data.num_nodes, dtype=torch.bool, device=device)
+                if graph_params["keep_special_tokens"] and data.num_nodes >= 2:
+                    mask[0] = True
+                    mask[-1] = True
+                for idx in kept_nodes:
+                    if graph_params["keep_special_tokens"] and data.num_nodes >= 2 and idx in (0, data.num_nodes - 1):
+                        continue
+                    mask[idx] = True
+                conf, _ = _prediction_with_mask(
+                    explainer.model,
+                    data,
+                    mask,
+                    device=device,
+                    predicted_class=int(predicted_class),
+                )
+                return conf
+
+            _progressions(_maskout_conf, "maskout_progression_confidence", "maskout_progression_drop")
+            _progressions(_sufficiency_conf, "sufficiency_progression_confidence", "sufficiency_progression_drop")
 
             results.append(
                 GraphSVXResult(
@@ -634,6 +823,12 @@ def main(argv: Optional[List[str]] = None) -> None:  # pragma: no cover - CLI he
     parser.add_argument("--shard-index", type=int, help="Index of this shard (0-based).")
     parser.add_argument("--max-graphs", type=int, help="Limit the number of graphs processed (for smoke tests).")
     parser.add_argument("--fair", action="store_true", help="Enable fair multimodal advisor alignment.")
+    parser.add_argument(
+        "--target-forward-passes",
+        type=int,
+        default=400,
+        help="Target forward pass budget when using --fair (default: 400).",
+    )
     args = parser.parse_args(argv)
 
     request = _env_request()
@@ -667,12 +862,16 @@ def main(argv: Optional[List[str]] = None) -> None:  # pragma: no cover - CLI he
     if overrides:
         request = replace(request, **overrides)
 
+    target_budget = args.target_forward_passes if args.target_forward_passes and args.target_forward_passes > 0 else 400
+    fairness_config = FairnessConfig(compute_budget=int(target_budget))
+
     if args.collect_only:
         output_path = collect_hyperparams(
             request,
             progress=not args.no_progress,
             output_path=args.hyperparams_out,
             max_graphs=max_graphs,
+            fairness_config=fairness_config,
         )
         print(f"Saved GraphSVX hyperparameters to {output_path}")
         return
@@ -700,6 +899,7 @@ def main(argv: Optional[List[str]] = None) -> None:  # pragma: no cover - CLI he
         precomputed_hparams=precomputed_lookup,
         precomputed_source=precomputed_source,
         max_graphs=max_graphs,
+        fairness_config=fairness_config,
     )
 
     output_path = Path("graphsvx_results.json")
