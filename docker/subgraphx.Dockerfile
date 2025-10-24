@@ -51,7 +51,9 @@ RUN pip install --no-cache-dir \
 
 RUN pip install --no-cache-dir torch_geometric==2.5.3
 
-RUN pip install --no-cache-dir rdkit-pypi==2023.9.6
+# RDKit builds periodically disappear for specific Python/CUDA combos, so pin to the latest
+# available wheel for CPython 3.10 on manylinux (2022.9.x) and keep NumPy < 2 to avoid ABI breakage.
+RUN pip install --no-cache-dir rdkit-pypi==2022.9.5
 
 RUN pip install --no-cache-dir dive-into-graphs
 
