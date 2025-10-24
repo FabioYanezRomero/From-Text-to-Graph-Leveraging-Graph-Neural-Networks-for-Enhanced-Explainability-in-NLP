@@ -65,3 +65,22 @@ def export_minimal_size_histogram(
         handler.write("size,count\n")
         for size, count in histogram:
             handler.write(f"{size},{count}\n")
+
+
+def export_agreement_json(
+    entries: List[dict],
+    output_path: Path,
+) -> None:
+    ensure_parent(output_path)
+    output_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+
+
+def export_agreement_csv(
+    entries: List[dict],
+    output_path: Path,
+) -> None:
+    if pd is None:  # pragma: no cover
+        raise RuntimeError("pandas is required to export CSV agreement summaries.")
+    df = summaries_to_dataframe(entries)
+    ensure_parent(output_path)
+    df.to_csv(output_path, index=False)

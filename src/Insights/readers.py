@@ -5,7 +5,7 @@ import csv
 import json
 import pickle
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 try:
     import torch
@@ -21,6 +21,15 @@ from src.explain.gnn.config import ExplainerRequest
 from src.explain.gnn.model_loader import load_graph_split, load_gnn_model
 
 from .records import Coalition, ExplanationRecord, RelatedPrediction
+
+
+def _compute_is_correct(label: Optional[object], predicted: Optional[object]) -> Optional[bool]:
+    if label is None or predicted is None:
+        return None
+    try:
+        return int(label) == int(predicted)
+    except (TypeError, ValueError):
+        return label == predicted
 
 
 def _resolve_path(raw: str, base_dir: Optional[Path]) -> Path:
@@ -91,15 +100,21 @@ def load_graphsvx_records(
             coalitions = _read_coalitions(resolved)
 
         prediction = item.get("prediction") or {}
+        label = item.get("label")
+        predicted_class = prediction.get("class")
+        is_correct = item.get("is_correct")
+        if is_correct is None:
+            is_correct = _compute_is_correct(label, predicted_class)
         record = ExplanationRecord(
             dataset=dataset,
             graph_type=graph_type,
             method="graphsvx",
             run_id=run_id,
             graph_index=item.get("graph_index"),
-            label=item.get("label"),
-            prediction_class=prediction.get("class"),
+            label=label,
+            prediction_class=predicted_class,
             prediction_confidence=prediction.get("confidence"),
+            is_correct=is_correct,
             num_nodes=item.get("num_nodes"),
             num_edges=item.get("num_edges"),
             node_importance=item.get("node_importance"),
@@ -237,15 +252,21 @@ def load_graphsvx_run_records(
         if torch is not None and isinstance(importance, torch.Tensor):
             importance = importance.tolist()
 
+        label = item.label
+        predicted_class = prediction.get("class")
+        is_correct = getattr(item, "is_correct", None)
+        if is_correct is None:
+            is_correct = _compute_is_correct(label, predicted_class)
         record = ExplanationRecord(
             dataset=dataset,
             graph_type=graph_type,
             method=method,
             run_id=run_id,
             graph_index=item.graph_index,
-            label=item.label,
-            prediction_class=prediction.get("class"),
+            label=label,
+            prediction_class=predicted_class,
             prediction_confidence=prediction.get("confidence"),
+            is_correct=is_correct,
             num_nodes=explanation.get("num_nodes"),
             num_edges=explanation.get("num_edges"),
             node_importance=importance,
@@ -289,15 +310,21 @@ def load_subgraphx_records(
 
     records: List[ExplanationRecord] = []
     for item in raw_items:
+        label = item.get("label")
+        prediction_class = item.get("prediction_class")
+        is_correct = item.get("is_correct")
+        if is_correct is None:
+            is_correct = _compute_is_correct(label, prediction_class)
         record = ExplanationRecord(
             dataset=dataset,
             graph_type=graph_type,
             method="subgraphx",
             run_id=run_id,
             graph_index=item.get("graph_index"),
-            label=item.get("label"),
-            prediction_class=None,
-            prediction_confidence=None,
+            label=label,
+            prediction_class=prediction_class,
+            prediction_confidence=item.get("prediction_confidence"),
+            is_correct=is_correct,
             num_nodes=item.get("num_nodes"),
             num_edges=item.get("num_edges"),
             related_prediction=RelatedPrediction.from_mapping(item.get("related_prediction")),
@@ -534,6 +561,9 @@ def load_subgraphx_run_records(
         pred_entry = predictions.get(item.graph_index)
         prediction_class = pred_entry[0] if pred_entry else None
         prediction_confidence = pred_entry[1] if pred_entry else None
+        is_correct = getattr(item, "is_correct", None)
+        if is_correct is None:
+            is_correct = _compute_is_correct(item.label, prediction_class)
 
         record = ExplanationRecord(
             dataset=dataset,
@@ -544,6 +574,7 @@ def load_subgraphx_run_records(
             label=item.label,
             prediction_class=prediction_class,
             prediction_confidence=prediction_confidence,
+            is_correct=is_correct,
             num_nodes=item.num_nodes,
             num_edges=item.num_edges,
             node_importance=None,
@@ -566,4 +597,76 @@ def discover_subgraphx_runs(root: Path) -> List[Path]:
     for results_path in root.rglob("results.pkl"):
         if results_path.parent.parent.name == "subgraphx":
             candidates.add(results_path.parent)
+    return sorted(candidates)
+
+
+def _load_llm_json(path: Path) -> List[Mapping[str, Any]]:
+    with path.open("r", encoding="utf-8") as handler:
+        payload = json.load(handler)
+    if not isinstance(payload, list):
+        raise ValueError(f"TokenSHAP records JSON must contain a list of records: {path}")
+    return payload
+
+
+def _load_llm_pickle(path: Path) -> List[Mapping[str, Any]]:
+    with path.open("rb") as handler:
+        payload = pickle.load(handler)
+    if isinstance(payload, list):
+        if payload and isinstance(payload[0], ExplanationRecord):
+            return [record.to_dict() for record in payload]  # type: ignore[attr-defined]
+        if payload and isinstance(payload[0], Mapping):
+            return list(payload)  # type: ignore[arg-type]
+    raise ValueError(f"Unsupported TokenSHAP pickle payload: {path}")
+
+
+def load_llm_records(
+    path: Path,
+    *,
+    dataset: Optional[str] = None,
+    graph_type: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> List[ExplanationRecord]:
+    """
+    Load ExplanationRecords produced by TokenSHAP LLM explainers.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"LLM records file not found: {path}")
+
+    if path.suffix.lower() == ".json":
+        raw_items = _load_llm_json(path)
+    elif path.suffix.lower() in {".pkl", ".pickle"}:
+        raw_items = _load_llm_pickle(path)
+    else:
+        raise ValueError(f"Unsupported TokenSHAP record format: {path.suffix}")
+
+    records: List[ExplanationRecord] = []
+    for item in raw_items:
+        if isinstance(item, ExplanationRecord):
+            record = item
+        else:
+            record = ExplanationRecord.from_mapping(item)
+        if dataset:
+            record.dataset = dataset
+        if graph_type:
+            record.graph_type = graph_type
+        if run_id:
+            record.run_id = run_id
+        if record.graph_type is None:
+            record.graph_type = "tokens"
+        if record.is_correct is None:
+            record.is_correct = _compute_is_correct(record.label, record.prediction_class)
+        records.append(record)
+    return records
+
+
+def discover_llm_records(root: Path) -> List[Path]:
+    """
+    Discover TokenSHAP record files (JSON or pickle) beneath a root directory.
+    """
+    root = Path(root)
+    candidates: Set[Path] = set()
+    for pattern in ("*_records.json", "*_records.pkl", "*_records.pickle"):
+        for candidate in root.rglob(pattern):
+            candidates.add(candidate)
     return sorted(candidates)

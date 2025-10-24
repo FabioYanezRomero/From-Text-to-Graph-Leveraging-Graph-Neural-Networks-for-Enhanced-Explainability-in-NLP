@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import itertools
+import math
 
 import networkx as nx
 
@@ -115,6 +116,65 @@ def deletion_curve(record: ExplanationRecord, *, normalize: bool = True) -> Curv
 
     auc = _compute_auc(curve, max_size=max_size)
     return CurveResult(values=curve, origin=origin, normalized=normalize, auc=auc)
+
+
+def _coerce_sequence(values: Optional[Sequence[float]]) -> List[float]:
+    cleaned: List[float] = []
+    if values is None:
+        return cleaned
+    for value in values:
+        try:
+            cleaned.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return cleaned
+
+
+def _monotonicity_score(values: Sequence[float], *, direction: str) -> Optional[float]:
+    if not values or len(values) < 2:
+        return None
+    comparisons = 0
+    satisfied = 0
+    tolerance = 1e-9
+    for previous, current in zip(values, values[1:]):
+        comparisons += 1
+        if direction == "non_decreasing":
+            if current + tolerance >= previous:
+                satisfied += 1
+        elif direction == "non_increasing":
+            if current - tolerance <= previous:
+                satisfied += 1
+        else:
+            raise ValueError(f"Unsupported monotonicity direction: {direction}")
+    if comparisons == 0:
+        return None
+    return satisfied / comparisons
+
+
+def _monotonicity_metrics(record: ExplanationRecord) -> Dict[str, Optional[float]]:
+    maskout_drop = _coerce_sequence(record.related_prediction.maskout_progression_drop)
+    maskout_conf = _coerce_sequence(record.related_prediction.maskout_progression_confidence)
+    suff_conf = _coerce_sequence(record.related_prediction.sufficiency_progression_confidence)
+    suff_drop = _coerce_sequence(record.related_prediction.sufficiency_progression_drop)
+
+    metrics = {
+        "maskout_drop_monotonicity": _monotonicity_score(maskout_drop, direction="non_decreasing") if maskout_drop else None,
+        "maskout_conf_monotonicity": _monotonicity_score(maskout_conf, direction="non_increasing") if maskout_conf else None,
+        "sufficiency_conf_monotonicity": _monotonicity_score(suff_conf, direction="non_decreasing") if suff_conf else None,
+        "sufficiency_drop_monotonicity": _monotonicity_score(suff_drop, direction="non_increasing") if suff_drop else None,
+    }
+
+    available = [value for value in metrics.values() if value is not None]
+    metrics["faithfulness_monotonicity"] = (sum(available) / len(available)) if available else None
+    return metrics
+
+
+def robustness_score(record: ExplanationRecord) -> Optional[float]:
+    origin = record.related_prediction.origin
+    maskout = record.related_prediction.maskout
+    if origin in (None, 0) or maskout is None:
+        return None
+    return 1.0 - (maskout / origin)
 
 
 def _normalised_drop(baseline: Optional[float], value: Optional[float], *, normalise: bool = True) -> Optional[float]:
@@ -340,6 +400,14 @@ def summarize_record(
     insertion = insertion_curve(record)
     deletion = deletion_curve(record)
 
+    origin_conf = record.related_prediction.origin
+    masked_conf = record.related_prediction.masked
+    maskout_conf = record.related_prediction.maskout
+    masked_delta = origin_conf - masked_conf if origin_conf is not None and masked_conf is not None else None
+    maskout_delta = origin_conf - maskout_conf if origin_conf is not None and maskout_conf is not None else None
+    robustness = robustness_score(record)
+    monotonicity = _monotonicity_metrics(record)
+
     summary: Dict[str, Any] = {
         "dataset": record.dataset,
         "graph_type": record.graph_type,
@@ -389,6 +457,13 @@ def summarize_record(
         "sufficiency_progression_drop": list(record.related_prediction.sufficiency_progression_drop)
         if record.related_prediction.sufficiency_progression_drop is not None
         else None,
+        "masked_delta": masked_delta,
+        "maskout_delta": maskout_delta,
+        "robustness_score": robustness,
+        "maskout_drop_monotonicity": monotonicity["maskout_drop_monotonicity"],
+        "maskout_conf_monotonicity": monotonicity["maskout_conf_monotonicity"],
+        "sufficiency_conf_monotonicity": monotonicity["sufficiency_conf_monotonicity"],
+        "sufficiency_drop_monotonicity": monotonicity["sufficiency_drop_monotonicity"],
     }
 
     if node_text:
@@ -424,6 +499,7 @@ def summarize_record(
     summary["fidelity_plus"] = fidelity_plus(record)
     summary["fidelity_minus"] = fidelity_minus(record)
     summary["faithfulness"] = faithfulness(record)
+    summary["faithfulness_monotonicity"] = monotonicity["faithfulness_monotonicity"]
 
     return summary
 
@@ -447,3 +523,178 @@ def summarize_records(
         )
         summaries.append(summary)
     return summaries
+
+
+def _limit_ranking(values: Sequence[int], k: Optional[int]) -> List[int]:
+    if k is not None:
+        return list(values[:k])
+    return list(values)
+
+
+def _ranking_positions(values: Sequence[int]) -> Dict[int, int]:
+    return {value: index + 1 for index, value in enumerate(values)}
+
+
+def rank_biased_overlap(
+    ranking_a: Sequence[int],
+    ranking_b: Sequence[int],
+    *,
+    p: float = 0.9,
+    k: Optional[int] = None,
+) -> Optional[float]:
+    if not ranking_a or not ranking_b:
+        return None
+    if not (0 < p < 1):
+        return None
+
+    limited_a = _limit_ranking(ranking_a, k)
+    limited_b = _limit_ranking(ranking_b, k)
+    depth = max(len(limited_a), len(limited_b))
+    if depth == 0:
+        return None
+
+    seen_a: set[int] = set()
+    seen_b: set[int] = set()
+    cumulative = 0.0
+
+    for depth_index in range(1, depth + 1):
+        if depth_index <= len(limited_a):
+            seen_a.add(limited_a[depth_index - 1])
+        if depth_index <= len(limited_b):
+            seen_b.add(limited_b[depth_index - 1])
+        overlap = len(seen_a & seen_b) / depth_index
+        cumulative += overlap * (p ** (depth_index - 1))
+
+    return (1 - p) * cumulative
+
+
+def spearman_rank_correlation(
+    ranking_a: Sequence[int],
+    ranking_b: Sequence[int],
+    *,
+    k: Optional[int] = None,
+) -> Optional[float]:
+    limited_a = _limit_ranking(ranking_a, k)
+    limited_b = _limit_ranking(ranking_b, k)
+    if not limited_a or not limited_b:
+        return None
+
+    union = set(limited_a) | set(limited_b)
+    if len(union) < 2:
+        return None
+
+    pos_a = _ranking_positions(limited_a)
+    pos_b = _ranking_positions(limited_b)
+    default_rank = max(len(limited_a), len(limited_b)) + 1
+
+    ranks_a = [pos_a.get(node, default_rank) for node in union]
+    ranks_b = [pos_b.get(node, default_rank) for node in union]
+
+    mean_a = sum(ranks_a) / len(ranks_a)
+    mean_b = sum(ranks_b) / len(ranks_b)
+
+    numerator = sum((ra - mean_a) * (rb - mean_b) for ra, rb in zip(ranks_a, ranks_b))
+    denom_a = math.sqrt(sum((ra - mean_a) ** 2 for ra in ranks_a))
+    denom_b = math.sqrt(sum((rb - mean_b) ** 2 for rb in ranks_b))
+    denominator = denom_a * denom_b
+    if denominator == 0:
+        return None
+    return numerator / denominator
+
+
+def kendall_rank_correlation(
+    ranking_a: Sequence[int],
+    ranking_b: Sequence[int],
+    *,
+    k: Optional[int] = None,
+) -> Optional[float]:
+    limited_a = _limit_ranking(ranking_a, k)
+    limited_b = _limit_ranking(ranking_b, k)
+    if not limited_a or not limited_b:
+        return None
+
+    union = list(set(limited_a) | set(limited_b))
+    if len(union) < 2:
+        return None
+
+    pos_a = _ranking_positions(limited_a)
+    pos_b = _ranking_positions(limited_b)
+    default_rank = max(len(limited_a), len(limited_b)) + 1
+
+    concordant = 0
+    discordant = 0
+
+    for left, right in itertools.combinations(union, 2):
+        diff_a = pos_a.get(left, default_rank) - pos_a.get(right, default_rank)
+        diff_b = pos_b.get(left, default_rank) - pos_b.get(right, default_rank)
+        if diff_a == 0 or diff_b == 0:
+            continue
+        if diff_a > 0 and diff_b > 0:
+            concordant += 1
+        elif diff_a < 0 and diff_b < 0:
+            concordant += 1
+        else:
+            discordant += 1
+
+    total = concordant + discordant
+    if total == 0:
+        return None
+    return (concordant - discordant) / total
+
+
+def feature_overlap_ratio(
+    ranking_a: Sequence[int],
+    ranking_b: Sequence[int],
+    *,
+    k: Optional[int] = None,
+) -> Optional[float]:
+    limited_a = _limit_ranking(ranking_a, k)
+    limited_b = _limit_ranking(ranking_b, k)
+    if not limited_a or not limited_b:
+        return None
+    intersection = len(set(limited_a) & set(limited_b))
+    baseline = min(len(limited_a), len(limited_b))
+    if baseline == 0:
+        return None
+    return intersection / baseline
+
+
+def pairwise_agreement(
+    records: Iterable[ExplanationRecord],
+    *,
+    top_k: int = 10,
+    rbo_p: float = 0.9,
+) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[Any, Any, Any, Any], List[ExplanationRecord]] = {}
+    for record in records:
+        key = (record.dataset, record.graph_index, record.label, record.is_correct)
+        grouped.setdefault(key, []).append(record)
+
+    entries: List[Dict[str, Any]] = []
+    for key, recs in grouped.items():
+        if len(recs) < 2:
+            continue
+        for left, right in itertools.combinations(recs, 2):
+            top_left = top_nodes(left, k=top_k)
+            top_right = top_nodes(right, k=top_k)
+            entry = {
+                "dataset": left.dataset,
+                "graph_index": left.graph_index,
+                "label": left.label,
+                "is_correct": left.is_correct,
+                "method_a": left.method,
+                "method_b": right.method,
+                "graph_type_a": left.graph_type,
+                "graph_type_b": right.graph_type,
+                "run_id_a": left.run_id,
+                "run_id_b": right.run_id,
+                "top_k": top_k,
+                "overlap_count": len(set(top_left) & set(top_right)),
+                "rbo": rank_biased_overlap(top_left, top_right, p=rbo_p, k=top_k),
+                "spearman": spearman_rank_correlation(top_left, top_right, k=top_k),
+                "kendall": kendall_rank_correlation(top_left, top_right, k=top_k),
+                "feature_overlap_ratio": feature_overlap_ratio(top_left, top_right, k=top_k),
+                "stability_jaccard": stability_jaccard(left, right, k=top_k),
+            }
+            entries.append(entry)
+    return entries

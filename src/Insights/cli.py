@@ -7,17 +7,22 @@ from typing import Callable, Dict, List, Sequence
 
 import networkx as nx
 
-from .metrics import summarize_records
+from .metrics import pairwise_agreement, summarize_records
 from .providers import GraphArtifactProvider
+from .llm_providers import LLMExplanationProvider
 from .readers import (
+    discover_llm_records,
     discover_graphsvx_runs,
     discover_subgraphx_runs,
+    load_llm_records,
     load_graphsvx_records,
     load_graphsvx_run_records,
     load_subgraphx_records,
     load_subgraphx_run_records,
 )
 from .reporting import (
+    export_agreement_csv,
+    export_agreement_json,
     export_minimal_size_histogram,
     export_summaries_csv,
     export_summaries_json,
@@ -134,12 +139,30 @@ def collect_records(args: argparse.Namespace) -> List[ExplanationRecord]:
             )
             records.extend(loaded)
 
+    llm_paths: List[Path] = [Path(p) for p in getattr(args, "llm_records", [])]
+    if getattr(args, "llm_root", None):
+        llm_paths.extend(discover_llm_records(Path(args.llm_root)))
+
+    seen_llm: set[Path] = set()
+    for raw_path in llm_paths:
+        resolved = raw_path.resolve()
+        if resolved in seen_llm or not resolved.exists():
+            continue
+        seen_llm.add(resolved)
+        loaded = load_llm_records(
+            resolved,
+            dataset=args.llm_dataset,
+            graph_type=args.llm_graph_type,
+            run_id=args.llm_run_id,
+        )
+        records.extend(loaded)
+
     return records
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Summarise explainability artefacts from GraphSVX/SubgraphX.",
+        description="Summarise explainability artefacts from GraphSVX/SubgraphX/TokenSHAP.",
     )
     parser.add_argument(
         "--graphsvx-json",
@@ -190,6 +213,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--subgraphx-graph-type", help="Override graph type for SubgraphX records.")
     parser.add_argument("--subgraphx-run-id", help="Override run id for SubgraphX records.")
     parser.add_argument(
+        "--llm-records",
+        nargs="*",
+        default=[],
+        help="Paths to TokenSHAP LLM record files (JSON or pickle).",
+    )
+    parser.add_argument(
+        "--llm-root",
+        help="Root directory to discover TokenSHAP record files automatically.",
+    )
+    parser.add_argument("--llm-dataset", help="Override dataset name for LLM records.")
+    parser.add_argument("--llm-graph-type", help="Override graph type for LLM records.")
+    parser.add_argument("--llm-run-id", help="Override run id for LLM records.")
+    parser.add_argument(
         "--coalition-base",
         help="Base directory to resolve GraphSVX coalition CSV paths against.",
     )
@@ -208,6 +244,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-json", help="Path to write detailed record summaries (JSON).")
     parser.add_argument("--output-csv", help="Path to write summaries as CSV (requires pandas).")
     parser.add_argument("--minimal-csv", help="Path to write minimal coalition size histogram CSV.")
+    parser.add_argument(
+        "--agreement-json",
+        help="Path to write pairwise agreement metrics across explainers (JSON).",
+    )
+    parser.add_argument(
+        "--agreement-csv",
+        help="Path to write pairwise agreement metrics across explainers (CSV, requires pandas).",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -228,6 +272,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip recomputing predictions for SubgraphX shards (avoids large tensor loads).",
     )
+    parser.add_argument(
+        "--rbo-p",
+        type=float,
+        default=0.9,
+        help="Rank-biased overlap persistence parameter (0 < p < 1).",
+    )
     return parser
 
 
@@ -239,7 +289,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not records:
         parser.error("No explanations found. Provide at least one JSON path.")
 
-    graph_provider = None
+    graph_provider: GraphArtifactProvider | None = None
     centrality_funcs: Dict[str, Callable[[nx.Graph], Dict[int, float]]] | None = None
     if not args.disable_structure:
         try:
@@ -254,12 +304,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             graph_provider = None
             centrality_funcs = None
 
+    llm_provider = LLMExplanationProvider()
+
+    def _graph_lookup(record: ExplanationRecord):
+        if graph_provider is None:
+            return None
+        try:
+            return graph_provider(record)
+        except Exception:
+            return None
+
+    def combined_provider(record: ExplanationRecord):
+        graph_info = _graph_lookup(record)
+        if graph_info is not None:
+            return graph_info
+        return llm_provider(record)
+
+    provider_callable = combined_provider if (graph_provider or llm_provider) else (lambda _: None)
+    centrality_callable = centrality_funcs if graph_provider and centrality_funcs else None
+
     summaries = summarize_records(
         records,
         sufficiency_threshold=args.sufficiency_threshold,
         top_k=args.top_k,
-        graph_provider=graph_provider if graph_provider else lambda _: None,
-        centrality_funcs=centrality_funcs,
+        graph_provider=provider_callable,
+        centrality_funcs=centrality_callable,
     )
 
     if args.dry_run or (not args.output_json and not args.output_csv):
@@ -292,6 +361,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             Path(args.minimal_csv),
             threshold=args.sufficiency_threshold,
         )
+
+    agreement_entries = pairwise_agreement(
+        records,
+        top_k=args.top_k,
+        rbo_p=args.rbo_p,
+    )
+
+    if args.agreement_json:
+        export_agreement_json(agreement_entries, Path(args.agreement_json))
+
+    if args.agreement_csv:
+        try:
+            export_agreement_csv(agreement_entries, Path(args.agreement_csv))
+        except RuntimeError as exc:
+            parser.error(str(exc))
+
+    if args.dry_run and agreement_entries:
+        print(f"Computed {len(agreement_entries)} pairwise agreement entries.", file=sys.stdout)
 
     return 0
 

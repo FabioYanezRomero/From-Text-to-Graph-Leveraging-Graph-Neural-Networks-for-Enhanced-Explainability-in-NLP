@@ -138,6 +138,69 @@ class ExplanationRecord:
     coalitions: List[Coalition] = field(default_factory=list)
     extras: Dict[str, Any] = field(default_factory=dict)
 
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any]) -> "ExplanationRecord":
+        """
+        Reconstruct an ExplanationRecord from a JSON-friendly mapping.
+        """
+        if payload is None:
+            raise ValueError("Cannot build ExplanationRecord from None payload.")
+
+        dataset = payload.get("dataset")
+        graph_type = payload.get("graph_type")
+        method = payload.get("method")
+        run_id = payload.get("run_id")
+        graph_index = payload.get("graph_index")
+        label = payload.get("label")
+        prediction_class = payload.get("prediction_class")
+        prediction_confidence = payload.get("prediction_confidence")
+        is_correct = payload.get("is_correct")
+        num_nodes = payload.get("num_nodes")
+        num_edges = payload.get("num_edges")
+        node_importance = payload.get("node_importance")
+        top_nodes = payload.get("top_nodes") or ()
+        hyperparams = payload.get("hyperparams") or {}
+        extras = payload.get("extras") or {}
+
+        related_prediction = RelatedPrediction.from_mapping(payload.get("related_prediction"))
+
+        coalitions_raw = payload.get("coalitions") or []
+        coalitions: List[Coalition] = []
+        for entry in coalitions_raw:
+            if not isinstance(entry, Mapping):
+                continue
+            nodes_raw = entry.get("nodes") or ()
+            binary_mask_raw = entry.get("binary_mask")
+            coalition = Coalition(
+                nodes=tuple(int(n) for n in nodes_raw),
+                confidence=float(entry.get("confidence", 0.0)),
+                size=int(entry.get("size")) if entry.get("size") is not None else len(nodes_raw),
+                combination_id=entry.get("combination_id"),
+                binary_mask=tuple(int(v) for v in binary_mask_raw) if isinstance(binary_mask_raw, (list, tuple)) else None,
+                metadata=dict(entry.get("metadata") or {}),
+            )
+            coalitions.append(coalition)
+
+        return cls(
+            dataset=dataset,
+            graph_type=graph_type,
+            method=method,
+            run_id=run_id,
+            graph_index=int(graph_index) if graph_index is not None else 0,
+            label=label,
+            prediction_class=prediction_class,
+            prediction_confidence=prediction_confidence,
+            is_correct=is_correct,
+            num_nodes=num_nodes,
+            num_edges=num_edges,
+            node_importance=tuple(node_importance) if isinstance(node_importance, (list, tuple)) else node_importance,
+            top_nodes=tuple(top_nodes),
+            related_prediction=related_prediction,
+            hyperparams=dict(hyperparams),
+            coalitions=coalitions,
+            extras=dict(extras),
+        )
+
     def minimal_coalition(
         self,
         threshold: float,
