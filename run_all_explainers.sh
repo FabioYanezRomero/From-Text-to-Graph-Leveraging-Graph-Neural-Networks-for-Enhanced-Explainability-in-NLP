@@ -145,16 +145,16 @@ main() {
     # run_graphsvx "sst2" "stanfordnlp" "window" "validation"
 
     # GNN explainers - SubgraphX (4 runs)
-    echo ">>> Running SubgraphX on AG News and SST-2..."
-    run_subgraphx "ag_news" "SetFit" "constituency" "test"
-    run_subgraphx "ag_news" "SetFit" "syntactic" "test"
-    run_subgraphx "sst2" "stanfordnlp" "constituency" "validation"
-    run_subgraphx "sst2" "stanfordnlp" "syntactic" "validation"
+    # echo ">>> Running SubgraphX on AG News and SST-2..."
+    # run_subgraphx "ag_news" "SetFit" "constituency" "test"
+    # run_subgraphx "ag_news" "SetFit" "syntactic" "test"
+    # run_subgraphx "sst2" "stanfordnlp" "constituency" "validation"
+    # run_subgraphx "sst2" "stanfordnlp" "syntactic" "validation"
 
     # LLM explainers - TokenSHAP (2 runs)
-    # echo ">>> Running TokenSHAP on AG News and SST-2..."
+    echo ">>> Running TokenSHAP on SST-2..."
     # run_tokenshap "setfit/ag_news"
-    # run_tokenshap "stanfordnlp/sst2"
+    run_tokenshap "stanfordnlp/sst2"
 
     echo ""
     echo "===================================================================="

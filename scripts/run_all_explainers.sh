@@ -45,19 +45,19 @@ main() {
     cd "${ROOT_DIR}" || exit 1
 
     # GNN explainers
-    run_graphsvx "ag_news" "SetFit" "skipgrams" "test"
-    run_graphsvx "ag_news" "SetFit" "window" "test"
-    run_graphsvx "sst2" "stanfordnlp" "skipgrams" "validation"
+    # run_graphsvx "ag_news" "SetFit" "skipgrams" "test"
+    # run_graphsvx "ag_news" "SetFit" "window" "test"
+    # run_graphsvx "sst2" "stanfordnlp" "skipgrams" "validation"
     run_graphsvx "sst2" "stanfordnlp" "window" "validation"
 
-    run_subgraphx "ag_news" "SetFit" "constituency" "test"
-    run_subgraphx "ag_news" "SetFit" "syntactic" "test"
-    run_subgraphx "sst2" "stanfordnlp" "constituency" "validation"
-    run_subgraphx "sst2" "stanfordnlp" "syntactic" "validation"
+    # run_subgraphx "ag_news" "SetFit" "constituency" "test"
+    # run_subgraphx "ag_news" "SetFit" "syntactic" "test"
+    # run_subgraphx "sst2" "stanfordnlp" "constituency" "validation"
+    # run_subgraphx "sst2" "stanfordnlp" "syntactic" "validation"
 
     # LLM explainers
-    run_tokenshap "setfit/ag_news"
-    run_tokenshap "stanfordnlp/sst2"
+    # run_tokenshap "setfit/ag_news"
+    # run_tokenshap "stanfordnlp/sst2"
 }
 
 main "$@"

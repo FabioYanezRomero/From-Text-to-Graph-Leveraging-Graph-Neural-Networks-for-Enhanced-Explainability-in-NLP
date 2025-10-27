@@ -68,10 +68,73 @@ def _read_coalitions(csv_path: Path) -> List[Coalition]:
                 binary_mask=mask,
                 size=int(size_raw) if size_raw not in (None, "", "None") else None,
             )
-
             coalitions.append(coalition)
     coalitions.sort(key=lambda c: (c.size, -c.confidence, c.combination_id or 0))
     return coalitions
+
+
+def _graphsvx_item_to_record(
+    item: Mapping[str, Any],
+    *,
+    dataset: str,
+    graph_type: Optional[str],
+    run_id: Optional[str],
+    coalition_base: Optional[Path],
+    method: str = "graphsvx",
+    extra_extras: Optional[Mapping[str, Any]] = None,
+) -> ExplanationRecord:
+    coalitions_path = item.get("coalitions_path")
+    coalitions: List[Coalition] = []
+    if coalitions_path:
+        resolved = _resolve_path(coalitions_path, coalition_base)
+        coalitions = _read_coalitions(resolved)
+
+    prediction = item.get("prediction") or {}
+    label = item.get("label")
+    predicted_class = prediction.get("class")
+    is_correct = item.get("is_correct")
+    if is_correct is None:
+        is_correct = _compute_is_correct(label, predicted_class)
+
+    extras = {
+        key: value
+        for key, value in item.items()
+        if key
+        not in {
+            "graph_index",
+            "label",
+            "num_nodes",
+            "num_edges",
+            "prediction",
+            "node_importance",
+            "top_nodes",
+            "related_prediction",
+            "hyperparams",
+            "coalitions_path",
+        }
+    }
+    if extra_extras:
+        extras.update(extra_extras)
+
+    return ExplanationRecord(
+        dataset=dataset,
+        graph_type=graph_type,
+        method=method,
+        run_id=run_id,
+        graph_index=item.get("graph_index"),
+        label=label,
+        prediction_class=predicted_class,
+        prediction_confidence=prediction.get("confidence"),
+        is_correct=is_correct,
+        num_nodes=item.get("num_nodes"),
+        num_edges=item.get("num_edges"),
+        node_importance=item.get("node_importance"),
+        top_nodes=tuple(item.get("top_nodes", [])),
+        related_prediction=RelatedPrediction.from_mapping(item.get("related_prediction")),
+        hyperparams=item.get("hyperparams") or {},
+        coalitions=coalitions,
+        extras=extras,
+    )
 
 
 def load_graphsvx_records(
@@ -93,52 +156,12 @@ def load_graphsvx_records(
 
     records: List[ExplanationRecord] = []
     for item in raw_items:
-        coalitions_path = item.get("coalitions_path")
-        coalitions = []
-        if coalitions_path:
-            resolved = _resolve_path(coalitions_path, coalition_base or json_path.parent)
-            coalitions = _read_coalitions(resolved)
-
-        prediction = item.get("prediction") or {}
-        label = item.get("label")
-        predicted_class = prediction.get("class")
-        is_correct = item.get("is_correct")
-        if is_correct is None:
-            is_correct = _compute_is_correct(label, predicted_class)
-        record = ExplanationRecord(
+        record = _graphsvx_item_to_record(
+            item,
             dataset=dataset,
             graph_type=graph_type,
-            method="graphsvx",
             run_id=run_id,
-            graph_index=item.get("graph_index"),
-            label=label,
-            prediction_class=predicted_class,
-            prediction_confidence=prediction.get("confidence"),
-            is_correct=is_correct,
-            num_nodes=item.get("num_nodes"),
-            num_edges=item.get("num_edges"),
-            node_importance=item.get("node_importance"),
-            top_nodes=tuple(item.get("top_nodes", [])),
-            related_prediction=RelatedPrediction.from_mapping(item.get("related_prediction")),
-            hyperparams=item.get("hyperparams") or {},
-            coalitions=coalitions,
-            extras={
-                key: value
-                for key, value in item.items()
-                if key
-                not in {
-                    "graph_index",
-                    "label",
-                    "num_nodes",
-                    "num_edges",
-                    "prediction",
-                    "node_importance",
-                    "top_nodes",
-                    "related_prediction",
-                    "hyperparams",
-                    "coalitions_path",
-                }
-            },
+            coalition_base=coalition_base or json_path.parent,
         )
         records.append(record)
     return records
@@ -167,23 +190,21 @@ def _infer_context_from_graphsvx_run(run_dir: Path) -> Tuple[Optional[str], Opti
     return dataset, graph_type, run_id
 
 
-def load_graphsvx_run_records(
+def iter_graphsvx_run_records(
     run_dir: Path,
     *,
     dataset: Optional[str] = None,
     graph_type: Optional[str] = None,
     run_id: Optional[str] = None,
-) -> List[ExplanationRecord]:
+    prefer_summary: bool = True,
+) -> Iterator[ExplanationRecord]:
     """
-    Load ExplanationRecord instances from a GraphSVX run directory produced under outputs/gnn_models.
+    Yield ExplanationRecord instances from a GraphSVX run directory produced under outputs/gnn_models.
 
-    The directory is expected to contain ``results.pkl`` and optionally ``summary.json``.
+    The directory is expected to contain ``summary.json`` and optionally ``results.pkl`` for legacy support.
     """
     run_dir = Path(run_dir)
     results_path = run_dir / "results.pkl"
-    if not results_path.exists():
-        raise FileNotFoundError(f"GraphSVX run directory missing results.pkl: {run_dir}")
-
     summary_path = run_dir / "summary.json"
     summary: Dict[str, Any] = {}
     if summary_path.exists():
@@ -202,6 +223,32 @@ def load_graphsvx_run_records(
     split = summary.get("split")
     shard_index = summary.get("shard_index")
     num_shards = summary.get("num_shards")
+    backbone = summary.get("backbone")
+
+    graphs = summary.get("graphs") if summary_path.exists() else None
+    if prefer_summary and isinstance(graphs, list):
+        for item in graphs:
+            extra_extras = {
+                "split": split,
+                "backbone": backbone,
+                "shard_index": shard_index,
+                "num_shards": num_shards,
+                "hyperparam_source": item.get("hyperparam_source"),
+            }
+            record = _graphsvx_item_to_record(
+                item,
+                dataset=dataset,
+                graph_type=graph_type,
+                run_id=run_id,
+                coalition_base=run_dir,
+                method=method,
+                extra_extras=extra_extras,
+            )
+            yield record
+        return
+
+    if not results_path.exists():
+        raise FileNotFoundError(f"GraphSVX run directory missing results.pkl: {run_dir}")
 
     # Import locally to avoid heavy module import unless needed.
     from src.explain.gnn.graphsvx.main import GraphSVXResult  # type: ignore
@@ -227,7 +274,6 @@ def load_graphsvx_run_records(
             leave=False,
         )
 
-    records: List[ExplanationRecord] = []
     for item in iterator:
         explanation: Dict[str, Any] = item.explanation or {}
         prediction = explanation.get("original_prediction") or {}
@@ -276,8 +322,29 @@ def load_graphsvx_run_records(
             coalitions=coalitions,
             extras=extras,
         )
-        records.append(record)
-    return records
+        yield record
+
+
+def load_graphsvx_run_records(
+    run_dir: Path,
+    *,
+    dataset: Optional[str] = None,
+    graph_type: Optional[str] = None,
+    run_id: Optional[str] = None,
+    prefer_summary: bool = True,
+) -> List[ExplanationRecord]:
+    """
+    Load ExplanationRecord instances from a GraphSVX run directory produced under outputs/gnn_models.
+    """
+    return list(
+        iter_graphsvx_run_records(
+            run_dir,
+            dataset=dataset,
+            graph_type=graph_type,
+            run_id=run_id,
+            prefer_summary=prefer_summary,
+        )
+    )
 
 
 def discover_graphsvx_runs(root: Path) -> List[Path]:
