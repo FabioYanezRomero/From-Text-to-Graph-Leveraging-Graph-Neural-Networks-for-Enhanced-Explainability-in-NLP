@@ -560,8 +560,11 @@ def token_shap_explain(
 
             progression_conf: List[float] = []
             progression_drop: List[float] = []
+            sufficiency_conf: List[float] = []
+            sufficiency_drop: List[float] = []
             if origin_confidence is not None and origin_class is not None and valid_top_indices:
                 removal: List[int] = []
+                addition: List[int] = []
                 for node_idx in valid_top_indices:
                     if node_idx < 0 or node_idx >= len(tokens):
                         continue
@@ -569,11 +572,26 @@ def token_shap_explain(
                     filtered = [tok for idx_tok, tok in enumerate(tokens) if idx_tok not in removal]
                     masked_prompt_k = splitter.join(filtered)
                     _, _, dist_k = hf_model.predict(masked_prompt_k)
-                    if dist_k is None or len(dist_k) <= origin_class:
+                    if dist_k is not None and len(dist_k) > origin_class:
+                        conf_k = float(dist_k[origin_class])
+                        progression_conf.append(conf_k)
+                        progression_drop.append(float(origin_confidence - conf_k))
+
+                    addition.append(node_idx)
+                    selected_tokens = [
+                        tokens[idx_tok]
+                        for idx_tok in sorted(addition)
+                        if 0 <= idx_tok < len(tokens)
+                    ]
+                    if not selected_tokens:
                         continue
-                    conf_k = dist_k[origin_class]
-                    progression_conf.append(float(conf_k))
-                    progression_drop.append(float(origin_confidence - conf_k))
+                    suff_prompt_k = splitter.join(selected_tokens)
+                    _, _, dist_add = hf_model.predict(suff_prompt_k)
+                    if dist_add is None or len(dist_add) <= origin_class:
+                        continue
+                    conf_add = float(dist_add[origin_class])
+                    sufficiency_conf.append(conf_add)
+                    sufficiency_drop.append(float(origin_confidence - conf_add))
 
             related_prediction = RelatedPrediction(
                 origin=float(origin_confidence),
@@ -592,6 +610,8 @@ def token_shap_explain(
                 maskout_contrastivity=maskout_contrast,
                 maskout_progression_confidence=tuple(progression_conf) if progression_conf else None,
                 maskout_progression_drop=tuple(progression_drop) if progression_drop else None,
+                sufficiency_progression_confidence=tuple(sufficiency_conf) if sufficiency_conf else None,
+                sufficiency_progression_drop=tuple(sufficiency_drop) if sufficiency_drop else None,
             )
 
             record = _build_record(
