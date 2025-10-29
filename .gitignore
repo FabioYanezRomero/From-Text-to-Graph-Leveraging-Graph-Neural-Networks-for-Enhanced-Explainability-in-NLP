@@ -76,3 +76,4 @@ outputs/
 
 # Large temporary artifacts
 tmp_bigfile
+core.*
