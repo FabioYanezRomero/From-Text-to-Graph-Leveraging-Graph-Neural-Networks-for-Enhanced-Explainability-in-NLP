@@ -10,6 +10,12 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+from src.Analytics.tokens.extract_gnn import GraphTokenResolver
+
 def ensure_subgraphx_stub() -> None:
     """
     Injects a lightweight SubgraphXResult stub so pickle payloads can be loaded
@@ -219,17 +225,69 @@ def format_float_sequence(values: Sequence[float]) -> str:
     return "[" + ", ".join(f"{value:.6f}" for value in values) + "]"
 
 
+def should_filter_constituency(graph_type: Optional[str]) -> bool:
+    if not graph_type:
+        return False
+    return "constituency" in str(graph_type).lower()
+
+
+def is_special_constituency_token(token: Any) -> bool:
+    if not isinstance(token, str):
+        return False
+    stripped = token.strip()
+    return stripped.startswith("«") and stripped.endswith("»")
+
+
 def build_record(
     payload: Dict[str, Any],
     metadata: Dict[str, str],
+    resolver: Optional[GraphTokenResolver] = None,
 ) -> Dict[str, Any]:
     ranked_nodes = extract_ranked_nodes(payload)
     num_nodes, num_edges = extract_graph_stats(payload)
     total_nodes = num_nodes if num_nodes is not None else (len(ranked_nodes) if ranked_nodes else None)
 
     position_ranks: List[float] = []
+    reindexed_nodes: List[int] = list(ranked_nodes)
+
+    if resolver is not None and should_filter_constituency(metadata.get("graph_type")):
+        graph_index = payload.get("graph_index")
+        if graph_index is None:
+            raise ValueError("Missing graph_index in payload required for constituency filtering.")
+        bundle = resolver.resolve(
+            backbone=metadata["backbone"],
+            dataset_raw=metadata["dataset_raw"],
+            split=metadata["split"] or "test",
+            graph_type=metadata["graph_type"],
+            graph_index=int(graph_index),
+        )
+        node_text = bundle.node_text
+        special_indices = {idx for idx, token in enumerate(node_text) if is_special_constituency_token(token)}
+        mapping: Dict[int, int] = {}
+        for original_idx in range(len(node_text)):
+            if original_idx in special_indices:
+                continue
+            mapping[original_idx] = len(mapping)
+
+        filtered_nodes: List[int] = []
+        for idx in ranked_nodes:
+            if idx in special_indices:
+                continue
+            new_idx = mapping.get(idx)
+            if new_idx is None:
+                continue
+            filtered_nodes.append(new_idx)
+
+        reindexed_nodes = filtered_nodes
+        if mapping:
+            total_nodes = len(mapping)
+            num_nodes = len(mapping)
+        else:
+            total_nodes = 0
+            num_nodes = 0
+
     if total_nodes and total_nodes > 0:
-        position_ranks = [node / float(total_nodes) for node in ranked_nodes]
+        position_ranks = [node / float(total_nodes) for node in reindexed_nodes]
 
     record: Dict[str, Any] = {
         "method": metadata["method"],
@@ -249,8 +307,8 @@ def build_record(
         "num_nodes": num_nodes,
         "num_edges": num_edges,
         "total_nodes": total_nodes,
-        "num_ranked_nodes": len(ranked_nodes),
-        "ranked_nodes": format_sequence(ranked_nodes),
+        "num_ranked_nodes": len(reindexed_nodes),
+        "ranked_nodes": format_sequence(reindexed_nodes),
         "ranked_map": format_float_sequence(position_ranks),
     }
     return record
@@ -265,6 +323,7 @@ def process_method_pickles(
     method: str,
     base_dir: Path,
     output_dir: Path,
+    resolver: Optional[GraphTokenResolver],
     limit: Optional[int] = None,
 ) -> List[Path]:
     pickle_paths = discover_individual_pickles(base_dir, method)
@@ -298,7 +357,7 @@ def process_method_pickles(
         ):
             try:
                 payload = load_individual_payload(path, method=method)
-                record = build_record(payload, metadata)
+                record = build_record(payload, metadata, resolver=resolver)
             except Exception as exc:
                 print(f"! Skipping {path} ({exc})")
                 continue
@@ -330,11 +389,12 @@ def process_all_methods(
     methods: Sequence[str],
     base_dir: Path,
     output_dir: Path,
+    resolver: Optional[GraphTokenResolver],
     limit: Optional[int] = None,
 ) -> List[Path]:
     written: List[Path] = []
     for method in tqdm(methods, desc="Processing methods", leave=False, colour="blue"):
-        written.extend(process_method_pickles(method, base_dir, output_dir, limit))
+        written.extend(process_method_pickles(method, base_dir, output_dir, resolver, limit))
     return written
 
 
@@ -351,6 +411,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="outputs/analytics/sequence",
         type=Path,
         help="Directory where CSV files will be written.",
+    )
+    parser.add_argument(
+        "--graph-root",
+        default="outputs/graphs",
+        type=Path,
+        help="Directory containing NetworkX graph artefacts used for token metadata.",
+    )
+    parser.add_argument(
+        "--pyg-root",
+        default="outputs/pyg_graphs",
+        type=Path,
+        help="Directory containing PyG graph artefacts used for token metadata.",
     )
     parser.add_argument(
         "--methods",
@@ -373,13 +445,20 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     base_dir: Path = args.base_dir
     output_dir: Path = args.output_dir
+    graph_root: Path = args.graph_root
+    pyg_root: Path = args.pyg_root
     methods: List[str] = [method.lower() for method in args.methods]
 
     if not base_dir.exists():
         raise FileNotFoundError(f"Base directory not found: {base_dir}")
+    if not graph_root.exists():
+        raise FileNotFoundError(f"Graph root directory not found: {graph_root}")
+    if not pyg_root.exists():
+        raise FileNotFoundError(f"PyG root directory not found: {pyg_root}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    written = process_all_methods(methods, base_dir, output_dir, args.limit)
+    resolver = GraphTokenResolver(graph_root=graph_root, pyg_root=pyg_root)
+    written = process_all_methods(methods, base_dir, output_dir, resolver, args.limit)
     total_rows = 0
     for path in written:
         try:
