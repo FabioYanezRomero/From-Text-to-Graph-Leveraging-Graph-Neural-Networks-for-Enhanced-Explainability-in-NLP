@@ -149,16 +149,20 @@ run_split_tokenshap_shard() {
   fi
 }
 
-for shard in 00 01 02; do
-  run_split_tokenshap_shard \
-    "/app/outputs/insights/news/LLM/SetFit/ag_news" \
-    "token_shap" \
-    "${shard}" \
-    "03"
+token_shap_targets=(
+  "/app/outputs/insights/LLM/SetFit/ag_news token_shap 03"
+  "/app/outputs/insights/LLM/stanfordnlp/sst2 token_shap 03"
+  "/app/outputs/insights/news/LLM/SetFit/ag_news token_shap 03"
+  "/app/outputs/insights/news/LLM/stanfordnlp/sst2 token_shap 03"
+)
 
-  run_split_tokenshap_shard \
-    "/app/outputs/insights/news/LLM/stanfordnlp/sst2" \
-    "token_shap" \
-    "${shard}" \
-    "03"
+for target in "${token_shap_targets[@]}"; do
+  read -r target_dir target_prefix target_total <<<"${target}"
+  for shard in 00 01 02; do
+    run_split_tokenshap_shard \
+      "${target_dir}" \
+      "${target_prefix}" \
+      "${shard}" \
+      "${target_total}"
+  done
 done

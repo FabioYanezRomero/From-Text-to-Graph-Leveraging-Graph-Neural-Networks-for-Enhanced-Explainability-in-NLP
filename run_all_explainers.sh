@@ -153,7 +153,7 @@ main() {
 
     # LLM explainers - TokenSHAP (2 runs)
     echo ">>> Running TokenSHAP on AG News and SST-2..."
-    run_tokenshap "setfit/ag_news"
+    # run_tokenshap "setfit/ag_news"
     run_tokenshap "stanfordnlp/sst2"
 
     echo ""
