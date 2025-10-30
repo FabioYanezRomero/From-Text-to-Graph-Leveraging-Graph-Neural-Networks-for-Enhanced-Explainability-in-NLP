@@ -152,8 +152,8 @@ main() {
     # run_subgraphx "sst2" "stanfordnlp" "syntactic" "validation"
 
     # LLM explainers - TokenSHAP (2 runs)
-    echo ">>> Running TokenSHAP on SST-2..."
-    # run_tokenshap "setfit/ag_news"
+    echo ">>> Running TokenSHAP on AG News and SST-2..."
+    run_tokenshap "setfit/ag_news"
     run_tokenshap "stanfordnlp/sst2"
 
     echo ""
@@ -164,9 +164,6 @@ main() {
     echo "Outputs generated:"
     echo "  - GNN insights: outputs/gnn_models/<backbone>/<dataset>/<graph_type>/<run_id>/explanations/"
     echo "  - LLM insights: outputs/insights/LLM/<backbone>/<dataset>/"
-    echo ""
-    echo "To analyze results, use:"
-    echo "  python -m src.Insights.cli --graphsvx-root outputs/gnn_models --output-json outputs/insights/combined.json"
     echo ""
 }
 

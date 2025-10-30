@@ -632,6 +632,28 @@ def load_subgraphx_run_records(
         if is_correct is None:
             is_correct = _compute_is_correct(item.label, prediction_class)
 
+        related = RelatedPrediction.from_mapping(item.related_prediction)
+
+        node_importance: Optional[List[float]] = None
+        if related.maskout_progression_drop and top_nodes:
+            drops = [float(value) for value in related.maskout_progression_drop]
+        elif related.sufficiency_progression_drop and top_nodes:
+            drops = [float(value) for value in related.sufficiency_progression_drop]
+        else:
+            drops = None
+
+        if drops is not None and top_nodes:
+            incremental: List[float] = []
+            previous = 0.0
+            for value in drops:
+                incremental.append(value - previous)
+                previous = value
+            length = item.num_nodes or (max(top_nodes) + 1 if top_nodes else len(incremental))
+            node_importance = [0.0] * int(length)
+            for node_idx, score in zip(top_nodes, incremental):
+                if isinstance(node_idx, int) and 0 <= node_idx < len(node_importance):
+                    node_importance[int(node_idx)] = float(score)
+
         record = ExplanationRecord(
             dataset=dataset,
             graph_type=graph_type,
@@ -644,9 +666,9 @@ def load_subgraphx_run_records(
             is_correct=is_correct,
             num_nodes=item.num_nodes,
             num_edges=item.num_edges,
-            node_importance=None,
+            node_importance=node_importance,
             top_nodes=top_nodes,
-            related_prediction=RelatedPrediction.from_mapping(item.related_prediction),
+            related_prediction=related,
             hyperparams=item.hyperparams or {},
             coalitions=coalitions,
             extras=extras,

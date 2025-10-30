@@ -89,30 +89,53 @@ def deletion_curve(record: ExplanationRecord, *, normalize: bool = True) -> Curv
     """
     origin = record.related_prediction.origin
     maskout = record.related_prediction.maskout
-    if maskout is None:
-        return CurveResult(values={}, origin=origin, normalized=normalize, auc=None)
-
+    progression = record.related_prediction.maskout_progression_confidence
     curve: Dict[int, float] = {}
-    if normalize and origin:
+
+    def _normalise(value: float) -> float:
+        if not normalize:
+            return value
+        if origin in (None, 0):
+            return value
+        return value / origin
+
+    if normalize and origin is not None:
         curve[0] = 1.0
-        value = maskout / origin if origin else 0.0
     else:
-        curve[0] = origin if origin is not None else maskout
-        value = maskout
+        curve[0] = origin if origin is not None else (maskout if maskout is not None else 0.0)
 
-    num_nodes = record.num_nodes
-    sparsity = record.related_prediction.sparsity
-    removal_size: Optional[int] = None
-    if sparsity is not None and num_nodes:
-        removal_size = max(0, min(num_nodes, int(round((1.0 - sparsity) * num_nodes))))
-    elif num_nodes:
-        removal_size = num_nodes
+    max_size: Optional[int] = None
 
-    if removal_size is not None and removal_size > 0:
-        curve[removal_size] = value
+    if progression:
+        for idx, conf in enumerate(progression, start=1):
+            if conf is None:
+                continue
+            curve[idx] = _normalise(float(conf))
+        if maskout is not None:
+            final_idx = len(progression)
+            curve[final_idx] = _normalise(float(maskout))
+        max_size = max(curve) if len(curve) > 1 else len(progression)
+    elif maskout is not None:
+        removal_size = 0
+        if record.top_nodes:
+            removal_size = len(record.top_nodes)
+        elif record.related_prediction.sparsity is not None and record.num_nodes:
+            removal_size = max(
+                1,
+                int(round(record.related_prediction.sparsity * record.num_nodes)),
+            )
+        elif record.num_nodes:
+            removal_size = record.num_nodes
+        else:
+            removal_size = 1
+
+        curve[removal_size] = _normalise(float(maskout))
         max_size = max(removal_size, 1)
     else:
-        max_size = num_nodes or 1
+        return CurveResult(values={}, origin=origin, normalized=normalize, auc=None)
+
+    if max_size in (None, 0):
+        max_size = record.num_nodes or 1
 
     auc = _compute_auc(curve, max_size=max_size)
     return CurveResult(values=curve, origin=origin, normalized=normalize, auc=auc)
