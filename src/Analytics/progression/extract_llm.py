@@ -36,7 +36,8 @@ def _parse_dataset_fields(dataset_backbone: Optional[str]) -> Tuple[str, str, st
 
 
 def discover_pickles(base_dir: Path) -> Sequence[Path]:
-    pattern = "**/*split_pickle/graph_*.pkl"
+    """Locate per-explanation TokenSHAP pickles under the provided root."""
+    pattern = "**/graph_*.pkl"
     return sorted(base_dir.glob(pattern))
 
 
