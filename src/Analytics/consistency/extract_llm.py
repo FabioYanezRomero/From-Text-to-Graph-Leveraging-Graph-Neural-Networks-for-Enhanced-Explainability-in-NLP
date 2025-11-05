@@ -83,13 +83,67 @@ def extract_contrastivities(payload: Mapping[str, Any]) -> Tuple[Optional[float]
     return origin, masked, maskout
 
 
+def _safe_ratio(numerator: Optional[float], denominator: Optional[float]) -> Optional[float]:
+    if numerator is None or denominator is None:
+        return None
+    if abs(denominator) < 1e-9:
+        return None
+    return numerator / denominator
+
+
+def _compute_margin_coherence(
+    baseline_margin: Optional[float],
+    preservation_sufficiency: Optional[float],
+    preservation_necessity: Optional[float],
+) -> Optional[float]:
+    if preservation_sufficiency is None or preservation_necessity is None:
+        return None
+    reference = max(abs(baseline_margin) if baseline_margin is not None else 0.0, 0.1)
+    diff = abs(preservation_sufficiency - (-preservation_necessity))
+    return 1.0 - diff / reference
+
+
+def _compute_margin_decomposition(
+    preservation_sufficiency: Optional[float],
+    preservation_necessity: Optional[float],
+) -> Optional[float]:
+    if preservation_sufficiency is None or preservation_necessity is None:
+        return None
+    total = abs(preservation_sufficiency) + abs(preservation_necessity)
+    if total < 1e-9:
+        return None
+    return abs(preservation_sufficiency) / total
+
+
+def compute_decision_margin_metrics(
+    baseline_margin: Optional[float],
+    preservation_sufficiency: Optional[float],
+    preservation_necessity: Optional[float],
+) -> Dict[str, Optional[float]]:
+    suff_ratio = _safe_ratio(preservation_sufficiency, baseline_margin)
+    nec_ratio = _safe_ratio(preservation_necessity, baseline_margin)
+    coherence = _compute_margin_coherence(baseline_margin, preservation_sufficiency, preservation_necessity)
+    decomposition = _compute_margin_decomposition(preservation_sufficiency, preservation_necessity)
+    consistency_flag: Optional[float] = None
+    if suff_ratio is not None and nec_ratio is not None:
+        consistency_flag = float(suff_ratio > 0.7 and nec_ratio < 0.0)
+
+    return {
+        "sufficiency_ratio": suff_ratio,
+        "necessity_ratio": nec_ratio,
+        "margin_coherence": coherence,
+        "consistency_flag": consistency_flag,
+        "margin_decomposition_ratio": decomposition,
+    }
+
+
 def build_record(payload: Dict[str, Any]) -> Dict[str, Any]:
     dataset_backbone = payload.get("dataset") or ""
     backbone, dataset_raw, dataset = _parse_dataset_fields(dataset_backbone)
     graph_type = payload.get("graph_type") or "tokens"
     method = payload.get("method") or "token_shap_llm"
 
-    origin_contrastivity, masked_contrastivity, maskout_contrastivity = extract_contrastivities(payload)
+    baseline_margin, preservation_sufficiency, preservation_necessity = extract_contrastivities(payload)
 
     record: Dict[str, Any] = {
         "method": method,
@@ -105,10 +159,17 @@ def build_record(payload: Dict[str, Any]) -> Dict[str, Any]:
         "prediction_class": payload.get("prediction_class"),
         "prediction_confidence": payload.get("prediction_confidence"),
         "is_correct": payload.get("is_correct"),
-        "origin_contrastivity": origin_contrastivity,
-        "masked_contrastivity": masked_contrastivity,
-        "maskout_contrastivity": maskout_contrastivity,
+        "baseline_margin": baseline_margin,
+        "preservation_sufficiency": preservation_sufficiency,
+        "preservation_necessity": preservation_necessity,
     }
+    record.update(
+        compute_decision_margin_metrics(
+            baseline_margin=baseline_margin,
+            preservation_sufficiency=preservation_sufficiency,
+            preservation_necessity=preservation_necessity,
+        )
+    )
     return record
 
 
@@ -163,7 +224,7 @@ def process_pickles(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Aggregate TokenSHAP contrastivity metrics into CSV summaries.")
+    parser = argparse.ArgumentParser(description="Aggregate TokenSHAP consistency metrics into CSV summaries.")
     parser.add_argument(
         "--base-dir",
         type=Path,
@@ -173,8 +234,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("outputs/analytics/contrastivity"),
-        help="Directory where contrastivity CSV files will be written.",
+        default=Path("outputs/analytics/consistency"),
+        help="Directory where consistency CSV files will be written.",
     )
     parser.add_argument(
         "--limit",
@@ -207,10 +268,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             except Exception:
                 continue
         print(
-            f"\nCompleted TokenSHAP contrastivity aggregation for {len(written)} CSV file(s) ({total_rows} total rows)."
-        )
+            f"\nCompleted TokenSHAP consistency aggregation for {len(written)} CSV file(s) ({total_rows} total rows)."
+    )
     else:
-        print("\nNo TokenSHAP contrastivity CSV files were generated.")
+        print("\nNo TokenSHAP consistency CSV files were generated.")
 
 
 if __name__ == "__main__":

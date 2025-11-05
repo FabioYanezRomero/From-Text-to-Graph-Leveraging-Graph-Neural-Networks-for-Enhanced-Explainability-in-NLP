@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Aggregate contrastivity analytics for every explainer/dataset/graph CSV.
+Aggregate decision margin consistency analytics for every explainer/dataset/graph CSV.
 
-The input directories follow the structure produced by the contrastivity
+The input directories follow the structure produced by the consistency
 extractors:
 
-    outputs/analytics/contrastivity/<method>/<dataset>/<graph>.csv
+    outputs/analytics/consistency/<method>/<dataset>/<graph>.csv
 
-Each row contains scalar contrastivity values (origin/masked/maskout) together
-with metadata such as class labels and correctness flags.  This script mirrors
-the progression aggregator by emitting per-graph summaries and a field-level
-global summary for each contrastivity signal:
+Each row contains scalar margin values (baseline/preservation sufficiency/
+preservation necessity) together with metadata such as class labels and
+correctness flags. This script mirrors the progression aggregator by emitting
+per-graph summaries and a field-level global summary for each metric:
 
-    outputs/analytics/contrastivity/<field>/<method>/<dataset>/<graph>/
-        contrastivity_summary.csv
-    outputs/analytics/contrastivity/<field>/contrastivity_summary.csv
+    outputs/analytics/consistency/<field>/<method>/<dataset>/<graph>/
+        consistency_summary.csv
+    outputs/analytics/consistency/<field>/consistency_summary.csv
 """
 
 from __future__ import annotations
@@ -26,16 +26,21 @@ from typing import Dict, Iterable, List, Optional
 import numpy as np
 import pandas as pd
 
-BASE_INPUT_ROOT = Path("outputs/analytics/contrastivity")
+BASE_INPUT_ROOT = Path("outputs/analytics/consistency")
 DEFAULT_OUTPUT_ROOT = BASE_INPUT_ROOT
 
-CONTRASTIVITY_FIELDS = (
-    "origin_contrastivity",
-    "masked_contrastivity",
-    "maskout_contrastivity",
+CONSISTENCY_FIELDS = (
+    "baseline_margin",
+    "preservation_sufficiency",
+    "preservation_necessity",
+    "sufficiency_ratio",
+    "necessity_ratio",
+    "margin_coherence",
+    "consistency_flag",
+    "margin_decomposition_ratio",
 )
 
-SUMMARY_FILENAME = "contrastivity_summary.csv"
+SUMMARY_FILENAME = "consistency_summary.csv"
 EPS = 1e-10
 
 
@@ -87,7 +92,7 @@ def summarize(values: Iterable[float]) -> Dict[str, float]:
     }
 
 
-def discover_contrastivity_csvs(root: Path) -> List[Path]:
+def discover_consistency_csvs(root: Path) -> List[Path]:
     candidates: List[Path] = []
     for path in root.glob("**/*.csv"):
         try:
@@ -101,7 +106,43 @@ def discover_contrastivity_csvs(root: Path) -> List[Path]:
 
 def process_csv(csv_path: Path, field: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
-    if df.empty or field not in df.columns:
+    if df.empty:
+        return pd.DataFrame()
+
+    data = df.copy()
+    if "baseline_margin" in data.columns:
+        denominator = data["baseline_margin"].replace(0, np.nan)
+        if "sufficiency_ratio" not in data.columns and "preservation_sufficiency" in data.columns:
+            data["sufficiency_ratio"] = data["preservation_sufficiency"] / denominator
+        if "necessity_ratio" not in data.columns and "preservation_necessity" in data.columns:
+            data["necessity_ratio"] = data["preservation_necessity"] / denominator
+        data["margin_coherence"] = (
+            1
+            - np.abs(
+                data.get("preservation_sufficiency", 0.0)
+                + data.get("preservation_necessity", 0.0)
+            )
+            / np.maximum(np.abs(data["baseline_margin"]), 0.1)
+        ).clip(0, 1)
+        data["consistency_flag"] = (
+            (data["sufficiency_ratio"] > 0.7) & (data["necessity_ratio"] < 0)
+        ).astype(int)
+        if "margin_decomposition_ratio" not in data.columns and (
+            "preservation_sufficiency" in data.columns and "preservation_necessity" in data.columns
+        ):
+            numerator = data["preservation_sufficiency"].abs()
+            denominator_sum = (
+                data["preservation_sufficiency"].abs() + data["preservation_necessity"].abs()
+            ).replace(0, np.nan)
+            data["margin_decomposition_ratio"] = numerator / denominator_sum
+    else:
+        data["sufficiency_ratio"] = np.nan
+        data["necessity_ratio"] = np.nan
+        data["margin_coherence"] = np.nan
+        data["consistency_flag"] = np.nan
+        data["margin_decomposition_ratio"] = np.nan
+
+    if field not in data.columns:
         return pd.DataFrame()
 
     method = csv_path.parts[-3]
@@ -111,7 +152,7 @@ def process_csv(csv_path: Path, field: str) -> pd.DataFrame:
     records: List[Dict[str, object]] = []
     metrics_accumulator: Dict[str, Dict[str, List[float]]] = {field: {"overall": []}}
 
-    for _, row in df.iterrows():
+    for _, row in data.iterrows():
         value = coerce_float(row.get(field))
         if value is None:
             continue
@@ -148,7 +189,7 @@ def process_csv(csv_path: Path, field: str) -> pd.DataFrame:
                     "method": method,
                     "dataset": dataset,
                     "graph": graph,
-                    "contrastivity_field": metric_name,
+                    "consistency_field": metric_name,
                     "group": group,
                     **stats,
                 }
@@ -179,7 +220,7 @@ def aggregate_field(csv_paths: List[Path], field: str, output_root: Path) -> Non
 
         graph_summary_path = graph_dir / SUMMARY_FILENAME
         summary_df.sort_values(
-            ["method", "dataset", "graph", "contrastivity_field", "group"],
+            ["method", "dataset", "graph", "consistency_field", "group"],
             inplace=True,
             kind="mergesort",
         )
@@ -194,7 +235,7 @@ def aggregate_field(csv_paths: List[Path], field: str, output_root: Path) -> Non
     global_df = pd.concat(all_records, ignore_index=True)
     global_summary_path = field_root / SUMMARY_FILENAME
     global_df.sort_values(
-        ["method", "dataset", "graph", "contrastivity_field", "group"],
+        ["method", "dataset", "graph", "consistency_field", "group"],
         inplace=True,
         kind="mergesort",
     )
@@ -203,12 +244,12 @@ def aggregate_field(csv_paths: List[Path], field: str, output_root: Path) -> Non
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Aggregate contrastivity metrics across methods/datasets/graphs.")
+    parser = argparse.ArgumentParser(description="Aggregate consistency metrics across methods/datasets/graphs.")
     parser.add_argument(
         "--base-dir",
         type=Path,
         default=BASE_INPUT_ROOT,
-        help="Root directory containing contrastivity CSV files (method/dataset/graph.csv).",
+        help="Root directory containing consistency CSV files (method/dataset/graph.csv).",
     )
     parser.add_argument(
         "--output-root",
@@ -219,8 +260,8 @@ def main() -> None:
     parser.add_argument(
         "--fields",
         nargs="+",
-        default=list(CONTRASTIVITY_FIELDS),
-        help="Contrastivity fields to aggregate (default: origin/masked/maskout).",
+        default=list(CONSISTENCY_FIELDS),
+        help="Consistency fields to aggregate.",
     )
     args = parser.parse_args()
 
@@ -229,20 +270,20 @@ def main() -> None:
         raise SystemExit(f"Base directory not found: {base_dir}")
 
     fields = list(dict.fromkeys(args.fields))
-    csv_paths = discover_contrastivity_csvs(base_dir)
+    csv_paths = discover_consistency_csvs(base_dir)
     if not csv_paths:
-        print("No contrastivity CSV files found.")
+        print("No consistency CSV files found.")
         return
 
     print("=" * 120)
-    print(f"[contrastivity] base_dir={base_dir}")
-    print(f"[contrastivity] output_root={args.output_root.resolve()}")
-    print(f"[contrastivity] fields={fields}")
+    print(f"[consistency] base_dir={base_dir}")
+    print(f"[consistency] output_root={args.output_root.resolve()}")
+    print(f"[consistency] fields={fields}")
     print("=" * 120)
 
     for field in fields:
         print("\n" + "-" * 120)
-        print(f"[contrastivity] processing field: {field}")
+        print(f"[consistency] processing field: {field}")
         print("-" * 120)
         aggregate_field(csv_paths, field, args.output_root.resolve())
 

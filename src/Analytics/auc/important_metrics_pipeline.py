@@ -21,8 +21,8 @@ import seaborn as sns
 
 
 DEFAULT_INPUT_ROOT = Path("outputs/analytics/auc")
-DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/auc/plots/important_metrics")
-DEFAULT_THRESHOLDS: Sequence[float] = (0.6, 0.7)
+DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/auc/plots/final_metrics")
+DEFAULT_THRESHOLDS: Sequence[float] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 
 
 BOOLEAN_MAP = {"true": True, "false": False}
@@ -562,25 +562,41 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     (output_dir / "metrics_summary.md").write_text(summary_markdown, encoding="utf-8")
 
     # 4. Generate plots.
-    created_plots = [
-        create_error_detection_bar_plot(detection_summary, output_dir, threshold=options.thresholds[0]),
+    created_plots = []
+
+    for threshold in options.thresholds:
+        created_plots.append(
+            create_error_detection_bar_plot(
+                detection_summary,
+                output_dir,
+                threshold=threshold,
+            )
+        )
+
+    created_plots.append(
         create_auc_separation_boxplots(
             data,
             output_dir,
             methods=["graphsvx", "token_shap_llm"],
-        ),
+        )
+    )
+    created_plots.append(
         create_divergence_scatter(
             data,
             output_dir,
             methods=["graphsvx", "token_shap_llm"],
             sample_size=options.sample_size,
-        ),
-        create_detection_heatmap(
-            data,
-            output_dir,
-            threshold=options.thresholds[0],
-        ),
-    ]
+        )
+    )
+
+    for threshold in options.thresholds:
+        created_plots.append(
+            create_detection_heatmap(
+                data,
+                output_dir,
+                threshold=threshold,
+            )
+        )
 
     print("Generated metric tables:")
     for csv_path in [

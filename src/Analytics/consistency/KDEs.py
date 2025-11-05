@@ -25,7 +25,7 @@ except Exception:  # pragma: no cover - optional dependency
 import matplotlib.pyplot as plt
 
 
-BASE_INPUT_ROOT = Path("outputs/analytics/contrastivity")
+BASE_INPUT_ROOT = Path("outputs/analytics/consistency")
 DEFAULT_GRID_POINTS = 256
 MIN_BANDWIDTH = 1e-3
 PLOT_WIDTH = 720
@@ -330,19 +330,28 @@ METRIC_CONFIGS = {
 }
 
 
-def discover_contrastivity_csvs(root: Path) -> List[Path]:
+def discover_consistency_csvs(root: Path) -> List[Path]:
     return sorted(root.glob("**/*.csv"))
 
 
 def prepare_metric_columns(df: pd.DataFrame) -> pd.DataFrame:
-    for column in ("origin_contrastivity", "masked_contrastivity", "maskout_contrastivity"):
+    baseline_src = "baseline_margin" if "baseline_margin" in df.columns else "origin_contrastivity"
+    sufficiency_src = "preservation_sufficiency" if "preservation_sufficiency" in df.columns else "masked_contrastivity"
+    necessity_src = "preservation_necessity" if "preservation_necessity" in df.columns else "maskout_contrastivity"
+
+    for column in {baseline_src, sufficiency_src, necessity_src}:
         if column in df.columns:
             df[column] = parse_numeric_series(df[column])
         else:
             df[column] = np.nan
-    df["faithfulness"] = df["origin_contrastivity"] - df["masked_contrastivity"]
-    df["sufficiency"] = df["masked_contrastivity"]
-    diff = (df["origin_contrastivity"] - df["maskout_contrastivity"]).abs()
+
+    df["baseline_margin"] = df[baseline_src]
+    df["preservation_sufficiency"] = df[sufficiency_src]
+    df["preservation_necessity"] = df[necessity_src]
+
+    df["faithfulness"] = df["baseline_margin"] - df["preservation_sufficiency"]
+    df["sufficiency"] = df["preservation_sufficiency"]
+    diff = (df["baseline_margin"] - df["preservation_necessity"]).abs()
     df["comprehensiveness"] = 1.0 - diff
     df["comprehensiveness"] = df["comprehensiveness"].clip(lower=0.0, upper=1.0)
     return df
@@ -514,7 +523,7 @@ def process_metric(
 def process_csv(csv_path: Path, grid_points: int) -> None:
     df = pd.read_csv(csv_path)
     if df.empty:
-        print(f"[skip] Empty contrastivity CSV skipped: {csv_path}")
+        print(f"[skip] Empty consistency CSV skipped: {csv_path}")
         return
 
     df = prepare_metric_columns(df)
@@ -531,12 +540,12 @@ def process_csv(csv_path: Path, grid_points: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate KDEs and divergence metrics for contrastivity analytics.")
+    parser = argparse.ArgumentParser(description="Generate KDEs and divergence metrics for consistency analytics.")
     parser.add_argument(
         "--base-dir",
         type=Path,
         default=BASE_INPUT_ROOT,
-        help="Directory containing per-dataset contrastivity CSV files.",
+        help="Directory containing per-dataset consistency CSV files.",
     )
     parser.add_argument(
         "--grid-points",
@@ -550,12 +559,12 @@ def main() -> None:
     if not base_dir.exists():
         raise SystemExit(f"Base directory not found: {base_dir}")
 
-    csv_paths = discover_contrastivity_csvs(base_dir)
+    csv_paths = discover_consistency_csvs(base_dir)
     if not csv_paths:
-        print("No contrastivity CSV files found.")
+        print("No consistency CSV files found.")
         return
 
-    for csv_path in tqdm(csv_paths, desc="Generating contrastivity KDEs"):
+    for csv_path in tqdm(csv_paths, desc="Generating consistency KDEs"):
         try:
             process_csv(csv_path, args.grid_points)
         except Exception as exc:  # pragma: no cover - logging only
