@@ -102,31 +102,63 @@ def load_summary(root: Path, field: str) -> pd.DataFrame:
 
 
 def load_instance_records(root: Path, dataset: str) -> pd.DataFrame:
+    """
+    Load instance-level records from method/dataset/graph.csv files.
+    The extract_gnn.py and extract_llm.py scripts write these CSVs with all necessary columns.
+    """
     rows: List[pd.DataFrame] = []
+    
+    # Map from display dataset names (like "setfit_ag_news") to the various possible CSV dataset patterns
+    # The CSVs use dataset names like "ag-news" (with hyphens), not "setfit_ag_news"
+    dataset_map = {
+        "setfit_ag_news": "setfit_ag_news",
+        "stanfordnlp_sst2": "stanfordnlp_sst2",
+    }
+    dataset_slug = dataset_map.get(dataset, dataset)
+    
     for method in METHOD_ORDER:
-        method_dir = root / method / dataset
+        method_dir = root / method / dataset_slug
         if not method_dir.exists():
             continue
         for csv_path in method_dir.glob("*.csv"):
-            df = pd.read_csv(csv_path)
+            try:
+                df = pd.read_csv(csv_path)
+            except Exception as e:
+                print(f"Warning: Failed to read {csv_path}: {e}")
+                continue
             if df.empty:
                 continue
             df = df.copy()
-            df["method"] = df.get("method", method)
-            df["dataset"] = df.get("dataset", dataset)
-            df["graph_type"] = df.get("graph_type", csv_path.stem)
+            # Ensure method, dataset, and graph_type columns exist
+            if "method" not in df.columns:
+                df["method"] = method
+            if "dataset" not in df.columns:
+                df["dataset"] = dataset
+            if "graph_type" not in df.columns:
+                df["graph_type"] = csv_path.stem
             rows.append(df)
+    
     if not rows:
         return pd.DataFrame()
+    
     data = pd.concat(rows, ignore_index=True)
-    denominator = data.get("baseline_margin", np.nan).replace(0, np.nan)
-    if "sufficiency_ratio" not in data.columns and "preservation_sufficiency" in data.columns:
-        data["sufficiency_ratio"] = data["preservation_sufficiency"] / denominator
-    if "necessity_ratio" not in data.columns and "preservation_necessity" in data.columns:
-        data["necessity_ratio"] = data["preservation_necessity"] / denominator
+    
+    # Ensure sufficiency_ratio and necessity_ratio exist and are properly computed
+    if "sufficiency_ratio" not in data.columns or data["sufficiency_ratio"].isna().all():
+        denominator = data.get("baseline_margin", np.nan).replace(0, np.nan)
+        if "preservation_sufficiency" in data.columns:
+            data["sufficiency_ratio"] = data["preservation_sufficiency"] / denominator
+    
+    if "necessity_ratio" not in data.columns or data["necessity_ratio"].isna().all():
+        denominator = data.get("baseline_margin", np.nan).replace(0, np.nan)
+        if "preservation_necessity" in data.columns:
+            data["necessity_ratio"] = data["preservation_necessity"] / denominator
+    
+    # Clip ratios to valid range
     data["sufficiency_ratio"] = data["sufficiency_ratio"].clip(*RATIO_LIMIT)
     data["necessity_ratio"] = data["necessity_ratio"].clip(*RATIO_LIMIT)
     data["dataset_slug"] = dataset
+    
     return data
 
 
@@ -279,119 +311,163 @@ def create_margin_preservation_cascade(
     save_figure(fig, output_dir / f"vizA_margin_preservation_cascade_{dataset}", width=1300, height=520)
 
 
-GRAPH_SYMBOLS = {
-    "skipgrams": "circle",
-    "window": "square",
-    "constituency": "triangle-up",
-    "syntactic": "diamond",
-    "tokens": "star",
-}
-
-
 def create_tradeoff_scatter(instances: pd.DataFrame, dataset: str, output_dir: Path) -> None:
+    """
+    Create scatter plots showing the sufficiency-necessity trade-off, stratified by:
+    - Rows: Correctness (correct vs incorrect predictions)
+    - Columns: Predicted class
+    - Within each subplot: Different graph types shown with different symbols,
+      and methods shown with different colors.
+    """
     if instances.empty:
         return
 
-    subset = instances[(instances.get("dataset_slug") == dataset)]
+    subset = instances[instances.get("dataset_slug") == dataset].copy()
     if subset.empty:
         return
 
-    fig = go.Figure()
+    # Get unique classes
+    classes = sorted(subset["prediction_class"].dropna().unique())
+    if not classes:
+        classes = ["All"]
+        subset = subset.assign(prediction_class="All")
 
-    for method in METHOD_ORDER:
-        method_subset = subset[subset["method"] == method]
-        if method_subset.empty:
+    class_titles = [f"Class {cls}" for cls in classes]
+
+    # Symbol mapping for graph types
+    GRAPH_SYMBOLS = {
+        "skipgrams": "circle",
+        "window": "square",
+        "constituency": "triangle-up",
+        "syntactic": "diamond",
+        "tokens": "star",
+    }
+
+    # Create subplots: rows=correctness, cols=class
+    fig = make_subplots(
+        rows=2,
+        cols=len(classes),
+        subplot_titles=[f"{title} - Correct" for title in class_titles] + 
+                       [f"{title} - Incorrect" for title in class_titles],
+        shared_xaxes=True,
+        shared_yaxes=True,
+        vertical_spacing=0.15,
+        horizontal_spacing=0.1 / len(classes),
+    )
+
+    has_data = False
+    legend_items_added = set()  # Track which legend items we've added
+    
+    for row_idx, correctness in enumerate((True, False), start=1):
+        correctness_label = "Correct" if correctness else "Incorrect"
+        row_subset = subset[subset.get("is_correct") == correctness]
+        if row_subset.empty:
             continue
-        symbols = [GRAPH_SYMBOLS.get(graph, "circle") for graph in method_subset["graph_type"]]
-        fig.add_trace(
-            go.Scattergl(
-                x=method_subset["sufficiency_ratio"],
-                y=method_subset["necessity_ratio"],
-                mode="markers",
-                name=METHOD_LABELS.get(method, method),
-                legendgroup=method,
-                marker=dict(
-                    color=METHOD_COLORS.get(method, "#7f8c8d"),
-                    size=7,
-                    symbol=symbols,
-                    line=dict(color="#333333", width=0.5),
-                    opacity=0.8,
-                ),
-                text=[
-                    f"Graph: {graph_title_text(graph)}<br>"
-                    f"Correct: {bool(correct)}<br>"
-                    f"Baseline margin: {baseline:.3f}"
-                    for graph, correct, baseline in zip(
-                        method_subset["graph_type"],
-                        method_subset.get("is_correct", False),
-                        method_subset.get("baseline_margin", np.nan),
+            
+        for col_idx, cls in enumerate(classes, start=1):
+            col_subset = row_subset[row_subset["prediction_class"] == cls]
+            if col_subset.empty:
+                continue
+            has_data = True
+            
+            # Group by method and graph_type for better stratification
+            for method in METHOD_ORDER:
+                method_subset = col_subset[col_subset["method"] == method]
+                if method_subset.empty:
+                    continue
+                
+                # For each graph type, create a separate trace to properly show symbols
+                for graph in order_graphs(method_subset["graph_type"].unique()):
+                    graph_subset = method_subset[method_subset["graph_type"] == graph]
+                    if graph_subset.empty:
+                        continue
+                    
+                    # Create unique legend group name
+                    legend_key = f"{method}_{graph}"
+                    show_legend = legend_key not in legend_items_added
+                    if show_legend:
+                        legend_items_added.add(legend_key)
+                    
+                    fig.add_trace(
+                        go.Scattergl(
+                            x=graph_subset["sufficiency_ratio"],
+                            y=graph_subset["necessity_ratio"],
+                            mode="markers",
+                            name=f"{METHOD_LABELS.get(method, method)} - {graph_title_text(graph)}" if show_legend else None,
+                            legendgroup=legend_key,
+                            marker=dict(
+                                color=METHOD_COLORS.get(method, "#7f8c8d"),
+                                size=7,
+                                symbol=GRAPH_SYMBOLS.get(graph, "circle"),
+                                opacity=0.7,
+                                line=dict(color="#333333", width=0.5),
+                            ),
+                            text=[
+                                f"Method: {METHOD_LABELS.get(method, method)}<br>"
+                                f"Graph: {graph_title_text(graph)}<br>"
+                                f"Baseline margin: {baseline:.3f}"
+                                for baseline in graph_subset.get("baseline_margin", np.nan)
+                            ],
+                            hovertemplate=(
+                                f"{correctness_label}, Class {cls}<br>"
+                                "Suff. ratio: %{x:.3f}<br>"
+                                "Nec. ratio: %{y:.3f}<br>%{text}<extra></extra>"
+                            ),
+                            showlegend=show_legend,
+                        ),
+                        row=row_idx,
+                        col=col_idx,
                     )
-                ],
-                hovertemplate="Sufficiency ratio: %{x:.3f}<br>"
-                "Necessity ratio: %{y:.3f}<br>%{text}<extra></extra>",
-            )
-        )
 
-    fig.add_hline(y=0, line_dash="dot", line_color="#7f8c8d")
-    fig.add_vline(x=0, line_dash="dot", line_color="#7f8c8d")
+    if not has_data:
+        return
 
-    # Legend handles for graph symbols and correctness
-    for graph, symbol in GRAPH_SYMBOLS.items():
-        fig.add_trace(
-            go.Scattergl(
-                x=[None],
-                y=[None],
-                mode="markers",
-                marker=dict(symbol=symbol, size=8, color="#555555"),
-                legendgroup="graph",
-                name=f"Graph · {graph_title_text(graph)}",
-                showlegend=True,
-            )
-        )
+    # Add reference lines
+    for row_idx in range(1, 3):
+        for col_idx in range(1, len(classes) + 1):
+            fig.add_hline(y=0, line_dash="dot", line_color="#999", row=row_idx, col=col_idx, line_width=1)
+            fig.add_vline(x=0, line_dash="dot", line_color="#999", row=row_idx, col=col_idx, line_width=1)
 
-    fig.add_trace(
-        go.Scattergl(
-            x=[None],
-            y=[None],
-            mode="markers",
-            marker=dict(symbol="circle", color="#555555", size=8, line=dict(color="#333333", width=0.5)),
-            name="Correct prediction",
-            legendgroup="correctness",
-            showlegend=True,
-        )
-    )
-    fig.add_trace(
-        go.Scattergl(
-            x=[None],
-            y=[None],
-            mode="markers",
-            marker=dict(symbol="x", color="#555555", size=8, line=dict(color="#333333", width=0.5)),
-            name="Incorrect prediction",
-            legendgroup="correctness",
-            showlegend=True,
-        )
-    )
+    # Update axes
+    for col_idx in range(1, len(classes) + 1):
+        fig.update_xaxes(range=RATIO_LIMIT, row=2, col=col_idx)
+        fig.update_yaxes(range=RATIO_LIMIT, row=1, col=col_idx)
+        fig.update_xaxes(title_text="Sufficiency Ratio", row=2, col=col_idx)
+    
+    fig.update_yaxes(title_text="Necessity Ratio", row=1, col=1)
+    fig.update_yaxes(title_text="Necessity Ratio", row=2, col=1)
 
     fig.update_layout(
         title=dict(
             text=(
                 "<b>Sufficiency–Necessity Trade-off Scatter</b><br>"
-                f"<sub>{dataset_label(dataset)} · colour = method, symbol = graph type</sub>"
+                f"<sub>{dataset_label(dataset)} · Stratified by class (columns), correctness (rows), "
+                f"method (color), and graph type (symbol)</sub>"
             ),
             x=0.5,
             xanchor="center",
         ),
-        height=560,
-        width=1000,
+        height=600 if len(classes) <= 3 else 700,
+        width=max(1200, 350 * len(classes)),
         plot_bgcolor="white",
         paper_bgcolor="white",
-        font=dict(size=11),
-        legend=dict(orientation="h", yanchor="bottom", y=-0.15, xanchor="center", x=0.5),
+        font=dict(size=10),
+        legend=dict(
+            orientation="v",
+            yanchor="top",
+            y=1.0,
+            xanchor="left",
+            x=1.01,
+            font=dict(size=9),
+        ),
     )
-    fig.update_xaxes(title_text="Preservation Sufficiency Ratio", range=RATIO_LIMIT)
-    fig.update_yaxes(title_text="Preservation Necessity Ratio", range=RATIO_LIMIT)
 
-    save_figure(fig, output_dir / f"vizB_tradeoff_scatter_{dataset}", width=1000, height=560)
+    save_figure(
+        fig,
+        output_dir / f"vizB_tradeoff_scatter_{dataset}",
+        width=max(1200, 350 * len(classes)),
+        height=600 if len(classes) <= 3 else 700,
+    )
 
 
 def create_ratio_heatmap(
@@ -401,116 +477,173 @@ def create_ratio_heatmap(
     dataset: str,
     output_dir: Path,
 ) -> None:
-    def prepare(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Create 2D heatmaps showing three metrics (sufficiency ratio, necessity ratio, margin coherence)
+    with methods as rows and graph types as columns.
+    """
+    def lookup_map(df: pd.DataFrame) -> Dict[tuple[str, str], float]:
         subset = df[
             (df["dataset"] == dataset)
             & (df["group"] == "overall")
-        ][["method", "graph", "mean"]].copy()
-        if subset.empty:
-            return subset
-        subset["graph_title"] = subset["graph"].apply(graph_title_text)
-        return subset
+        ][["method", "graph", "mean"]]
+        return {(row["method"], row["graph"]): float(row["mean"]) for _, row in subset.iterrows()}
 
-    suff = prepare(sufficiency_ratio_df)
-    nec = prepare(necessity_ratio_df)
-    coh = prepare(margin_coherence_df)
-    combined_methods = sorted(set(suff["method"]).union(nec["method"]).union(coh["method"]), key=METHOD_ORDER.index)
-    combined_graphs = order_graphs(
-        set(suff["graph"]).union(nec["graph"]).union(coh["graph"])
-    )
-    if not combined_methods or not combined_graphs:
+    suff_map = lookup_map(sufficiency_ratio_df)
+    nec_map = lookup_map(necessity_ratio_df)
+    coh_map = lookup_map(margin_coherence_df)
+
+    # Get all methods and graphs that exist in the data
+    all_graphs = set()
+    for mapping in (suff_map, nec_map, coh_map):
+        all_graphs.update(graph for _, graph in mapping.keys())
+    
+    if not all_graphs:
+        return
+    
+    # Order graphs and filter methods that have data
+    ordered_graphs = order_graphs(all_graphs)
+    available_methods = [m for m in METHOD_ORDER if any((m, g) in suff_map or (m, g) in nec_map or (m, g) in coh_map for g in ordered_graphs)]
+    
+    if not available_methods or not ordered_graphs:
         return
 
-    row_labels: List[str] = []
-    for method in combined_methods:
-        for graph in combined_graphs:
-            row_labels.append(f"{METHOD_LABELS.get(method, method)} · {graph_title_text(graph)}")
+    # Build 2D matrices: rows = methods, columns = graph types
+    def build_matrix(mapping: Dict[tuple[str, str], float]) -> np.ndarray:
+        matrix = np.zeros((len(available_methods), len(ordered_graphs)))
+        matrix[:] = np.nan
+        for i, method in enumerate(available_methods):
+            for j, graph in enumerate(ordered_graphs):
+                matrix[i, j] = mapping.get((method, graph), np.nan)
+        return matrix
 
-    def matrix_from(df: pd.DataFrame) -> np.ndarray:
-        mapping = {(row["method"], row["graph"]): row["mean"] for _, row in df.iterrows()}
-        values = [
-            float(mapping.get((method, graph), np.nan))
-            for method in combined_methods
-            for graph in combined_graphs
-        ]
-        return np.array(values, dtype=float).reshape(-1, 1)
+    suff_matrix = build_matrix(suff_map)
+    nec_matrix = build_matrix(nec_map)
+    coh_matrix = build_matrix(coh_map)
 
-    suff_matrix = matrix_from(suff)
-    nec_matrix = matrix_from(nec)
-    coh_matrix = matrix_from(coh)
+    # Create row and column labels
+    row_labels = [METHOD_LABELS.get(method, method) for method in available_methods]
+    col_labels = [graph_title_text(graph) for graph in ordered_graphs]
 
+    # Create subplots
     fig = make_subplots(
         rows=1,
         cols=3,
         subplot_titles=["Sufficiency Ratio", "Necessity Ratio", "Margin Coherence"],
         shared_yaxes=True,
+        horizontal_spacing=0.12,
     )
 
+    # Sufficiency ratio heatmap (0 to 1, green is good)
     fig.add_trace(
         go.Heatmap(
             z=suff_matrix,
-            x=["Ratio"],
+            x=col_labels,
             y=row_labels,
-            colorscale=[(0.0, "#e74c3c"), (1.0, "#2ecc71")],
+            colorscale=[
+                [0.0, "#d73027"],  # Red for low
+                [0.5, "#fee08b"],  # Yellow for mid
+                [1.0, "#1a9850"],  # Green for high
+            ],
             zmin=0,
             zmax=1,
-            colorbar=dict(title=""),
+            colorbar=dict(
+                title="Ratio",
+                x=0.30,
+                len=0.9,
+            ),
             showscale=True,
+            hovertemplate="Method: %{y}<br>Graph: %{x}<br>Suff. Ratio: %{z:.3f}<extra></extra>",
         ),
         row=1,
         col=1,
     )
 
+    # Necessity ratio heatmap (-1 to 1, negative is good, centered at 0)
     fig.add_trace(
         go.Heatmap(
             z=nec_matrix,
-            x=["Ratio"],
+            x=col_labels,
             y=row_labels,
-            colorscale=[(0.0, "#2ecc71"), (0.5, "#f1c40f"), (1.0, "#e74c3c")],
+            colorscale=[
+                [0.0, "#1a9850"],    # Green for -1 (good)
+                [0.5, "#ffffbf"],    # Light yellow for 0
+                [1.0, "#d73027"],    # Red for +1 (bad)
+            ],
+            zmid=0,
             zmin=-1,
             zmax=1,
-            colorbar=dict(title=""),
+            colorbar=dict(
+                title="Ratio",
+                x=0.64,
+                len=0.9,
+            ),
             showscale=True,
+            hovertemplate="Method: %{y}<br>Graph: %{x}<br>Nec. Ratio: %{z:.3f}<extra></extra>",
         ),
         row=1,
         col=2,
     )
 
+    # Margin coherence heatmap (0 to 1, higher is better)
     fig.add_trace(
         go.Heatmap(
             z=coh_matrix,
-            x=["Coherence"],
+            x=col_labels,
             y=row_labels,
-            colorscale=[(0.0, "#e74c3c"), (1.0, "#2ecc71")],
+            colorscale=[
+                [0.0, "#d73027"],  # Red for low
+                [0.5, "#fee08b"],  # Yellow for mid
+                [1.0, "#1a9850"],  # Green for high
+            ],
             zmin=0,
             zmax=1,
-            colorbar=dict(title=""),
+            colorbar=dict(
+                title="Coherence",
+                x=1.0,
+                len=0.9,
+            ),
             showscale=True,
+            hovertemplate="Method: %{y}<br>Graph: %{x}<br>Coherence: %{z:.3f}<extra></extra>",
         ),
         row=1,
         col=3,
     )
 
+    # Update axes
     for col_idx in range(1, 4):
-        fig.update_xaxes(showticklabels=False, row=1, col=col_idx)
+        fig.update_xaxes(
+            tickangle=-45,
+            row=1,
+            col=col_idx,
+            side="bottom",
+        )
+        fig.update_yaxes(
+            row=1,
+            col=col_idx,
+        )
 
     fig.update_layout(
         title=dict(
             text=(
                 "<b>Ratio Comparison Heatmap</b><br>"
-                f"<sub>{dataset_label(dataset)}</sub>"
+                f"<sub>{dataset_label(dataset)} · Methods (rows) × Graph Types (columns)</sub>"
             ),
             x=0.5,
             xanchor="center",
         ),
-        height=40 * len(row_labels) + 200,
-        width=900,
+        height=max(400, 80 * len(available_methods) + 150),
+        width=1400,
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(size=11),
     )
 
-    save_figure(fig, output_dir / f"vizC_ratio_comparison_heatmap_{dataset}", width=900, height=40 * len(row_labels) + 200)
+    save_figure(
+        fig,
+        output_dir / f"vizC_ratio_comparison_heatmap_{dataset}",
+        width=1400,
+        height=max(400, 80 * len(available_methods) + 150),
+    )
 
 
 def create_correctness_violins(instances: pd.DataFrame, dataset: str, output_dir: Path) -> None:
