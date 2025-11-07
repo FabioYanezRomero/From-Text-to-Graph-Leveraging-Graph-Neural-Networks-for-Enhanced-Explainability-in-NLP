@@ -80,6 +80,22 @@ def order_graphs(graphs: Iterable[str]) -> List[str]:
     return ordered
 
 
+def lighten_to_rgba(hex_color: str, *, factor: float = 0.65, alpha: float = 0.2) -> str:
+    """Lighten a hex colour by blending toward white and return as rgba string."""
+    color = hex_color.lstrip("#")
+    if len(color) != 6:
+        raise ValueError(f"Expected hex colour #RRGGBB, received {hex_color}")
+    r = int(color[0:2], 16)
+    g = int(color[2:4], 16)
+    b = int(color[4:6], 16)
+    factor_clamped = max(0.0, min(1.0, factor))
+    r_l = int(r + (255 - r) * factor_clamped)
+    g_l = int(g + (255 - g) * factor_clamped)
+    b_l = int(b + (255 - b) * factor_clamped)
+    alpha_clamped = max(0.0, min(1.0, alpha))
+    return f"rgba({r_l},{g_l},{b_l},{alpha_clamped:.3f})"
+
+
 def with_alpha(hex_color: str, alpha: float) -> str:
     color = hex_color.lstrip("#")
     if len(color) != 6:
@@ -301,8 +317,8 @@ def create_margin_preservation_cascade(
             x=0.5,
             xanchor="center",
         ),
-        height=520,
-        width=1300,
+        height=1080,
+        width=1920,
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(size=11),
@@ -334,139 +350,230 @@ def create_tradeoff_scatter(instances: pd.DataFrame, dataset: str, output_dir: P
 
     class_titles = [f"Class {cls}" for cls in classes]
 
-    # Symbol mapping for graph types
-    GRAPH_SYMBOLS = {
-        "skipgrams": "circle",
-        "window": "square",
-        "constituency": "triangle-up",
-        "syntactic": "diamond",
-        "tokens": "star",
-    }
+    # Summarise quadrant distribution for this dataset
+    quadrant_subset = subset[
+        np.isfinite(subset["sufficiency_ratio"]) & np.isfinite(subset["necessity_ratio"])
+    ].copy()
+    if not quadrant_subset.empty:
+        suff_nonneg = quadrant_subset["sufficiency_ratio"] >= 0
+        nec_nonneg = quadrant_subset["necessity_ratio"] >= 0
+        quadrant_subset["quadrant"] = np.select(
+            [
+                suff_nonneg & ~nec_nonneg,
+                suff_nonneg & nec_nonneg,
+                ~suff_nonneg & ~nec_nonneg,
+                ~suff_nonneg & nec_nonneg,
+            ],
+            [
+                "Sufficient-Necessary",
+                "Sufficient-Redundant",
+                "Insufficient-Necessary",
+                "Insufficient-Redundant",
+            ],
+            default="Unknown",
+        )
+        group_cols = ["prediction_class", "method", "graph_type", "is_correct"]
+        summary = (
+            quadrant_subset.groupby(group_cols + ["quadrant"], dropna=False)
+            .size()
+            .rename("count")
+            .reset_index()
+        )
+        if not summary.empty:
+            summary["dataset"] = dataset
+            summary["total_count"] = summary.groupby(group_cols, dropna=False)["count"].transform("sum")
+            summary["proportion"] = summary["count"] / summary["total_count"]
+            summary.sort_values(group_cols + ["quadrant"], inplace=True)
+            summary_path = output_dir / f"vizB_quadrant_summary_{dataset}.csv"
+            summary.to_csv(summary_path, index=False)
+            print(f"  ✓ {summary_path}")
 
-    # Create subplots: rows=correctness, cols=class
     fig = make_subplots(
-        rows=2,
+        rows=1,
         cols=len(classes),
-        subplot_titles=[f"{title} - Correct" for title in class_titles] + 
-                       [f"{title} - Incorrect" for title in class_titles],
+        subplot_titles=class_titles,
         shared_xaxes=True,
         shared_yaxes=True,
-        vertical_spacing=0.15,
-        horizontal_spacing=0.1 / len(classes),
+        horizontal_spacing=0.04,
     )
 
     has_data = False
-    legend_items_added = set()  # Track which legend items we've added
-    
-    for row_idx, correctness in enumerate((True, False), start=1):
-        correctness_label = "Correct" if correctness else "Incorrect"
-        row_subset = subset[subset.get("is_correct") == correctness]
-        if row_subset.empty:
+    correctness_colors = {True: "#2ecc71", False: "#e74c3c"}
+    symbol_cycle = [
+        "circle", "square", "diamond", "triangle-up", "triangle-down", "star", "cross", "hexagon",
+        "triangle-left", "triangle-right", "x", "asterisk", "hexagon2", "bowtie", "hourglass"
+    ]
+    combo_symbols: Dict[Tuple[str, str], str] = {}
+    combo_index = 0
+    for method in METHOD_ORDER:
+        method_graphs = order_graphs(subset[subset["method"] == method]["graph_type"].unique())
+        for graph in method_graphs:
+            combo_symbols[(method, graph)] = symbol_cycle[combo_index % len(symbol_cycle)]
+            combo_index += 1
+
+    legend_shown: set[Tuple[str, str, bool]] = set()
+
+    quadrant_fills = {
+        "Sufficient-Necessary": lighten_to_rgba("#1a9850", factor=0.45, alpha=0.25),
+        "Sufficient-Redundant": lighten_to_rgba("#91bfdb", factor=0.4, alpha=0.25),
+        "Insufficient-Necessary": lighten_to_rgba("#fc8d59", factor=0.45, alpha=0.25),
+        "Insufficient-Redundant": lighten_to_rgba("#d73027", factor=0.4, alpha=0.25),
+    }
+
+    for col_idx, cls in enumerate(classes, start=1):
+        class_subset = subset[subset["prediction_class"] == cls]
+        if class_subset.empty:
             continue
-            
-        for col_idx, cls in enumerate(classes, start=1):
-            col_subset = row_subset[row_subset["prediction_class"] == cls]
-            if col_subset.empty:
+        axis_suffix = "" if col_idx == 1 else str(col_idx)
+        x_axis_name = f"x{axis_suffix}" if axis_suffix else "x"
+        y_axis_name = f"y{axis_suffix}" if axis_suffix else "y"
+
+        # Background quadrants
+        fig.add_shape(
+            type="rect",
+            x0=0,
+            x1=1,
+            y0=-1,
+            y1=0,
+            xref=x_axis_name,
+            yref=y_axis_name,
+            fillcolor=quadrant_fills["Sufficient-Necessary"],
+            line=dict(width=0),
+            layer="below",
+        )
+        fig.add_shape(
+            type="rect",
+            x0=0,
+            x1=1,
+            y0=0,
+            y1=1,
+            xref=x_axis_name,
+            yref=y_axis_name,
+            fillcolor=quadrant_fills["Sufficient-Redundant"],
+            line=dict(width=0),
+            layer="below",
+        )
+        fig.add_shape(
+            type="rect",
+            x0=-1,
+            x1=0,
+            y0=-1,
+            y1=0,
+            xref=x_axis_name,
+            yref=y_axis_name,
+            fillcolor=quadrant_fills["Insufficient-Necessary"],
+            line=dict(width=0),
+            layer="below",
+        )
+        fig.add_shape(
+            type="rect",
+            x0=-1,
+            x1=0,
+            y0=0,
+            y1=1,
+            xref=x_axis_name,
+            yref=y_axis_name,
+            fillcolor=quadrant_fills["Insufficient-Redundant"],
+            line=dict(width=0),
+            layer="below",
+        )
+
+        for method in METHOD_ORDER:
+            method_subset = class_subset[class_subset["method"] == method]
+            if method_subset.empty:
                 continue
-            has_data = True
-            
-            # Group by method and graph_type for better stratification
-            for method in METHOD_ORDER:
-                method_subset = col_subset[col_subset["method"] == method]
-                if method_subset.empty:
+            graphs = order_graphs(method_subset["graph_type"].unique())
+            for graph in graphs:
+                combo_subset = method_subset[method_subset["graph_type"] == graph]
+                if combo_subset.empty:
                     continue
-                
-                # For each graph type, create a separate trace to properly show symbols
-                for graph in order_graphs(method_subset["graph_type"].unique()):
-                    graph_subset = method_subset[method_subset["graph_type"] == graph]
-                    if graph_subset.empty:
+                symbol = combo_symbols.get((method, graph), "circle")
+                for correctness, color in correctness_colors.items():
+                    status_subset = combo_subset[combo_subset.get("is_correct") == correctness]
+                    if status_subset.empty:
                         continue
-                    
-                    # Create unique legend group name
-                    legend_key = f"{method}_{graph}"
-                    show_legend = legend_key not in legend_items_added
-                    if show_legend:
-                        legend_items_added.add(legend_key)
-                    
+                    has_data = True
+                    legend_key = (method, graph, bool(correctness))
+                    showlegend = legend_key not in legend_shown
+                    if showlegend:
+                        legend_shown.add(legend_key)
                     fig.add_trace(
                         go.Scattergl(
-                            x=graph_subset["sufficiency_ratio"],
-                            y=graph_subset["necessity_ratio"],
+                            x=status_subset["sufficiency_ratio"],
+                            y=status_subset["necessity_ratio"],
                             mode="markers",
-                            name=f"{METHOD_LABELS.get(method, method)} - {graph_title_text(graph)}" if show_legend else None,
-                            legendgroup=legend_key,
                             marker=dict(
-                                color=METHOD_COLORS.get(method, "#7f8c8d"),
                                 size=7,
-                                symbol=GRAPH_SYMBOLS.get(graph, "circle"),
-                                opacity=0.7,
-                                line=dict(color="#333333", width=0.5),
+                                color=color,
+                                symbol=symbol,
+                                opacity=0.75,
+                                line=dict(color="#333333", width=0.55),
                             ),
-                            text=[
+                            customdata=status_subset[["baseline_margin"]].to_numpy(),
+                            hovertemplate=(
+                                f"{'Correct' if correctness else 'Incorrect'} prediction<br>"
                                 f"Method: {METHOD_LABELS.get(method, method)}<br>"
                                 f"Graph: {graph_title_text(graph)}<br>"
-                                f"Baseline margin: {baseline:.3f}"
-                                for baseline in graph_subset.get("baseline_margin", np.nan)
-                            ],
-                            hovertemplate=(
-                                f"{correctness_label}, Class {cls}<br>"
                                 "Suff. ratio: %{x:.3f}<br>"
-                                "Nec. ratio: %{y:.3f}<br>%{text}<extra></extra>"
+                                "Nec. ratio: %{y:.3f}<br>"
+                                "Baseline margin: %{customdata[0]:.3f}<extra></extra>"
                             ),
-                            showlegend=show_legend,
+                            showlegend=showlegend,
+                            legendgroup=f"{method}_{graph}_{correctness}",
+                            name=(
+                                f"{METHOD_LABELS.get(method, method)} · {graph_title_text(graph)} · "
+                                f"{'Correct' if correctness else 'Incorrect'}"
+                            )
+                            if showlegend
+                            else None,
                         ),
-                        row=row_idx,
+                        row=1,
                         col=col_idx,
                     )
 
     if not has_data:
         return
 
-    # Add reference lines
-    for row_idx in range(1, 3):
-        for col_idx in range(1, len(classes) + 1):
-            fig.add_hline(y=0, line_dash="dot", line_color="#999", row=row_idx, col=col_idx, line_width=1)
-            fig.add_vline(x=0, line_dash="dot", line_color="#999", row=row_idx, col=col_idx, line_width=1)
-
-    # Update axes
     for col_idx in range(1, len(classes) + 1):
-        fig.update_xaxes(range=RATIO_LIMIT, row=2, col=col_idx)
-        fig.update_yaxes(range=RATIO_LIMIT, row=1, col=col_idx)
-        fig.update_xaxes(title_text="Sufficiency Ratio", row=2, col=col_idx)
-    
-    fig.update_yaxes(title_text="Necessity Ratio", row=1, col=1)
-    fig.update_yaxes(title_text="Necessity Ratio", row=2, col=1)
+        fig.add_hline(y=0, line_dash="dot", line_color="#999", row=1, col=col_idx, line_width=1)
+        fig.add_vline(x=0, line_dash="dot", line_color="#999", row=1, col=col_idx, line_width=1)
+        fig.update_xaxes(range=RATIO_LIMIT, title_text="Sufficiency Ratio", row=1, col=col_idx)
+    fig.update_yaxes(range=RATIO_LIMIT, title_text="Necessity Ratio", row=1, col=1)
 
     fig.update_layout(
         title=dict(
             text=(
                 "<b>Sufficiency–Necessity Trade-off Scatter</b><br>"
-                f"<sub>{dataset_label(dataset)} · Stratified by class (columns), correctness (rows), "
-                f"method (color), and graph type (symbol)</sub>"
+                f"<sub>{dataset_label(dataset)} · columns = class · color = correctness · symbol = method·graph</sub>"
             ),
             x=0.5,
             xanchor="center",
         ),
-        height=600 if len(classes) <= 3 else 700,
-        width=max(1200, 350 * len(classes)),
+        height=1080,
+        width=max(1920, 480 * len(classes)),
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(size=10),
         legend=dict(
-            orientation="v",
-            yanchor="top",
-            y=1.0,
-            xanchor="left",
-            x=1.01,
+            orientation="h",
+            yanchor="bottom",
+            y=1.32,
+            xanchor="center",
+            x=0.5,
             font=dict(size=9),
+            traceorder="grouped",
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="rgba(0,0,0,0.25)",
+            borderwidth=1,
         ),
+        margin=dict(t=320, b=90, l=90, r=70),
     )
 
     save_figure(
         fig,
         output_dir / f"vizB_tradeoff_scatter_{dataset}",
-        width=max(1200, 350 * len(classes)),
-        height=600 if len(classes) <= 3 else 700,
+        width=max(1920, 480 * len(classes)),
+        height=1080,
     )
 
 
@@ -631,7 +738,7 @@ def create_ratio_heatmap(
             x=0.5,
             xanchor="center",
         ),
-        height=max(400, 80 * len(available_methods) + 150),
+        height=max(1080, 200 * len(available_methods) + 200),
         width=1400,
         plot_bgcolor="white",
         paper_bgcolor="white",
@@ -641,8 +748,8 @@ def create_ratio_heatmap(
     save_figure(
         fig,
         output_dir / f"vizC_ratio_comparison_heatmap_{dataset}",
-        width=1400,
-        height=max(400, 80 * len(available_methods) + 150),
+        width=1920,
+        height=max(1080, 200 * len(available_methods) + 200),
     )
 
 
@@ -676,34 +783,39 @@ def create_correctness_violins(instances: pd.DataFrame, dataset: str, output_dir
             method_subset = row_subset[row_subset["method"] == method]
             if method_subset.empty:
                 continue
-            x_label = METHOD_LABELS.get(method, method)
-            for metric, name, color, side in ratio_specs:
-                fig.add_trace(
-                    go.Violin(
-                        x=[x_label] * len(method_subset),
-                        y=method_subset[metric],
-                        legendgroup=name,
-                        name=name if (row_idx == 1 and method == METHOD_ORDER[0]) else None,
-                        line=dict(color=color, width=1.5),
-                        fillcolor=with_alpha(color, 0.45),
-                        meanline=dict(visible=True),
-                        spanmode="hard",
-                        span=RATIO_LIMIT,
-                        side=side,
-                        width=0.6,
-                        points=False,
-                        showlegend=(row_idx == 1 and method == METHOD_ORDER[0]),
-                    ),
-                    row=row_idx,
-                    col=1,
-                )
+            graphs = order_graphs(method_subset["graph_type"].unique())
+            for graph in graphs:
+                exp_subset = method_subset[method_subset["graph_type"] == graph]
+                if exp_subset.empty:
+                    continue
+                x_label = f"{METHOD_LABELS.get(method, method)}<br>{graph_title_text(graph)}"
+                for metric, name, color, side in ratio_specs:
+                    fig.add_trace(
+                        go.Violin(
+                            x=[x_label] * len(exp_subset),
+                            y=exp_subset[metric],
+                            legendgroup=name,
+                            name=name if (row_idx == 1 and method == METHOD_ORDER[0] and graph == graphs[0]) else None,
+                            line=dict(color=color, width=1.5),
+                            fillcolor=with_alpha(color, 0.45),
+                            meanline=dict(visible=True),
+                            spanmode="hard",
+                            span=RATIO_LIMIT,
+                            side=side,
+                            width=0.6,
+                            points=False,
+                            showlegend=(row_idx == 1 and method == METHOD_ORDER[0] and graph == graphs[0]),
+                        ),
+                        row=row_idx,
+                        col=1,
+                    )
 
     if not has_data:
         return
 
     fig.update_yaxes(title_text="Ratio", range=RATIO_LIMIT, row=1, col=1)
-    fig.update_xaxes(title_text="Method", row=1, col=1)
-    fig.update_xaxes(title_text="Method", row=2, col=1)
+    fig.update_xaxes(title_text="Method · Graph", row=1, col=1)
+    fig.update_xaxes(title_text="Method · Graph", row=2, col=1)
     fig.update_layout(
         title=dict(
             text=(
@@ -713,14 +825,14 @@ def create_correctness_violins(instances: pd.DataFrame, dataset: str, output_dir
             x=0.5,
             xanchor="center",
         ),
-        height=650,
-        width=1000,
+        height=1080,
+        width=1920,
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(size=11),
     )
 
-    save_figure(fig, output_dir / f"vizD_correctness_violins_{dataset}", width=1000, height=650)
+    save_figure(fig, output_dir / f"vizD_correctness_violins_{dataset}", width=1920, height=1080)
 
 
 def main() -> None:

@@ -11,12 +11,12 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+EPS = 1e-9
+
 
 def ensure_subgraphx_stub() -> None:
-    """
-    Inject a lightweight SubgraphXResult stub so pickle payloads can be loaded
-    without requiring the original module graph.
-    """
+    """Inject a lightweight SubgraphXResult stub to load pickle payloads."""
+
     module_name = "src.explain.gnn.subgraphx.main"
     module = sys.modules.get(module_name)
     if module is None:
@@ -130,76 +130,184 @@ def _safe_iterable(values: Optional[Iterable[Any]]) -> Iterable[Any]:
     return ()
 
 
-def extract_fidelity_metrics(payload: Mapping[str, Any]) -> Tuple[
-    Optional[float],
-    Optional[float],
-    Optional[float],
-    Optional[float],
-    Optional[float],
-    Optional[float],
-]:
-    related = payload.get("related_prediction") or {}
-    if not isinstance(related, Mapping):
-        related = {}
-
-    origin = payload.get("origin_confidence")
-    if origin is None:
-        origin = related.get("origin")
-    if origin is None:
-        origin = payload.get("prediction_confidence")
-
-    masked = payload.get("masked_confidence")
-    if masked is None:
-        masked = related.get("masked")
-
-    maskout = payload.get("maskout_confidence")
-    if maskout is None:
-        maskout = related.get("maskout")
-
-    fidelity_plus = payload.get("fidelity_plus")
-    if fidelity_plus is None and origin is not None and masked is not None:
+def _fix_indices(indices: Iterable[Any], count: int) -> List[int]:
+    valid: List[int] = []
+    for value in indices:
         try:
-            fidelity_plus = float(origin) - float(masked)
+            idx = int(value)
         except Exception:
-            fidelity_plus = None
+            continue
+        if 0 <= idx < count:
+            valid.append(idx)
+    return valid
 
-    fidelity_minus = payload.get("fidelity_minus")
-    if fidelity_minus is None and origin is not None and maskout is not None:
+
+def _aggregate_subgraphx_scores(
+    explanation: Sequence[Mapping[str, Any]], num_nodes: int
+) -> np.ndarray:
+    """Aggregate coalition weights into per-node scores for SubgraphX outputs."""
+
+    max_idx = num_nodes - 1
+    if num_nodes <= 0:
+        for entry in explanation:
+            coalition = entry.get("coalition") or []
+            for node in coalition:
+                try:
+                    max_idx = max(max_idx, int(node))
+                except Exception:
+                    continue
+        num_nodes = max_idx + 1 if max_idx >= 0 else 0
+    if num_nodes <= 0:
+        return np.zeros(0, dtype=float)
+
+    scores = np.zeros(num_nodes, dtype=float)
+    for entry in explanation:
+        coalition = entry.get("coalition") or []
+        if not coalition:
+            continue
         try:
-            fidelity_minus = float(origin) - float(maskout)
+            weight = float(entry.get("W", entry.get("P", 0.0)))
         except Exception:
-            fidelity_minus = None
+            continue
+        weight = abs(weight)
+        if weight <= 0.0:
+            continue
+        norm = max(len(coalition), 1)
+        for node in coalition:
+            try:
+                idx = int(node)
+            except Exception:
+                continue
+            if 0 <= idx < num_nodes:
+                scores[idx] += weight / norm
+    return scores
 
-    sparsity = payload.get("sparsity")
-    if sparsity is None:
-        sparsity = related.get("sparsity")
 
-    try:
-        sparsity = float(sparsity) if sparsity is not None else None
-    except Exception:
+def compute_signal_noise(
+    payload: Mapping[str, Any],
+) -> Tuple[float, float, float, float, int, int, str, bool]:
+    """Return signal/noise statistics plus provenance metadata for a GNN explanation."""
+
+    explanation = payload.get("explanation")
+    importance_array: np.ndarray
+    top_k_source = "unknown"
+    aggregated = False
+
+    if isinstance(explanation, Mapping):
+        importance = explanation.get("node_importance")
+        if importance is None:
+            return 0.0, 0.0, 0.0, 0.0, 0, 0, top_k_source, aggregated
+        importance_array = np.asarray(list(_safe_iterable(importance)), dtype=float)
+    elif isinstance(explanation, Sequence):
+        num_nodes = payload.get("num_nodes")
+        try:
+            num_nodes = int(num_nodes) if num_nodes is not None else 0
+        except Exception:
+            num_nodes = 0
+        importance_array = _aggregate_subgraphx_scores(explanation, num_nodes)
+        aggregated = True
+    else:
+        return 0.0, 0.0, 0.0, 0.0, 0, 0, top_k_source, aggregated
+
+    if importance_array.size == 0:
+        return 0.0, 0.0, 0.0, 0.0, 0, 0, top_k_source, aggregated
+
+    related = payload.get("related_prediction")
+    top_nodes: List[int] = []
+    if isinstance(explanation, Mapping) and isinstance(
+        explanation.get("top_nodes"), Iterable
+    ):
+        top_nodes = _fix_indices(explanation.get("top_nodes"), importance_array.size)
+        if top_nodes:
+            top_k_source = "explicit_nodes"
+    if not top_nodes and isinstance(related, Mapping):
+        top_nodes = _fix_indices(related.get("top_nodes", []), importance_array.size)
+        if top_nodes:
+            top_k_source = "explicit_nodes"
+
+    ranking: List[int] = []
+    if isinstance(explanation, Mapping) and isinstance(
+        explanation.get("node_ranking"), Iterable
+    ):
+        ranking = _fix_indices(explanation.get("node_ranking"), importance_array.size)
+    if not ranking and isinstance(related, Mapping):
+        ranking = _fix_indices(related.get("ranked_nodes", []), importance_array.size)
+    if not ranking:
+        order = np.argsort(np.abs(importance_array))[::-1]
+        ranking = order.tolist()
+
+    if not top_nodes:
         sparsity = None
+        if isinstance(related, Mapping):
+            sparsity = related.get("sparsity")
+        if sparsity is None:
+            sparsity = payload.get("sparsity")
+        try:
+            sparsity = float(sparsity) if sparsity is not None else 0.2
+        except Exception:
+            sparsity = 0.2
+        k = max(1, int(round(importance_array.size * max(min(sparsity, 1.0), 0.0))))
+        top_nodes = ranking[:k]
+        top_k_source = "sparsity_based"
+
+    top_nodes = list(dict.fromkeys(top_nodes))
+    if not top_nodes:
+        order = np.argsort(np.abs(importance_array))[::-1]
+        k = max(1, min(5, importance_array.size))
+        top_nodes = order[:k].tolist()
+        top_k_source = "auto_default"
+    elif top_k_source == "unknown":
+        # A ranking branch succeeded
+        top_k_source = "ranking_based"
+
+    mask = np.zeros_like(importance_array, dtype=bool)
+    mask[top_nodes] = True
+    if mask.all():
+        mask[top_nodes[len(top_nodes) // 2 :]] = False  # ensure noise set non-empty
+
+    signal_values = np.abs(importance_array[mask])
+    noise_values = np.abs(importance_array[~mask])
+
+    signal_mean = float(signal_values.mean()) if signal_values.size else 0.0
+    noise_mean = float(noise_values.mean()) if noise_values.size else 0.0
+    signal_std = float(signal_values.std(ddof=0)) if signal_values.size else 0.0
+    noise_std = float(noise_values.std(ddof=0)) if noise_values.size else 0.0
 
     return (
-        float(origin) if origin is not None else None,
-        float(masked) if masked is not None else None,
-        float(maskout) if maskout is not None else None,
-        float(fidelity_plus) if fidelity_plus is not None else None,
-        float(fidelity_minus) if fidelity_minus is not None else None,
-        sparsity,
+        signal_mean,
+        signal_std,
+        noise_mean,
+        noise_std,
+        int(signal_values.size),
+        int(noise_values.size),
+        top_k_source,
+        aggregated,
     )
+
+
+def compute_instance_snr(signal_mean: float, signal_std: float, noise_mean: float, noise_std: float) -> Tuple[float, float]:
+    """Compute per-instance SNR (linear and dB) from signal/noise stats."""
+
+    if signal_mean <= 0.0:
+        return 0.0, -np.inf
+    denom = max(noise_mean, EPS)
+    snr_linear = float(signal_mean / denom)
+    snr_db = 20.0 * float(np.log10(max(snr_linear, EPS)))
+    return snr_linear, snr_db
 
 
 def build_record(payload: Dict[str, Any], metadata: Dict[str, str]) -> Dict[str, Any]:
     (
-        origin_confidence,
-        masked_confidence,
-        maskout_confidence,
-        fidelity_plus,
-        fidelity_minus,
-        sparsity,
-    ) = extract_fidelity_metrics(payload)
-
-    sparsity_percent = float(sparsity * 100.0) if sparsity is not None else None
+        signal_mean,
+        signal_std,
+        noise_mean,
+        noise_std,
+        signal_count,
+        noise_count,
+        top_k_source,
+        aggregated,
+    ) = compute_signal_noise(payload)
+    snr_linear, snr_db = compute_instance_snr(signal_mean, signal_std, noise_mean, noise_std)
 
     label = payload.get("label")
     prediction_class = payload.get("prediction_class")
@@ -209,16 +317,6 @@ def build_record(payload: Dict[str, Any], metadata: Dict[str, str]) -> Dict[str,
             is_correct = int(label) == int(prediction_class)
         except Exception:
             pass
-
-    fidelity_asymmetry: Optional[float] = None
-    abs_fidelity_asymmetry: Optional[float] = None
-    if fidelity_plus is not None and fidelity_minus is not None:
-        try:
-            fidelity_asymmetry = float(fidelity_minus) - float(fidelity_plus)
-            abs_fidelity_asymmetry = abs(fidelity_asymmetry)
-        except Exception:
-            fidelity_asymmetry = None
-            abs_fidelity_asymmetry = None
 
     record: Dict[str, Any] = {
         "method": metadata["method"],
@@ -235,12 +333,19 @@ def build_record(payload: Dict[str, Any], metadata: Dict[str, str]) -> Dict[str,
         "prediction_class": prediction_class,
         "prediction_confidence": payload.get("prediction_confidence"),
         "is_correct": is_correct,
-        "fidelity_plus": fidelity_plus,
-        "fidelity_minus": fidelity_minus,
-        "fidelity_asymmetry": fidelity_asymmetry,
-        "abs_fidelity_asymmetry": abs_fidelity_asymmetry,
-        "sparsity": sparsity,
-        "sparsity_percent": sparsity_percent,
+        "signal_mean": signal_mean,
+        "signal_std": signal_std,
+        "noise_mean": noise_mean,
+        "noise_std": noise_std,
+        "signal_count": signal_count,
+        "noise_count": noise_count,
+        "signal_minus_noise": float(signal_mean - noise_mean),
+        "snr_linear": snr_linear,
+        "snr_db": snr_db,
+        "top_k_source": top_k_source,
+        "signal_k": signal_count,
+        "noise_k": noise_count,
+        "aggregated_from_coalitions": bool(aggregated),
     }
     return record
 
@@ -292,9 +397,7 @@ def process_method(
         target_path = target_dir / f"{graph_slug}.csv"
 
         df = pd.DataFrame(rows)
-        sort_columns = [
-            column for column in ("split", "run_id", "graph_index") if column in df.columns
-        ]
+        sort_columns = [column for column in ("split", "run_id", "graph_index") if column in df.columns]
         if sort_columns:
             df.sort_values(sort_columns, inplace=True, kind="mergesort")
         df.to_csv(target_path, index=False)
@@ -305,7 +408,7 @@ def process_method(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Aggregate GNN fidelity metrics into CSV summaries.")
+    parser = argparse.ArgumentParser(description="Extract SNR analytics from GNN explanation payloads.")
     parser.add_argument(
         "--base-dir",
         type=Path,
@@ -315,8 +418,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("outputs/analytics/fidelity"),
-        help="Directory where fidelity CSV files will be written.",
+        default=Path("outputs/analytics/snr"),
+        help="Directory where SNR CSV files will be written.",
     )
     parser.add_argument(
         "--methods",
@@ -359,10 +462,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             except Exception:
                 continue
         print(
-            f"\nCompleted fidelity aggregation for {len(all_written)} CSV file(s) ({total_rows} total rows)."
+            f"\nCompleted SNR extraction for {len(all_written)} CSV file(s) ({total_rows} total rows)."
         )
     else:
-        print("\nNo fidelity CSV files were generated.")
+        print("\nNo SNR CSV files were generated.")
 
 
 if __name__ == "__main__":

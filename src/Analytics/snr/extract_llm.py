@@ -2,10 +2,13 @@ import argparse
 import pickle
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
+
+EPS = 1e-9
 
 
 def slugify(value: str) -> str:
@@ -45,64 +48,90 @@ def load_payload(path: Path) -> Dict[str, Any]:
         payload = pickle.load(handler)
     if isinstance(payload, dict):
         return payload
-    if hasattr(payload, "__dict__"):
+    if hasattr(payload, "__dict"):
         return dict(payload.__dict__)
     raise ValueError(f"Unsupported pickle payload at {path}")
 
 
-def extract_fidelity_metrics(payload: Mapping[str, Any]) -> Dict[str, Optional[float]]:
-    related = payload.get("related_prediction") or {}
-    if not isinstance(related, Mapping):
-        related = {}
-
-    origin = payload.get("origin_confidence")
-    if origin is None:
-        origin = related.get("origin")
-
-    masked = payload.get("masked_confidence")
-    if masked is None:
-        masked = related.get("masked")
-
-    maskout = payload.get("maskout_confidence")
-    if maskout is None:
-        maskout = related.get("maskout")
-
-    fidelity_plus = payload.get("fidelity_plus")
-    if fidelity_plus is None and origin is not None and masked is not None:
-        fidelity_plus = float(origin) - float(masked)
-
-    fidelity_minus = payload.get("fidelity_minus")
-    if fidelity_minus is None and origin is not None and maskout is not None:
-        fidelity_minus = float(origin) - float(maskout)
-
-    sparsity = payload.get("sparsity")
-    if sparsity is None:
-        sparsity = related.get("sparsity")
+def _safe_iterable(values: Optional[Iterable[Any]]) -> List[Any]:
+    if values is None:
+        return []
+    if isinstance(values, (list, tuple, range)):
+        return list(values)
+    if isinstance(values, np.ndarray):
+        return values.tolist()
     try:
-        sparsity = float(sparsity) if sparsity is not None else None
+        return list(values)
     except Exception:
-        sparsity = None
+        return []
 
-    sparsity_percent = float(sparsity * 100.0) if sparsity is not None else None
 
-    fidelity_asymmetry: Optional[float] = None
-    abs_fidelity_asymmetry: Optional[float] = None
-    if fidelity_plus is not None and fidelity_minus is not None:
+def compute_signal_noise(
+    payload: Mapping[str, Any]
+) -> Tuple[float, float, float, float, int, int, str]:
+    """Extract signal/noise statistics and provenance from a TokenSHAP payload."""
+
+    top_word_scores = _safe_iterable(payload.get("top_word_scores"))
+    if not top_word_scores:
+        return 0.0, 0.0, 0.0, 0.0, 0, 0, "missing_scores"
+
+    scores = np.asarray(top_word_scores, dtype=float)
+    scores = np.abs(scores)
+    if scores.size == 0:
+        return 0.0, 0.0, 0.0, 0.0, 0, 0, "missing_scores"
+
+    top_tokens = _safe_iterable(payload.get("top_tokens"))
+    if top_tokens:
+        k = max(1, min(len(top_tokens), scores.size))
+        top_k_source = "explicit_tokens"
+    else:
+        sparsity = payload.get("sparsity")
         try:
-            fidelity_asymmetry = float(fidelity_minus) - float(fidelity_plus)
-            abs_fidelity_asymmetry = abs(fidelity_asymmetry)
+            sparsity = float(sparsity) if sparsity is not None else 0.2
         except Exception:
-            fidelity_asymmetry = None
-            abs_fidelity_asymmetry = None
+            sparsity = 0.2
+        k = max(1, int(round(scores.size * max(min(sparsity, 1.0), 0.0))))
+        top_k_source = "sparsity_based"
 
-    return {
-        "fidelity_plus": float(fidelity_plus) if fidelity_plus is not None else None,
-        "fidelity_minus": float(fidelity_minus) if fidelity_minus is not None else None,
-        "fidelity_asymmetry": fidelity_asymmetry,
-        "abs_fidelity_asymmetry": abs_fidelity_asymmetry,
-        "sparsity": sparsity,
-        "sparsity_percent": sparsity_percent,
-    }
+    if k >= scores.size:
+        k = max(1, scores.size // 2)
+        if k == 0:
+            k = 1
+        top_k_source = "auto_default"
+
+    signal_vals = scores[:k]
+    noise_vals = scores[k:]
+
+    if noise_vals.size == 0:
+        half = max(1, signal_vals.size // 2)
+        noise_vals = signal_vals[half:].copy()
+        signal_vals = signal_vals[:half].copy()
+        if noise_vals.size == 0:
+            noise_vals = signal_vals.copy()
+
+    signal_mean = float(signal_vals.mean()) if signal_vals.size else 0.0
+    noise_mean = float(noise_vals.mean()) if noise_vals.size else 0.0
+    signal_std = float(signal_vals.std(ddof=0)) if signal_vals.size else 0.0
+    noise_std = float(noise_vals.std(ddof=0)) if noise_vals.size else 0.0
+
+    return (
+        signal_mean,
+        signal_std,
+        noise_mean,
+        noise_std,
+        int(signal_vals.size),
+        int(noise_vals.size),
+        top_k_source,
+    )
+
+
+def compute_instance_snr(signal_mean: float, noise_mean: float) -> Tuple[float, float]:
+    if signal_mean <= 0.0:
+        return 0.0, -np.inf
+    denom = max(noise_mean, EPS)
+    snr_linear = float(signal_mean / denom)
+    snr_db = 20.0 * float(np.log10(max(snr_linear, EPS)))
+    return snr_linear, snr_db
 
 
 def build_record(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -111,7 +140,16 @@ def build_record(payload: Dict[str, Any]) -> Dict[str, Any]:
     graph_type = payload.get("graph_type") or "tokens"
     method = payload.get("method") or "token_shap_llm"
 
-    metrics = extract_fidelity_metrics(payload)
+    (
+        signal_mean,
+        signal_std,
+        noise_mean,
+        noise_std,
+        signal_count,
+        noise_count,
+        top_k_source,
+    ) = compute_signal_noise(payload)
+    snr_linear, snr_db = compute_instance_snr(signal_mean, noise_mean)
 
     record: Dict[str, Any] = {
         "method": method,
@@ -127,7 +165,19 @@ def build_record(payload: Dict[str, Any]) -> Dict[str, Any]:
         "prediction_class": payload.get("prediction_class"),
         "prediction_confidence": payload.get("prediction_confidence"),
         "is_correct": payload.get("is_correct"),
-        **metrics,
+        "signal_mean": signal_mean,
+        "signal_std": signal_std,
+        "noise_mean": noise_mean,
+        "noise_std": noise_std,
+        "signal_count": signal_count,
+        "noise_count": noise_count,
+        "signal_minus_noise": float(signal_mean - noise_mean),
+        "snr_linear": snr_linear,
+        "snr_db": snr_db,
+        "top_k_source": top_k_source,
+        "signal_k": signal_count,
+        "noise_k": noise_count,
+        "aggregated_from_coalitions": False,
     }
     return record
 
@@ -174,9 +224,7 @@ def process_pickles(
         target_path = target_dir / f"{graph_slug}.csv"
 
         df = pd.DataFrame(rows)
-        sort_columns = [
-            column for column in ("run_id", "graph_index") if column in df.columns
-        ]
+        sort_columns = [column for column in ("run_id", "graph_index") if column in df.columns]
         if sort_columns:
             df.sort_values(sort_columns, inplace=True, kind="mergesort")
         df.to_csv(target_path, index=False)
@@ -187,7 +235,7 @@ def process_pickles(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Aggregate TokenSHAP LLM fidelity metrics into CSV summaries.")
+    parser = argparse.ArgumentParser(description="Extract SNR analytics from TokenSHAP explanation payloads.")
     parser.add_argument(
         "--base-dir",
         type=Path,
@@ -197,8 +245,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("outputs/analytics/fidelity"),
-        help="Directory where fidelity CSV files will be written.",
+        default=Path("outputs/analytics/snr"),
+        help="Directory where SNR CSV files will be written.",
     )
     parser.add_argument(
         "--limit",
@@ -231,10 +279,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             except Exception:
                 continue
         print(
-            f"\nCompleted TokenSHAP fidelity aggregation for {len(written)} CSV file(s) ({total_rows} total rows)."
+            f"\nCompleted TokenSHAP SNR extraction for {len(written)} CSV file(s) ({total_rows} total rows)."
         )
     else:
-        print("\nNo TokenSHAP fidelity CSV files were generated.")
+        print("\nNo TokenSHAP SNR CSV files were generated.")
 
 
 if __name__ == "__main__":

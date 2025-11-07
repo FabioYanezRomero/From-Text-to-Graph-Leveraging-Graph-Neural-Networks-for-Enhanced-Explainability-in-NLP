@@ -36,6 +36,7 @@ import pandas as pd
 BASE_INPUT_ROOT = Path("outputs/analytics/fidelity")
 DEFAULT_OUTPUT_ROOT = Path("outputs/analytics/fidelity")
 SUMMARY_FILENAME = "fidelity_summary.csv"
+ASYMMETRY_THRESHOLD = 0.3
 
 REQUIRED_COLUMNS = {
     "method",
@@ -118,6 +119,16 @@ def compute_diagnostics(group: pd.DataFrame) -> Dict[str, float]:
     return diagnostics
 
 
+def _round(value: object, digits: int = 4) -> float:
+    try:
+        numeric = float(value)
+    except Exception:
+        return float("nan")
+    if np.isnan(numeric):
+        return float("nan")
+    return round(numeric, digits)
+
+
 def summarise_group(
     group: pd.DataFrame,
     *,
@@ -129,26 +140,57 @@ def summarise_group(
     if group.empty:
         return {}
 
+    asymmetry = group["fidelity_minus"] - group["fidelity_plus"]
+    abs_asymmetry = asymmetry.abs()
+    insertion_dominant = group["fidelity_plus"] > group["fidelity_minus"]
+    deletion_dominant = group["fidelity_minus"] > group["fidelity_plus"]
+    strong_positive = asymmetry > ASYMMETRY_THRESHOLD
+    strong_negative = asymmetry < -ASYMMETRY_THRESHOLD
+
+    sparsity_series = group["sparsity"]
+    confidence_series = group["prediction_confidence"]
+
     summary: Dict[str, object] = {
         "method": method,
         "dataset": dataset,
         "graph": graph,
         "group": group_name,
         "sample_size": int(len(group)),
-        "fidelity_plus_mean": round(float(group["fidelity_plus"].mean()), 4),
-        "fidelity_plus_std": round(float(group["fidelity_plus"].std(ddof=0)), 4),
-        "fidelity_plus_min": round(float(group["fidelity_plus"].min()), 4),
-        "fidelity_plus_max": round(float(group["fidelity_plus"].max()), 4),
-        "fidelity_plus_q25": round(float(group["fidelity_plus"].quantile(0.25)), 4),
-        "fidelity_plus_q75": round(float(group["fidelity_plus"].quantile(0.75)), 4),
-        "fidelity_minus_mean": round(float(group["fidelity_minus"].mean()), 4),
-        "fidelity_minus_std": round(float(group["fidelity_minus"].std(ddof=0)), 4),
-        "fidelity_minus_min": round(float(group["fidelity_minus"].min()), 4),
-        "fidelity_minus_max": round(float(group["fidelity_minus"].max()), 4),
-        "fidelity_minus_q25": round(float(group["fidelity_minus"].quantile(0.25)), 4),
-        "fidelity_minus_q75": round(float(group["fidelity_minus"].quantile(0.75)), 4),
-        "mean_prediction_confidence": round(float(group["prediction_confidence"].mean()), 4),
-        "mean_sparsity": round(float(group["sparsity"].mean()), 4),
+        "fidelity_plus_mean": _round(group["fidelity_plus"].mean()),
+        "fidelity_plus_std": _round(group["fidelity_plus"].std(ddof=0)),
+        "fidelity_plus_min": _round(group["fidelity_plus"].min()),
+        "fidelity_plus_max": _round(group["fidelity_plus"].max()),
+        "fidelity_plus_q25": _round(group["fidelity_plus"].quantile(0.25)),
+        "fidelity_plus_q75": _round(group["fidelity_plus"].quantile(0.75)),
+        "fidelity_minus_mean": _round(group["fidelity_minus"].mean()),
+        "fidelity_minus_std": _round(group["fidelity_minus"].std(ddof=0)),
+        "fidelity_minus_min": _round(group["fidelity_minus"].min()),
+        "fidelity_minus_max": _round(group["fidelity_minus"].max()),
+        "fidelity_minus_q25": _round(group["fidelity_minus"].quantile(0.25)),
+        "fidelity_minus_q75": _round(group["fidelity_minus"].quantile(0.75)),
+        "fidelity_asymmetry_mean": _round(asymmetry.mean()),
+        "fidelity_asymmetry_std": _round(asymmetry.std(ddof=0)),
+        "fidelity_asymmetry_min": _round(asymmetry.min()),
+        "fidelity_asymmetry_max": _round(asymmetry.max()),
+        "abs_fidelity_asymmetry_mean": _round(abs_asymmetry.mean()),
+        "sparsity_mean": _round(sparsity_series.mean()),
+        "sparsity_std": _round(sparsity_series.std(ddof=0)),
+        "sparsity_min": _round(sparsity_series.min()),
+        "sparsity_max": _round(sparsity_series.max()),
+        "prediction_confidence_mean": _round(confidence_series.mean()),
+        "prediction_confidence_std": _round(confidence_series.std(ddof=0)),
+        "prediction_confidence_min": _round(confidence_series.min()),
+        "prediction_confidence_max": _round(confidence_series.max()),
+        "mean_sparsity": _round(sparsity_series.mean()),
+        "mean_prediction_confidence": _round(confidence_series.mean()),
+        "strong_asymmetry_positive_count": int(strong_positive.sum()),
+        "strong_asymmetry_positive_pct": _round(100.0 * strong_positive.mean(), 2),
+        "strong_asymmetry_negative_count": int(strong_negative.sum()),
+        "strong_asymmetry_negative_pct": _round(100.0 * strong_negative.mean(), 2),
+        "insertion_dominant_count": int(insertion_dominant.sum()),
+        "insertion_dominant_pct": _round(100.0 * insertion_dominant.mean(), 2),
+        "deletion_dominant_count": int(deletion_dominant.sum()),
+        "deletion_dominant_pct": _round(100.0 * deletion_dominant.mean(), 2),
     }
 
     summary.update(compute_diagnostics(group))
@@ -167,6 +209,10 @@ def process_csv(csv_path: Path) -> pd.DataFrame:
     method = str(df["method"].iloc[0])
     dataset = dataset_slug(df)
     graph = str(df["graph_type"].iloc[0])
+
+    df = df.copy()
+    df["fidelity_asymmetry"] = df["fidelity_minus"] - df["fidelity_plus"]
+    df["abs_fidelity_asymmetry"] = df["fidelity_asymmetry"].abs()
 
     records: List[Dict[str, object]] = []
 
@@ -216,11 +262,10 @@ def aggregate_fidelity(csv_paths: List[Path], output_root: Path) -> None:
         if summary_df.empty:
             continue
 
-        method = summary_df["method"].iloc[0]
-        dataset = summary_df["dataset"].iloc[0]
-        graph = summary_df["graph"].iloc[0]
-
-        graph_dir = output_root / graph
+        method_dir = csv_path.parent.parent.name
+        dataset_dir = csv_path.parent.name
+        graph_dirname = csv_path.stem
+        graph_dir = output_root / method_dir / dataset_dir / graph_dirname
         graph_dir.mkdir(parents=True, exist_ok=True)
 
         graph_df = summary_df.sort_values(
