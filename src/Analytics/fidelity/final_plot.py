@@ -27,6 +27,7 @@ from plotly.subplots import make_subplots
 
 INSTANCE_ROOT = Path("outputs/analytics/fidelity")
 OUTPUT_ROOT = Path("outputs/analytics/fidelity/plots")
+SUMMARY_PATH = Path("outputs/analytics/fidelity/fidelity_summary.csv")
 OUTPUT_FILENAME = "fidelity_quadrants_{dataset}.html"
 
 DATASET_LABELS: Dict[str, str] = {
@@ -83,6 +84,26 @@ QUADRANT_COLORS: Dict[str, str] = {
     "+-": "rgba(145, 191, 219, 0.18)",  # Sufficient but redundant (informational)
 }
 
+FULLSCREEN_STYLE = """
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background-color: #ffffff;
+}
+body {
+    display: flex;
+    align-items: stretch;
+    justify-content: stretch;
+}
+.plotly-graph-div {
+    width: 100vw !important;
+    height: 100vh !important;
+}
+</style>
+"""
+
 # --------------------------------------------------------------------------- #
 # Helpers                                                                     #
 # --------------------------------------------------------------------------- #
@@ -128,6 +149,23 @@ def load_dataset_instances(root: Path, dataset: str) -> pd.DataFrame:
     data["correctness_label"] = data["is_correct"].map({True: "Correct", False: "Incorrect"}).fillna("Unknown")
     data["prediction_class"] = data["prediction_class"].astype(str)
     return data
+
+
+def slugify_dataset(name: str) -> str:
+    return name.replace("/", "_").replace("-", "_").lower()
+
+
+def load_summary_data(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Summary CSV not found: {path}")
+    df = pd.read_csv(path)
+    if df.empty:
+        raise ValueError(f"Summary CSV empty: {path}")
+    df = df.copy()
+    df["dataset_slug"] = df["dataset"].astype(str).apply(slugify_dataset)
+    df["method"] = df["method"].astype(str)
+    df["graph"] = df["graph"].astype(str)
+    return df
 
 
 def sorted_classes(data: pd.DataFrame) -> List[str]:
@@ -176,6 +214,21 @@ def add_quadrant_background(fig: go.Figure, col_idx: int, x_limits: tuple[float,
             row=1,
             col=col_idx,
         )
+
+
+def write_fullscreen_html(fig: go.Figure, output_path: Path) -> None:
+    """Persist ``fig`` as a fullscreen HTML artifact for easier inspection."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    html = fig.to_html(
+        include_plotlyjs="cdn",
+        full_html=True,
+        config={"responsive": True, "displaylogo": False},
+        default_width="100vw",
+        default_height="100vh",
+    )
+    if "</head>" in html:
+        html = html.replace("</head>", FULLSCREEN_STYLE + "\n</head>", 1)
+    output_path.write_text(html, encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
@@ -327,9 +380,9 @@ def build_quadrant_plot(dataset: str, root: Path, output_root: Path) -> Path:
         font=dict(family="Arial, sans-serif", size=12),
         plot_bgcolor="white",
         paper_bgcolor="white",
-        height=920,
-        width=max(2000, 550 * len(classes)),
-        margin=dict(t=250, b=130, l=120, r=90),
+        height=1080,
+        width=1920,
+        margin=dict(t=200, b=160, l=140, r=100),
     )
 
     fig.add_annotation(
@@ -345,8 +398,7 @@ def build_quadrant_plot(dataset: str, root: Path, output_root: Path) -> Path:
     )
 
     output_path = output_root / dataset / OUTPUT_FILENAME.format(dataset=dataset)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_html(str(output_path))
+    write_fullscreen_html(fig, output_path)
     print(f"✓ {dataset}: plot -> {output_path}")
     return output_path
 
@@ -480,21 +532,98 @@ def build_asymmetry_plot(dataset: str, root: Path, output_root: Path) -> Path:
         font=dict(family="Arial, sans-serif", size=12),
         plot_bgcolor="white",
         paper_bgcolor="white",
-        height=780,
-        width=max(1900, 480 * len(classes)),
-        margin=dict(t=240, b=120, l=120, r=90),
+        height=1080,
+        width=1920,
+        margin=dict(t=200, b=140, l=140, r=100),
     )
 
     output_path = output_root / dataset / f"fidelity_asymmetry_{dataset}.html"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_html(str(output_path))
+    write_fullscreen_html(fig, output_path)
     print(f"✓ {dataset}: asymmetry plot -> {output_path}")
+    return output_path
+
+
+def build_correctness_sensitivity_plot(
+    dataset: str, summary_df: pd.DataFrame, output_root: Path
+) -> Path:
+    subset = summary_df[
+        (summary_df["dataset_slug"] == dataset)
+        & (summary_df["group"].isin(["correct_true", "correct_false"]))
+    ]
+    if subset.empty:
+        raise ValueError(f"No correctness summary rows for dataset '{dataset}'.")
+
+    dataset_readable = DATASET_LABELS.get(dataset, dataset.replace("_", " ").title())
+    subset = subset.copy()
+    subset["method_label"] = subset["method"].map(METHOD_LABELS).fillna(subset["method"])
+    subset["graph_label"] = subset["graph"].map(GRAPH_LABELS).fillna(subset["graph"])
+    subset["category"] = subset["method_label"] + "<br>" + subset["graph_label"]
+    subset["correctness_label"] = subset["group"].map(
+        {"correct_true": "Correct", "correct_false": "Incorrect"}
+    )
+
+    fig = go.Figure()
+    for label, color in (("Correct", CORRECT_COLOR), ("Incorrect", INCORRECT_COLOR)):
+        group = subset[subset["correctness_label"] == label]
+        if group.empty:
+            continue
+        fig.add_trace(
+            go.Bar(
+                x=group["category"],
+                y=group["fidelity_asymmetry_mean"],
+                name=label,
+                marker_color=color,
+                opacity=0.85,
+                error_y=dict(
+                    type="data",
+                    array=group["fidelity_asymmetry_std"].fillna(0.0),
+                    visible=True,
+                ),
+            )
+        )
+
+    fig.add_hline(y=0.0, line_dash="dot", line_color="#666", line_width=1)
+    fig.update_layout(
+        title=dict(
+            text=(
+                "<b>Correctness Sensitivity of Fidelity Asymmetry</b><br>"
+                f"<span style='font-size:14px'>{dataset_readable} · Mean F⁻ − F⁺</span>"
+            ),
+            x=0.5,
+            xanchor="center",
+        ),
+        xaxis_title="Method · Graph",
+        yaxis_title="Mean asymmetry",
+        legend_title="Correctness",
+        font=dict(family="Arial, sans-serif", size=12),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        width=1920,
+        height=1080,
+        margin=dict(t=180, b=140, l=140, r=100),
+    )
+
+    output_path = output_root / dataset / f"fidelity_correctness_{dataset}.html"
+    write_fullscreen_html(fig, output_path)
+    print(f"✓ {dataset}: correctness sensitivity plot -> {output_path}")
     return output_path
 
 
 # --------------------------------------------------------------------------- #
 # CLI                                                                         #
 # --------------------------------------------------------------------------- #
+
+
+def render_all(
+    datasets: Iterable[str],
+    instance_root: Path,
+    summary_df: pd.DataFrame,
+    output_root: Path,
+) -> None:
+    for dataset in datasets:
+        build_quadrant_plot(dataset, instance_root, output_root)
+        build_asymmetry_plot(dataset, instance_root, output_root)
+        build_correctness_sensitivity_plot(dataset, summary_df, output_root)
 
 
 def parse_args() -> argparse.Namespace:
@@ -517,15 +646,20 @@ def parse_args() -> argparse.Namespace:
         default=OUTPUT_ROOT,
         help="Directory where HTML plots will be written.",
     )
+    parser.add_argument(
+        "--summary-path",
+        type=Path,
+        default=SUMMARY_PATH,
+        help="Path to fidelity_summary.csv.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     datasets = args.dataset or sorted(DATASET_LABELS.keys())
-    for dataset in datasets:
-        build_quadrant_plot(dataset, args.instance_root, args.output_root)
-        build_asymmetry_plot(dataset, args.instance_root, args.output_root)
+    summary_df = load_summary_data(args.summary_path)
+    render_all(datasets, args.instance_root, summary_df, args.output_root)
 
 
 if __name__ == "__main__":  # pragma: no cover
