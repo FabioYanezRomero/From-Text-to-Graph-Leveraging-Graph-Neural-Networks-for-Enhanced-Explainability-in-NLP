@@ -164,7 +164,7 @@ def compute_summary(dataset: str) -> pd.DataFrame:
     return summary
 
 
-def build_plot(dataset: str) -> Path:
+def quadrant_distribution_figure(dataset: str) -> go.Figure:
     summary = compute_summary(dataset)
     available_experiments = {
         (method, graph)
@@ -180,11 +180,16 @@ def build_plot(dataset: str) -> Path:
         rows=1,
         cols=len(experiment_sequence),
         subplot_titles=[
-            f"{METHOD_LABELS.get(method, method)}<br><span style='font-size:12px'>{GRAPH_LABELS.get(graph, graph)}</span>"
+            f"<b>{METHOD_LABELS.get(method, method)}</b><br><span style='font-size:12px'><b>{GRAPH_LABELS.get(graph, graph)}</b></span>"
             for method, graph in experiment_sequence
         ],
         horizontal_spacing=0.07,
+        vertical_spacing=0.08,
     )
+
+    for annotation in fig.layout.annotations:
+        if annotation.text and "Quadrant" not in annotation.text:
+            annotation.font = dict(size=20)
 
     for col_idx, (method, graph) in enumerate(experiment_sequence, start=1):
         exp_data = summary[(summary["method"] == method) & (summary["graph_type"] == graph)]
@@ -227,46 +232,57 @@ def build_plot(dataset: str) -> Path:
             showgrid=False,
             row=1,
             col=col_idx,
+            tickfont=dict(size=16, family="Arial Black, Arial, sans-serif"),
         )
         fig.update_yaxes(
             range=[0, 100],
             showgrid=True,
             gridcolor="rgba(0,0,0,0.08)",
-            title_text="Percentage (%)" if col_idx == 1 else "",
+            title_text="<b>Percentage (%)</b>" if col_idx == 1 else "",
             row=1,
             col=col_idx,
+            title_font=dict(size=18),
         )
+
+    width = max(1920, 480 * len(experiment_sequence))
 
     fig.update_layout(
         barmode="stack",
         bargap=0.25,
-        title=dict(
-            text=(
-                "<b>Quadrant Distribution by Graph Structure and Correctness</b><br>"
-                f"<span style='font-size:14px'>{dataset_label}</span>"
-            ),
-            x=0.5,
-            xanchor="center",
-        ),
         legend=dict(
-            title=dict(text="<b>Quadrant · Correctness</b>"),
             orientation="h",
             yanchor="bottom",
-            y=1.15,
+            y=1.25,
             xanchor="center",
             x=0.5,
             bgcolor="rgba(255,255,255,0.9)",
             bordercolor="rgba(0,0,0,0.25)",
             borderwidth=1,
+            font=dict(size=22),
         ),
         font=dict(family="Arial, sans-serif", size=12),
         plot_bgcolor="white",
         paper_bgcolor="white",
         height=1080,
-        width=max(1920, 480 * len(experiment_sequence)),
-        margin=dict(t=210, b=90, l=90, r=60),
+        width=width,
+        margin=dict(t=200, b=190, l=90, r=60),
     )
 
+    fig.add_annotation(
+        text="<b>Quadrant</b>",
+        x=0.5,
+        y=-0.28,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
+        font=dict(size=24),
+    )
+
+    return fig
+
+
+def build_plot(dataset: str) -> Path:
+    fig = quadrant_distribution_figure(dataset)
     output_path = PLOTS_ROOT / dataset / OUTPUT_FILENAME.format(dataset=dataset)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(output_path)

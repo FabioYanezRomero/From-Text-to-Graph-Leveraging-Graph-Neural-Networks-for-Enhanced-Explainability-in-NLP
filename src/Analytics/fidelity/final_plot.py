@@ -403,8 +403,8 @@ def build_quadrant_plot(dataset: str, root: Path, output_root: Path) -> Path:
     return output_path
 
 
-def build_asymmetry_plot(dataset: str, root: Path, output_root: Path) -> Path:
-    """Render violin plots of fidelity asymmetry per class for ``dataset``."""
+def asymmetry_figure(dataset: str, root: Path, *, show_legend: bool = True) -> go.Figure:
+    """Return violin plots of fidelity asymmetry per class for ``dataset``."""
     instances = load_dataset_instances(root, dataset)
     if instances.empty or "fidelity_asymmetry" not in instances:
         raise ValueError(f"No fidelity asymmetry data available for dataset '{dataset}'.")
@@ -449,16 +449,16 @@ def build_asymmetry_plot(dataset: str, root: Path, output_root: Path) -> Path:
 
                 colour = CORRECT_COLOR if correctness == "Correct" else INCORRECT_COLOR
                 legend_name = f"{experiment_label_clean} · {correctness}"
-                show_legend = col_idx == 1
+                trace_show_legend = show_legend and col_idx == 1
                 offset_group = f"{method}-{graph}-{correctness}"
 
                 fig.add_trace(
                     go.Violin(
                         x=[experiment_label] * len(subset),
                         y=subset["fidelity_asymmetry"],
-                        name=legend_name if show_legend else None,
+                        name=legend_name if trace_show_legend else None,
                         legendgroup=legend_name,
-                        showlegend=show_legend,
+                        showlegend=trace_show_legend,
                         orientation="v",
                         line=dict(color=colour, width=1.0),
                         fillcolor=colour,
@@ -535,7 +535,15 @@ def build_asymmetry_plot(dataset: str, root: Path, output_root: Path) -> Path:
         height=1080,
         width=1920,
         margin=dict(t=200, b=140, l=140, r=100),
+        showlegend=show_legend,
     )
+
+    return fig
+
+
+def build_asymmetry_plot(dataset: str, root: Path, output_root: Path) -> Path:
+    """Render violin plots of fidelity asymmetry per class for ``dataset``."""
+    fig = asymmetry_figure(dataset, root, show_legend=True)
 
     output_path = output_root / dataset / f"fidelity_asymmetry_{dataset}.html"
     write_fullscreen_html(fig, output_path)

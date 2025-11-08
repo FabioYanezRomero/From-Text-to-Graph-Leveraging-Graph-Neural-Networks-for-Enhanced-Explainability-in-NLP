@@ -182,13 +182,28 @@ def save_figure(fig: go.Figure, stem: Path, width: int, height: int) -> None:
     stem.parent.mkdir(parents=True, exist_ok=True)
     pdf_path = stem.with_suffix(".pdf")
     html_path = stem.with_suffix(".html")
+    upscale = 4
+    download_config = {
+        "toImageButtonOptions": {
+            "format": "png",
+            "filename": stem.name,
+            "height": height,
+            "width": width,
+            "scale": upscale,
+        }
+    }
     try:
         fig.write_image(str(pdf_path), width=width, height=height)
         print(f"  ✓ {pdf_path}")
     except Exception as exc:  # pragma: no cover - environment specific
         print(f"  ! PDF failed ({pdf_path.name}): {exc}")
     try:
-        fig.write_html(str(html_path))
+        fig.write_html(
+            str(html_path),
+            include_plotlyjs="cdn",
+            full_html=True,
+            config=download_config,
+        )
         print(f"  ✓ {html_path}")
     except Exception as exc:  # pragma: no cover - environment specific
         print(f"  ! HTML failed ({html_path.name}): {exc}")
@@ -327,28 +342,39 @@ def create_margin_preservation_cascade(
     save_figure(fig, output_dir / f"vizA_margin_preservation_cascade_{dataset}", width=1300, height=520)
 
 
-def create_tradeoff_scatter(instances: pd.DataFrame, dataset: str, output_dir: Path) -> None:
-    """
-    Create scatter plots showing the sufficiency-necessity trade-off, stratified by:
-    - Rows: Correctness (correct vs incorrect predictions)
-    - Columns: Predicted class
-    - Within each subplot: Different graph types shown with different symbols,
-      and methods shown with different colors.
-    """
+def build_tradeoff_scatter_figure(
+    instances: pd.DataFrame,
+    dataset: str,
+    output_dir: Optional[Path] = None,
+) -> Optional[go.Figure]:
+    """Return the trade-off scatter figure for a dataset (or None if no data)."""
     if instances.empty:
-        return
+        return None
 
     subset = instances[instances.get("dataset_slug") == dataset].copy()
     if subset.empty:
-        return
+        return None
 
     # Get unique classes
-    classes = sorted(subset["prediction_class"].dropna().unique())
+    classes = sorted(subset["prediction_class"].dropna().unique().tolist())
     if not classes:
         classes = ["All"]
         subset = subset.assign(prediction_class="All")
 
-    class_titles = [f"Class {cls}" for cls in classes]
+    class_titles = [f"<b>Class {cls}</b>" for cls in classes]
+    cols = len(classes)
+    rows = 1
+    subplot_titles = class_titles
+    left_margin, right_margin = 90, 70
+    top_margin, bottom_margin = 140, 80
+    horizontal_spacing = 0.05
+    subplot_target_px = 620
+    domain_width = (1 - horizontal_spacing * max(cols - 1, 0)) / cols
+    domain_width = max(domain_width, 0.2)
+    usable_width = subplot_target_px / domain_width
+    figure_width = max(960, usable_width + left_margin + right_margin)
+    subplot_height = subplot_target_px
+    figure_height = max(720, top_margin + bottom_margin + subplot_height)
 
     # Summarise quadrant distribution for this dataset
     quadrant_subset = subset[
@@ -379,7 +405,7 @@ def create_tradeoff_scatter(instances: pd.DataFrame, dataset: str, output_dir: P
             .rename("count")
             .reset_index()
         )
-        if not summary.empty:
+        if not summary.empty and output_dir is not None:
             summary["dataset"] = dataset
             summary["total_count"] = summary.groupby(group_cols, dropna=False)["count"].transform("sum")
             summary["proportion"] = summary["count"] / summary["total_count"]
@@ -390,12 +416,27 @@ def create_tradeoff_scatter(instances: pd.DataFrame, dataset: str, output_dir: P
 
     fig = make_subplots(
         rows=1,
-        cols=len(classes),
-        subplot_titles=class_titles,
-        shared_xaxes=True,
-        shared_yaxes=True,
-        horizontal_spacing=0.04,
+        cols=cols,
+        subplot_titles=subplot_titles,
+        shared_xaxes=False,
+        shared_yaxes=False,
+        horizontal_spacing=horizontal_spacing,
+        vertical_spacing=0.08,
     )
+
+    class_annotation_idx = 0
+    for annotation in fig.layout.annotations:
+        if isinstance(annotation.text, str) and annotation.text.startswith("<b>Class"):
+            axis_suffix = "" if class_annotation_idx == 0 else str(class_annotation_idx + 1)
+            xref = "x domain" if axis_suffix == "" else f"x{axis_suffix} domain"
+            annotation.update(
+                x=0.5,
+                xref=xref,
+                yref="paper",
+                y=1.01,
+                yshift=-5,
+            )
+            class_annotation_idx += 1
 
     has_data = False
     correctness_colors = {True: "#2ecc71", False: "#e74c3c"}
@@ -412,6 +453,7 @@ def create_tradeoff_scatter(instances: pd.DataFrame, dataset: str, output_dir: P
             combo_index += 1
 
     legend_shown: set[Tuple[str, str, bool]] = set()
+    axis_meta: List[Tuple[str, str, int, int]] = []
 
     quadrant_fills = {
         "Sufficient-Necessary": lighten_to_rgba("#1a9850", factor=0.45, alpha=0.25),
@@ -420,13 +462,17 @@ def create_tradeoff_scatter(instances: pd.DataFrame, dataset: str, output_dir: P
         "Insufficient-Redundant": lighten_to_rgba("#d73027", factor=0.4, alpha=0.25),
     }
 
-    for col_idx, cls in enumerate(classes, start=1):
+    for idx, cls in enumerate(classes):
+        row_idx = 1
+        col_idx = idx + 1
         class_subset = subset[subset["prediction_class"] == cls]
         if class_subset.empty:
             continue
-        axis_suffix = "" if col_idx == 1 else str(col_idx)
+        axis_index = idx + 1
+        axis_suffix = "" if axis_index == 1 else str(axis_index)
         x_axis_name = f"x{axis_suffix}" if axis_suffix else "x"
         y_axis_name = f"y{axis_suffix}" if axis_suffix else "y"
+        axis_meta.append((x_axis_name, y_axis_name, row_idx, col_idx))
 
         # Background quadrants
         fig.add_shape(
@@ -519,61 +565,100 @@ def create_tradeoff_scatter(instances: pd.DataFrame, dataset: str, output_dir: P
                                 "Baseline margin: %{customdata[0]:.3f}<extra></extra>"
                             ),
                             showlegend=showlegend,
-                            legendgroup=f"{method}_{graph}_{correctness}",
+                            legendgroup=f"{graph}_{correctness}",
                             name=(
-                                f"{METHOD_LABELS.get(method, method)} · {graph_title_text(graph)} · "
+                                "<b>"
+                                f"{graph_title_text(graph)} · "
                                 f"{'Correct' if correctness else 'Incorrect'}"
+                                "</b>"
                             )
                             if showlegend
                             else None,
                         ),
-                        row=1,
+                        row=row_idx,
                         col=col_idx,
                     )
 
     if not has_data:
-        return
+        return None
 
-    for col_idx in range(1, len(classes) + 1):
-        fig.add_hline(y=0, line_dash="dot", line_color="#999", row=1, col=col_idx, line_width=1)
-        fig.add_vline(x=0, line_dash="dot", line_color="#999", row=1, col=col_idx, line_width=1)
-        fig.update_xaxes(range=RATIO_LIMIT, title_text="Sufficiency Ratio", row=1, col=col_idx)
-    fig.update_yaxes(range=RATIO_LIMIT, title_text="Necessity Ratio", row=1, col=1)
+    for x_axis_name, y_axis_name, row_idx, col_idx in axis_meta:
+        fig.update_xaxes(
+            range=RATIO_LIMIT,
+            row=row_idx,
+            col=col_idx,
+            constrain="domain",
+            ticks="outside",
+            ticklen=5,
+            tickwidth=1,
+        )
+        fig.update_yaxes(
+            range=RATIO_LIMIT,
+            row=row_idx,
+            col=col_idx,
+            title_text="<b>Necessity Ratio</b>" if col_idx == 1 else None,
+            title_font=dict(size=22),
+            scaleanchor=x_axis_name,
+            scaleratio=1,
+            ticks="outside",
+            ticklen=5,
+            tickwidth=1,
+        )
+
+    fig.add_annotation(
+        text="<b>Sufficiency Ratio</b>",
+        x=0.5,
+        y=-0.1,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
+        font=dict(size=22),
+    )
 
     fig.update_layout(
-        title=dict(
-            text=(
-                "<b>Sufficiency–Necessity Trade-off Scatter</b><br>"
-                f"<sub>{dataset_label(dataset)} · columns = class · color = correctness · symbol = method·graph</sub>"
-            ),
-            x=0.5,
-            xanchor="center",
-        ),
-        height=1080,
-        width=max(1920, 480 * len(classes)),
+        height=figure_height,
+        width=figure_width,
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(size=10),
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=1.32,
+            y=1.08,
             xanchor="center",
             x=0.5,
-            font=dict(size=9),
+            font=dict(size=20),
             traceorder="grouped",
             bgcolor="rgba(255,255,255,0.8)",
             bordercolor="rgba(0,0,0,0.25)",
             borderwidth=1,
         ),
-        margin=dict(t=320, b=90, l=90, r=70),
+        margin=dict(t=top_margin, b=bottom_margin + 60, l=left_margin, r=right_margin),
     )
+
+    return fig
+
+
+def create_tradeoff_scatter(instances: pd.DataFrame, dataset: str, output_dir: Path) -> None:
+    """
+    Create scatter plots showing the sufficiency-necessity trade-off, stratified by:
+    - Rows: Correctness (correct vs incorrect predictions)
+    - Columns: Predicted class
+    - Within each subplot: Different graph types shown with different symbols,
+      and methods shown with different colors.
+    """
+    fig = build_tradeoff_scatter_figure(instances, dataset, output_dir=output_dir)
+    if fig is None:
+        return
+
+    width = int(fig.layout.width) if fig.layout.width else 1920
+    height = int(fig.layout.height) if fig.layout.height else 1080
 
     save_figure(
         fig,
         output_dir / f"vizB_tradeoff_scatter_{dataset}",
-        width=max(1920, 480 * len(classes)),
-        height=1080,
+        width=width,
+        height=height,
     )
 
 
