@@ -2,8 +2,9 @@
 """
 Render Fidelity⁺/Fidelity⁻ dashboards for the fidelity dimension.
 
-This module produces two interactive Plotly figures for each dataset:
+This module produces three interactive Plotly figures for each dataset:
   • Quadrant scatter per class showing where explanations fall in F⁺/F⁻ space.
+  • Quadrant distribution bars summarising explanation counts per semantic region.
   • Violin plots summarising fidelity asymmetry distributions per class.
 
 Both figures mirror the consistency layout (one subplot per class, shared
@@ -29,6 +30,7 @@ INSTANCE_ROOT = Path("outputs/analytics/fidelity")
 OUTPUT_ROOT = Path("outputs/analytics/fidelity/plots")
 SUMMARY_PATH = Path("outputs/analytics/fidelity/fidelity_summary.csv")
 OUTPUT_FILENAME = "fidelity_quadrants_{dataset}.html"
+QUADRANT_DISTRIBUTION_FILENAME = "fidelity_quadrant_distribution_{dataset}.html"
 
 DATASET_LABELS: Dict[str, str] = {
     "setfit_ag_news": "AG News (SetFit)",
@@ -77,6 +79,36 @@ EXPERIMENT_LABELS: Dict[tuple[str, str], str] = {
     ("token_shap_llm", "tokens"): "TokenSHAP<br>Tokens",
 }
 
+FIDELITY_QUADRANT_ORDER: Sequence[str] = (
+    "Faithful",
+    "Incomplete",
+    "Redundant",
+    "Unfaithful",
+)
+
+FIDELITY_QUADRANT_INFO: Dict[str, Dict[str, str]] = {
+    "Faithful": {
+        "color": "#1a9850",
+        "signs": "F⁺ > 0, F⁻ > 0",
+        "description": "Faithful explanations — keeping highlighted tokens preserves the prediction and removing them flips it.",
+    },
+    "Incomplete": {
+        "color": "#ffc107",
+        "signs": "F⁺ < 0, F⁻ > 0",
+        "description": "Incomplete explanations — removal matters but retaining only the highlighted tokens is insufficient.",
+    },
+    "Redundant": {
+        "color": "#91bfdb",
+        "signs": "F⁺ > 0, F⁻ < 0",
+        "description": "Redundant explanations — retained tokens preserve the prediction although removing them barely changes it.",
+    },
+    "Unfaithful": {
+        "color": "#d73027",
+        "signs": "F⁺ < 0, F⁻ < 0",
+        "description": "Unfaithful explanations — highlighted regions neither preserve nor alter the prediction as expected.",
+    },
+}
+
 QUADRANT_COLORS: Dict[str, str] = {
     "++": "rgba(26, 152, 80, 0.18)",    # Sufficient & Necessary (ideal)
     "-+": "rgba(255, 193, 7, 0.18)",    # Necessary but insufficient (warning)
@@ -109,6 +141,62 @@ body {
 # --------------------------------------------------------------------------- #
 
 
+def lighten_color(hex_color: str, factor: float) -> str:
+    """Return a lighter RGB string for ``hex_color`` blended toward white."""
+    color = hex_color.lstrip("#")
+    if len(color) != 6:
+        raise ValueError(f"Invalid hex colour: {hex_color}")
+    r = int(color[0:2], 16)
+    g = int(color[2:4], 16)
+    b = int(color[4:6], 16)
+    blend = float(np.clip(factor, 0.0, 1.0))
+    r_l = int(r + (255 - r) * blend)
+    g_l = int(g + (255 - g) * blend)
+    b_l = int(b + (255 - b) * blend)
+    return f"rgb({r_l},{g_l},{b_l})"
+
+
+def classify_fidelity_quadrant(fidelity_plus: float, fidelity_minus: float) -> str:
+    """Map Fidelity⁺/Fidelity⁻ pairs to semantic quadrant labels."""
+    f_plus = 0.0 if pd.isna(fidelity_plus) else float(fidelity_plus)
+    f_minus = 0.0 if pd.isna(fidelity_minus) else float(fidelity_minus)
+    if f_plus >= 0 and f_minus >= 0:
+        return "Faithful"
+    if f_plus < 0 <= f_minus:
+        return "Incomplete"
+    if f_plus >= 0 and f_minus < 0:
+        return "Redundant"
+    return "Unfaithful"
+
+
+def annotate_fidelity_quadrants(instances: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of ``instances`` with quadrant labels and clean correctness."""
+    working = instances.copy()
+    working["quadrant_label"] = [
+        classify_fidelity_quadrant(fp, fm)
+        for fp, fm in zip(working.get("fidelity_plus"), working.get("fidelity_minus"))
+    ]
+    working["is_correct"] = working["is_correct"].fillna(False).astype(bool)
+    return working
+
+
+def fidelity_method_graph_summary(working: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate quadrant counts per method/graph/correctness combination."""
+    summary = (
+        working.groupby(["method", "graph_type", "quadrant_label", "is_correct"], dropna=False)
+        .size()
+        .rename("count")
+        .reset_index()
+    )
+    if summary.empty:
+        return summary
+
+    summary["experiment_total"] = summary.groupby(["method", "graph_type"], dropna=False)["count"].transform("sum")
+    summary["percentage"] = 100.0 * summary["count"] / summary["experiment_total"].replace(0, np.nan)
+    summary["percentage"] = summary["percentage"].fillna(0.0)
+    return summary
+
+
 def discover_instance_paths(root: Path, dataset: str) -> List[Path]:
     """Return all per-instance fidelity CSV paths for ``dataset`` across methods."""
     paths: List[Path] = []
@@ -136,6 +224,8 @@ def load_dataset_instances(root: Path, dataset: str) -> pd.DataFrame:
         if df.empty:
             continue
         df = df.copy()
+        if "method" not in df.columns:
+            df["method"] = path.parent.parent.name
         if "graph_type" not in df.columns:
             df["graph_type"] = path.stem
         df["method"] = df["method"].astype(str)
@@ -234,6 +324,160 @@ def write_fullscreen_html(fig: go.Figure, output_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # Plot construction                                                           #
 # --------------------------------------------------------------------------- #
+
+
+def build_fidelity_quadrant_distribution_plot(dataset: str, root: Path, output_root: Path) -> Path:
+    """Render stacked bar charts summarising fidelity quadrants per experiment."""
+    instances = load_dataset_instances(root, dataset)
+    if instances.empty:
+        raise ValueError(f"No fidelity instances available for dataset '{dataset}'.")
+
+    working = annotate_fidelity_quadrants(instances)
+    summary = fidelity_method_graph_summary(working)
+    if summary.empty:
+        raise ValueError(f"Unable to compute fidelity quadrant summary for dataset '{dataset}'.")
+
+    available_experiments = {
+        (method, graph)
+        for method, graph in summary[["method", "graph_type"]].drop_duplicates().itertuples(index=False, name=None)
+    }
+    experiment_sequence = [exp for exp in EXPERIMENT_ORDER if exp in available_experiments]
+    if not experiment_sequence:
+        raise ValueError(f"No fidelity experiments found for dataset '{dataset}'.")
+
+    dataset_label = DATASET_LABELS.get(dataset, dataset.replace("_", " ").title())
+    fig = make_subplots(
+        rows=1,
+        cols=len(experiment_sequence),
+        subplot_titles=[
+            f"<b>{METHOD_LABELS.get(method, method)}</b><br><span style='font-size:12px'><b>{GRAPH_LABELS.get(graph, graph)}</b></span>"
+            for method, graph in experiment_sequence
+        ],
+        horizontal_spacing=0.07,
+    )
+
+    for annotation in fig.layout.annotations:
+        if annotation.text:
+            annotation.font = dict(size=18)
+
+    for col_idx, (method, graph) in enumerate(experiment_sequence, start=1):
+        exp_data = summary[(summary["method"] == method) & (summary["graph_type"] == graph)]
+        exp_total = int(exp_data["experiment_total"].iloc[0]) if not exp_data.empty else 0
+        for quadrant in FIDELITY_QUADRANT_ORDER:
+            info = FIDELITY_QUADRANT_INFO.get(quadrant, {})
+            colour = info.get("color", "#7f8c8d")
+            sign_text = info.get("signs", "")
+            desc = info.get("description", "")
+            quad_data = exp_data[exp_data["quadrant_label"] == quadrant]
+            for correctness in (True, False):
+                subset = quad_data[quad_data["is_correct"] == correctness]
+                pct = float(subset["percentage"].sum()) if not subset.empty else 0.0
+                count = int(subset["count"].sum()) if not subset.empty else 0
+                fig.add_trace(
+                    go.Bar(
+                        x=[quadrant],
+                        y=[pct],
+                        name=(
+                            f"{quadrant} · {'Correct' if correctness else 'Incorrect'}" if col_idx == 1 else None
+                        ),
+                        marker=dict(
+                            color=colour if correctness else lighten_color(colour, 0.4),
+                            opacity=1.0 if correctness else 0.55,
+                            line=dict(color="#2c3e50" if correctness else "#95a5a6", width=1.0),
+                        ),
+                        hovertemplate=(
+                            f"<b>{quadrant}</b><br>"
+                            f"{sign_text}<br>"
+                            f"{desc}<br>"
+                            f"Correctness: {'Correct' if correctness else 'Incorrect'}<br>"
+                            f"Count: {count} / {exp_total} ({pct:.1f}%)<extra></extra>"
+                        ),
+                        showlegend=col_idx == 1,
+                        legendgroup=quadrant,
+                    ),
+                    row=1,
+                    col=col_idx,
+                )
+
+    for col_idx in range(1, len(experiment_sequence) + 1):
+        fig.update_xaxes(
+            type="category",
+            categoryorder="array",
+            categoryarray=list(FIDELITY_QUADRANT_ORDER),
+            tickangle=-25,
+            showgrid=False,
+            row=1,
+            col=col_idx,
+            tickfont=dict(size=16, family="Arial Black, Arial, sans-serif"),
+        )
+        fig.update_yaxes(
+            range=[0, 100],
+            showgrid=True,
+            gridcolor="rgba(0,0,0,0.08)",
+            title_text="<b>Share of Explanations (%)</b>" if col_idx == 1 else "",
+            row=1,
+            col=col_idx,
+            title_font=dict(size=18),
+        )
+
+    width = max(1920, 520 * len(experiment_sequence))
+    fig.update_layout(
+        barmode="stack",
+        bargap=0.25,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.18,
+            xanchor="center",
+            x=0.5,
+            bgcolor="rgba(255,255,255,0.95)",
+            bordercolor="rgba(0,0,0,0.25)",
+            borderwidth=1,
+            font=dict(size=20),
+        ),
+        title=dict(
+            text=(
+                "<b>Fidelity Quadrant Distribution</b><br>"
+                f"<span style='font-size:14px'>{dataset_label}</span>"
+            ),
+            x=0.5,
+            xanchor="center",
+        ),
+        font=dict(family="Arial, sans-serif", size=12),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        height=1080,
+        width=width,
+        margin=dict(t=220, b=210, l=90, r=60),
+    )
+
+    fig.add_annotation(
+        text="<b>Quadrant Interpretation</b>",
+        x=0.5,
+        y=-0.25,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
+        font=dict(size=22),
+    )
+
+    fig.add_annotation(
+        text=(
+            "Faithful: F⁺ > 0 & F⁻ > 0 • Incomplete: F⁺ < 0 & F⁻ > 0 • "
+            "Redundant: F⁺ > 0 & F⁻ < 0 • Unfaithful: F⁺ < 0 & F⁻ < 0"
+        ),
+        x=0.5,
+        y=-0.32,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
+        font=dict(size=16, color="#34495e"),
+    )
+
+    output_path = output_root / dataset / QUADRANT_DISTRIBUTION_FILENAME.format(dataset=dataset)
+    write_fullscreen_html(fig, output_path)
+    print(f"✓ {dataset}: fidelity quadrant distribution -> {output_path}")
+    return output_path
 
 
 def build_quadrant_plot(dataset: str, root: Path, output_root: Path) -> Path:
@@ -629,6 +873,7 @@ def render_all(
     output_root: Path,
 ) -> None:
     for dataset in datasets:
+        build_fidelity_quadrant_distribution_plot(dataset, instance_root, output_root)
         build_quadrant_plot(dataset, instance_root, output_root)
         build_asymmetry_plot(dataset, instance_root, output_root)
         build_correctness_sensitivity_plot(dataset, summary_df, output_root)
