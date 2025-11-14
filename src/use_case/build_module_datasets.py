@@ -8,10 +8,17 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Sequence
+import ast
 
 import numpy as np
 import pandas as pd
 from datasets import load_dataset
+
+SRC_ROOT = Path(__file__).resolve().parents[1]
+if str(SRC_ROOT) not in sys.path:
+    sys.path.append(str(SRC_ROOT))
+
+from use_case.feature_config import PROGRESSION_TOP_K  # type: ignore
 
 
 ANALYTIC_ROOTS: Mapping[str, Path] = {
@@ -37,6 +44,11 @@ BASE_DROP_COLUMNS = {
     "run_id",
     "split",
     "graph_index",
+}
+
+PROGRESSION_DROP_COLUMNS = {
+    "maskout": "progression_maskout_progression_drop",
+    "sufficiency": "progression_sufficiency_progression_drop",
 }
 
 
@@ -127,6 +139,64 @@ def to_bool(series: pd.Series) -> pd.Series:
     return series.apply(cast)
 
 
+def _parse_progression_list(value) -> List[float]:
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return []
+        try:
+            parsed = ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            return []
+    else:
+        parsed = value
+    if isinstance(parsed, (list, tuple, np.ndarray)):
+        result: List[float] = []
+        for item in parsed:
+            try:
+                result.append(float(item))
+            except (TypeError, ValueError):
+                continue
+        return result
+    return []
+
+
+def _cumulative_value_at(seq: List[float], k: int) -> float:
+    if not seq:
+        return 0.0
+    idx = min(k, len(seq)) - 1
+    if idx < 0:
+        return 0.0
+    return float(seq[idx])
+
+
+def _concentration_at(seq: List[float], k: int) -> float:
+    total = seq[-1] if seq else 0.0
+    if total <= 0:
+        return 0.0
+    return _cumulative_value_at(seq, k) / total
+
+
+def add_progression_features(df: pd.DataFrame) -> pd.DataFrame:
+    if not any(col in df.columns for col in PROGRESSION_DROP_COLUMNS.values()):
+        return df
+    enriched = df.copy()
+    for prefix, column in PROGRESSION_DROP_COLUMNS.items():
+        if column not in enriched.columns:
+            continue
+        sequences = enriched[column].apply(_parse_progression_list)
+        for k in PROGRESSION_TOP_K:
+            enriched[f"progression_{prefix}_drop_k{k}"] = sequences.apply(
+                lambda seq, kk=k: _cumulative_value_at(seq, kk)
+            )
+        if prefix == "maskout":
+            for k in PROGRESSION_TOP_K:
+                enriched[f"progression_concentration_top{k}"] = sequences.apply(
+                    lambda seq, kk=k: _concentration_at(seq, kk)
+                )
+    return enriched
+
+
 def merge_analytics(dataset: str, method: str, graph: str) -> pd.DataFrame:
     fidelity_df = pd.read_csv(analytic_path("fidelity", method, dataset, graph))
     fidelity_df = fidelity_df.copy()
@@ -140,6 +210,7 @@ def merge_analytics(dataset: str, method: str, graph: str) -> pd.DataFrame:
         prefixed = prefix_columns(df, kind)
         merged = merged.merge(prefixed, on="global_graph_index", how="inner", validate="one_to_one")
 
+    merged = add_progression_features(merged)
     merged["is_correct"] = to_bool(merged["is_correct"])
     return merged
 
@@ -245,4 +316,3 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     main(sys.argv[1:])
-

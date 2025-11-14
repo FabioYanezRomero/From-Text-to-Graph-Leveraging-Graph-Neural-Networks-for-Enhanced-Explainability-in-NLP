@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # ============================================================================
 # CONFIGURATION
@@ -130,6 +131,207 @@ def _save_figure(fig: go.Figure, output_stem: Path, width: int, height: int) -> 
         print(f"  ! HTML failed: {exc}")
 
 
+def _format_bar_text(value: float) -> str:
+    text = f"{value:.3f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _create_scatter_fig(
+    series_data: List[Dict[str, object]],
+    x_positions: List[int],
+    x_ticklabels: List[str],
+    dataset_label: str,
+    field_label: str,
+    values_key: str,
+    y_label: str,
+    subtitle: str,
+) -> Optional[go.Figure]:
+    fig = go.Figure()
+
+    for series in series_data:
+        metrics_list = series["metrics"]
+        y_values = [info.get(values_key, float("nan")) for info in metrics_list]
+        y_array = np.asarray(y_values, dtype=float)
+        if not np.any(np.isfinite(y_array)):
+            continue
+
+        hover = []
+        for info in metrics_list:
+            label = info["label"]
+            raw_val = info.get("raw", float("nan"))
+            clipped_val = info.get("clipped", float("nan"))
+            relative_val = info.get("relative", float("nan"))
+            parts = [f"Top-k: {label}"]
+            parts.append(
+                "Raw mean: "
+                + ("N/A" if not np.isfinite(raw_val) else f"{raw_val:.4f}")
+            )
+            parts.append(
+                "Clipped mean: "
+                + ("N/A" if not np.isfinite(clipped_val) else f"{clipped_val:.4f}")
+            )
+            parts.append(
+                "Relative lift: "
+                + (
+                    "N/A"
+                    if not np.isfinite(relative_val)
+                    else f"{relative_val:.3f}×"
+                )
+            )
+            hover.append("<br>".join(parts))
+
+        fig.add_trace(
+            go.Scatter(
+                x=x_positions,
+                y=y_values,
+                mode="lines+markers",
+                name=series["name"],
+                line=dict(color=series["color"], width=2),
+                marker=dict(size=8),
+                hovertemplate="%{text}<extra></extra>",
+                text=hover,
+            )
+        )
+
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=x_positions,
+        ticktext=x_ticklabels,
+        tickangle=-45,
+        title="Top-k concentration",
+    )
+    fig.update_yaxes(
+        title=y_label,
+        rangemode="tozero",
+    )
+    if values_key == "relative":
+        fig.add_hline(
+            y=1.0,
+            line=dict(color="#666666", dash="dash", width=1),
+        )
+    fig.update_layout(
+        title=dict(
+            text=(
+                f"<b>Feature Importance Accumulation: {dataset_label}</b><br>"
+                f"<sub>{field_label} — {subtitle}</sub>"
+            ),
+            x=0.5,
+            xanchor="center",
+            font=dict(size=12, family="Times New Roman"),
+        ),
+        legend=dict(x=1.02, y=1.0, title="Method · Graph"),
+        height=520,
+        width=1100,
+        plot_bgcolor="rgba(245,245,245,0.7)",
+        paper_bgcolor="white",
+        margin=dict(l=80, r=250, t=140, b=100),
+        hovermode="closest",
+        font=dict(size=11, family="Times New Roman"),
+    )
+    if not fig.data:
+        return None
+    return fig
+
+
+def _create_clipped_bar_grid(
+    series_data: List[Dict[str, object]],
+    dataset_label: str,
+    field_label: str,
+) -> Optional[go.Figure]:
+    metric_order = list(DEFAULT_TOPK_METRICS)
+    subplot_titles = [f"<b>{TOPK_LABELS[m]}</b>" for m in metric_order]
+    fig = make_subplots(
+        rows=2,
+        cols=2,
+        shared_yaxes=True,
+        subplot_titles=subplot_titles,
+        vertical_spacing=0.18,
+        horizontal_spacing=0.12,
+    )
+    has_data = False
+    for idx, metric in enumerate(metric_order):
+        row = idx // 2 + 1
+        col = idx % 2 + 1
+        x_labels: List[str] = []
+        y_values: List[float] = []
+        hover_data: List[List[object]] = []
+        colors: List[str] = []
+        texts: List[str] = []
+        metric_label = TOPK_LABELS[metric]
+        for series in series_data:
+            match = next((info for info in series["metrics"] if info["label"] == metric_label), None)
+            if match is None:
+                continue
+            clipped_val = match.get("clipped")
+            raw_val = match.get("raw")
+            if clipped_val is None or not np.isfinite(clipped_val):
+                continue
+            display_name = series["name"]
+            method_label, graph_label = display_name.split(" — ", 1) if " — " in display_name else (display_name, "")
+            category = f"{method_label}<br>{graph_label}" if graph_label else method_label
+            formatted_category = f"<b>{category}</b>"
+            x_labels.append(formatted_category)
+            y_values.append(clipped_val)
+            hover_data.append([
+                method_label,
+                graph_label,
+                metric_label,
+                clipped_val,
+                raw_val if raw_val is not None else float("nan"),
+            ])
+            colors.append(series["color"])
+            texts.append(_format_bar_text(clipped_val))
+        if not x_labels:
+            continue
+        has_data = True
+        fig.add_trace(
+            go.Bar(
+                x=x_labels,
+                y=y_values,
+                marker=dict(color=colors, line=dict(color="black", width=1.2)),
+                text=texts,
+                textposition="outside",
+                cliponaxis=False,
+                showlegend=False,
+                customdata=hover_data,
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "Graph type: %{customdata[1]}<br>"
+                    "Metric: %{customdata[2]}<br>"
+                    "Clipped concentration: %{customdata[3]:.4f}<br>"
+                    "Raw mean: %{customdata[4]:.4f}<extra></extra>"
+                ),
+            ),
+            row=row,
+            col=col,
+        )
+        fig.update_xaxes(
+            tickangle=-45,
+            tickfont=dict(size=12),
+            row=row,
+            col=col,
+        )
+        fig.update_yaxes(
+            range=[0, 1],
+            row=row,
+            col=col,
+        )
+    if not has_data:
+        return None
+    fig.update_yaxes(title="<b>Clipped mean concentration</b>", row=1, col=1)
+    fig.update_layout(
+        title=(
+            f"<b>Top-k Concentration — {dataset_label}</b><br>"
+            f"<sub>{field_label}</sub>"
+        ),
+        template="plotly_white",
+        height=600,
+        width=1600,
+        margin=dict(t=120, b=100, l=80, r=40),
+    )
+    return fig
+
+
 def generate_plots_for_field(
     csv_path: Path,
     output_dir: Path,
@@ -157,7 +359,7 @@ def generate_plots_for_field(
         ds_df = focus[focus["dataset"] == dataset]
 
         x_positions = list(range(len(DEFAULT_TOPK_METRICS)))
-        x_ticklabels = [TOPK_LABELS[m] for m in DEFAULT_TOPK_METRICS]
+        x_ticklabels = [f"<b>{TOPK_LABELS[m]}</b>" for m in DEFAULT_TOPK_METRICS]
 
         baseline_slice = ds_df[
             (ds_df["method"] == BASELINE_METHOD)
@@ -244,107 +446,37 @@ def generate_plots_for_field(
         field_label = FIELD_LABELS.get(field_name, field_name)
         dataset_label = DEFAULT_DATASET_LABELS.get(dataset, dataset)
 
-        def _build_scatter_figure(values_key: str, y_label: str, subtitle: str) -> Optional[go.Figure]:
-            fig = go.Figure()
-
-            for series in series_data:
-                metrics_list = series["metrics"]
-                y_values = [info.get(values_key, float("nan")) for info in metrics_list]
-                y_array = np.asarray(y_values, dtype=float)
-                if not np.any(np.isfinite(y_array)):
-                    continue
-
-                hover = []
-                for info in metrics_list:
-                    label = info["label"]
-                    raw_val = info.get("raw", float("nan"))
-                    clipped_val = info.get("clipped", float("nan"))
-                    relative_val = info.get("relative", float("nan"))
-                    parts = [f"Top-k: {label}"]
-                    parts.append(
-                        "Raw mean: "
-                        + ("N/A" if not np.isfinite(raw_val) else f"{raw_val:.4f}")
-                    )
-                    parts.append(
-                        "Clipped mean: "
-                        + ("N/A" if not np.isfinite(clipped_val) else f"{clipped_val:.4f}")
-                    )
-                    parts.append(
-                        "Relative lift: "
-                        + (
-                            "N/A"
-                            if not np.isfinite(relative_val)
-                            else f"{relative_val:.3f}×"
-                        )
-                    )
-                    hover.append("<br>".join(parts))
-
-                fig.add_trace(
-                    go.Scatter(
-                        x=x_positions,
-                        y=y_values,
-                        mode="lines+markers",
-                        name=series["name"],
-                        line=dict(color=series["color"], width=2),
-                        marker=dict(size=8),
-                        hovertemplate="%{text}<extra></extra>",
-                        text=hover,
-                    )
-                )
-
-            fig.update_xaxes(
-                tickmode="array",
-                tickvals=x_positions,
-                ticktext=x_ticklabels,
-                title="Top-k concentration",
-            )
-            fig.update_yaxes(
-                title=y_label,
-                rangemode="tozero",
-            )
-            if values_key == "relative":
-                fig.add_hline(
-                    y=1.0,
-                    line=dict(color="#666666", dash="dash", width=1),
-                )
-            fig.update_layout(
-                title=dict(
-                    text=(
-                        f"<b>Feature Importance Accumulation: {dataset_label}</b><br>"
-                        f"<sub>{field_label} — {subtitle}</sub>"
-                    ),
-                    x=0.5,
-                    xanchor="center",
-                    font=dict(size=12, family="Times New Roman"),
-                ),
-                legend=dict(x=1.02, y=1.0, title="Method · Graph"),
-                height=520,
-                width=1100,
-                plot_bgcolor="rgba(245,245,245,0.7)",
-                paper_bgcolor="white",
-                margin=dict(l=80, r=250, t=140, b=100),
-                hovermode="closest",
-                font=dict(size=11, family="Times New Roman"),
-            )
-            if not fig.data:
-                return None
-            return fig
-
-        raw_fig = _build_scatter_figure(
+        raw_fig = _create_scatter_fig(
+            series_data,
+            x_positions,
+            x_ticklabels,
+            dataset_label,
+            field_label,
             "raw",
             "Raw mean concentration",
             "Raw mean values across top-k",
         )
-        clipped_fig = _build_scatter_figure(
+        clipped_fig = _create_scatter_fig(
+            series_data,
+            x_positions,
+            x_ticklabels,
+            dataset_label,
+            field_label,
             "clipped",
             "Clipped mean concentration",
             "Clipped to [0, 1]",
         )
-        relative_fig = _build_scatter_figure(
+        relative_fig = _create_scatter_fig(
+            series_data,
+            x_positions,
+            x_ticklabels,
+            dataset_label,
+            field_label,
             "relative",
             "Relative lift vs. TokenSHAP",
             "Ratio to baseline (TokenSHAP Tokens)",
         )
+        bar_fig = _create_clipped_bar_grid(series_data, dataset_label, field_label)
 
         plot_dir = output_dir / PLOTS_DIRNAME
         plot_dir.mkdir(parents=True, exist_ok=True)
@@ -353,6 +485,8 @@ def generate_plots_for_field(
         raw_stem = plot_dir / f"importance_accumulation_{output_name}_raw_scatter"
         clipped_stem = plot_dir / f"importance_accumulation_{output_name}_clipped_scatter"
         relative_stem = plot_dir / f"importance_accumulation_{output_name}_relative_scatter"
+        raw_alias = plot_dir / f"importance_accumulation_{output_name}_raw"
+        bar_stem = plot_dir / f"importance_accumulation_{output_name}"
 
         download_config = {
             "toImageButtonOptions": {
@@ -365,17 +499,23 @@ def generate_plots_for_field(
         }
 
         if raw_fig is not None:
-            raw_fig.write_html(
-                str(raw_stem.with_suffix(".html")),
-                include_plotlyjs="cdn",
-                config=download_config,
-            )
+            raw_html_paths = [
+                raw_stem.with_suffix(".html"),
+                raw_alias.with_suffix(".html"),
+            ]
+            for raw_html in raw_html_paths:
+                raw_fig.write_html(
+                    str(raw_html),
+                    include_plotlyjs="cdn",
+                    config=download_config,
+                )
             try:
                 raw_fig.write_image(str(raw_stem.with_suffix(".pdf")), width=1100, height=520)
                 print(f"  ✓ {raw_stem.with_suffix('.pdf').name}")
             except Exception as exc:
                 print(f"  ! PDF failed: {exc}")
             print(f"  ✓ {raw_stem.with_suffix('.html').name}")
+            print(f"  ✓ {raw_alias.with_suffix('.html').name}")
         if clipped_fig is not None:
             clipped_fig.write_html(
                 str(clipped_stem.with_suffix(".html")),
@@ -400,6 +540,18 @@ def generate_plots_for_field(
             except Exception as exc:
                 print(f"  ! PDF failed: {exc}")
             print(f"  ✓ {relative_stem.with_suffix('.html').name}")
+        if bar_fig is not None:
+            bar_fig.write_html(
+                str(bar_stem.with_suffix(".html")),
+                include_plotlyjs="cdn",
+                config=download_config,
+            )
+            try:
+                bar_fig.write_image(str(bar_stem.with_suffix(".pdf")), width=1600, height=600)
+                print(f"  ✓ {bar_stem.with_suffix('.pdf').name}")
+            except Exception as exc:
+                print(f"  ! PDF failed: {exc}")
+            print(f"  ✓ {bar_stem.with_suffix('.html').name}")
 
 
 # ============================================================================

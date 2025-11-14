@@ -147,7 +147,7 @@ def build_combined_figure(root: Path, output_path: Path) -> Path:
     )
 
     x_positions = list(range(len(DEFAULT_TOPK_METRICS)))
-    x_labels = [TOPK_LABELS[m] for m in DEFAULT_TOPK_METRICS]
+    x_labels = [f"<b>{TOPK_LABELS[m]}</b>" for m in DEFAULT_TOPK_METRICS]
 
     for idx, spec in enumerate(SUBPLOT_SPEC):
         field_df = field_frames[spec["field"]]
@@ -182,6 +182,7 @@ def build_combined_figure(root: Path, output_path: Path) -> Path:
             tickmode="array",
             tickvals=x_positions,
             ticktext=x_labels,
+            tickangle=-45,
             title="<b>Top-k concentration</b>" if spec["row"] == 2 else "",
             title_standoff=10,
             row=spec["row"],

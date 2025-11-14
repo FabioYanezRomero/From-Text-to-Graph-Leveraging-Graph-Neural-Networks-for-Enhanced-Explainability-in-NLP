@@ -48,12 +48,20 @@ class DetectionRecord:
     threshold: float
     mispredictions: int
     detections: int
+    correct_predictions: int
+    correct_retained: int
 
     @property
     def rate(self) -> float:
         if self.mispredictions == 0:
             return float("nan")
         return self.detections / self.mispredictions
+
+    @property
+    def correct_rate(self) -> float:
+        if self.correct_predictions == 0:
+            return float("nan")
+        return self.correct_retained / self.correct_predictions
 
 
 def _discover_instance_csvs(root: Path) -> List[Path]:
@@ -126,16 +134,24 @@ def load_per_instance_data(
 def compute_detection_records(
     df: pd.DataFrame,
     thresholds: Sequence[float],
+    metric_column: str,
 ) -> List[DetectionRecord]:
-    mispred = df[df["is_correct"] == False]  # noqa: E712
+    if metric_column not in df.columns:
+        raise ValueError(f"Requested detection metric '{metric_column}' is missing.")
     records: List[DetectionRecord] = []
 
-    for (method, dataset, graph_type), group in mispred.groupby(
+    for (method, dataset, graph_type), group in df.groupby(
         ["method", "dataset", "graph_type"], dropna=False
     ):
-        mispredictions = len(group)
+        mispred = group[group["is_correct"] == False]  # noqa: E712
+        correct = group[group["is_correct"] == True]  # noqa: E712
+        mispredictions = len(mispred)
+        correct_predictions = len(correct)
         for threshold in thresholds:
-            detections = int((group["deletion_auc"] < threshold).sum())
+            detections = int((mispred[metric_column] < threshold).sum()) if mispredictions else 0
+            retained = (
+                int((correct[metric_column] >= threshold).sum()) if correct_predictions else 0
+            )
             records.append(
                 DetectionRecord(
                     method=str(method),
@@ -144,6 +160,8 @@ def compute_detection_records(
                     threshold=float(threshold),
                     mispredictions=mispredictions,
                     detections=detections,
+                    correct_predictions=correct_predictions,
+                    correct_retained=retained,
                 )
             )
     return records
@@ -161,6 +179,9 @@ def summarise_detection(records: Sequence[DetectionRecord]) -> pd.DataFrame:
                 "mispredictions": rec.mispredictions,
                 "detections": rec.detections,
                 "rate": rec.rate,
+                "correct_predictions": rec.correct_predictions,
+                "correct_retained": rec.correct_retained,
+                "correct_rate": rec.correct_rate,
             }
         )
     df = pd.DataFrame(rows)
@@ -172,11 +193,20 @@ def summarise_detection(records: Sequence[DetectionRecord]) -> pd.DataFrame:
             rate_std=("rate", "std"),
             weighted_rate=("detections", "sum"),
             weighted_total=("mispredictions", "sum"),
+             correct_rate_mean=("correct_rate", "mean"),
+             correct_rate_std=("correct_rate", "std"),
+             weighted_correct_retained=("correct_retained", "sum"),
+             weighted_correct_total=("correct_predictions", "sum"),
             groups=("rate", "size"),
         )
         .reset_index()
     )
-    grouped["weighted_rate"] = grouped["weighted_rate"] / grouped["weighted_total"]
+    grouped["weighted_rate"] = grouped["weighted_rate"] / grouped["weighted_total"].where(
+        grouped["weighted_total"] != 0, np.nan
+    )
+    grouped["weighted_correct_rate"] = grouped["weighted_correct_retained"] / grouped[
+        "weighted_correct_total"
+    ].where(grouped["weighted_correct_total"] != 0, np.nan)
     return df, grouped
 
 
@@ -247,6 +277,7 @@ def create_error_detection_bar_plot(
     summary: pd.DataFrame,
     output_dir: Path,
     threshold: float,
+    metric_label: str,
 ) -> Path:
     plot_data = summary[summary["threshold"] == threshold].copy()
     plot_data["rate_std"] = plot_data["rate_std"].fillna(0.0)
@@ -261,7 +292,7 @@ def create_error_detection_bar_plot(
         capsize=6,
     )
     ax.set_ylabel("Error detection rate (%)")
-    ax.set_title(f"Error Detection at AUC < {threshold}")
+    ax.set_title(f"Error Detection at {metric_label} < {threshold}")
     ax.set_ylim(0, 100)
 
     for bar, value in zip(bars, plot_data["weighted_rate"]):
@@ -394,12 +425,14 @@ def create_detection_heatmap(
     df: pd.DataFrame,
     output_dir: Path,
     threshold: float,
+    metric_label: str,
+    metric_column: str,
 ) -> Path:
     mispred = df[df["is_correct"] == False]  # noqa: E712
     rows = []
     for (method, dataset), group in mispred.groupby(["method", "dataset"]):
         total = len(group)
-        detections = int((group["deletion_auc"] < threshold).sum())
+        detections = int((group[metric_column] < threshold).sum())
         rate = detections / total if total else float("nan")
         rows.append(
             {
@@ -426,7 +459,7 @@ def create_detection_heatmap(
         cbar_kws={"label": "Detection rate (%)"},
         ax=ax,
     )
-    ax.set_title(f"Detection Rate Heatmap (AUC < {threshold})")
+    ax.set_title(f"Detection Rate Heatmap ({metric_label} < {threshold})")
 
     output_path = output_dir / f"detection_heatmap_auc_{threshold:.1f}.png"
     fig.tight_layout()
@@ -439,9 +472,13 @@ def build_summary_markdown(
     detection_summary: pd.DataFrame,
     separation_summary: pd.DataFrame,
     divergence_summary: pd.DataFrame,
+    *,
+    metric_label: str,
 ) -> str:
     lines = [
         "# Important AUC Metrics",
+        "",
+        f"_Detection metric_: {metric_label}",
         "",
         "## Error Detection Rates",
     ]
@@ -450,7 +487,7 @@ def build_summary_markdown(
         if not np.isnan(row["rate_std"]):
             std_pp = f"{row['rate_std'] * 100:.1f} pp"
         lines.append(
-            f"- `{row['method']}` at AUC < {row['threshold']:.1f}: "
+            f"- `{row['method']}` at {metric_label} < {row['threshold']:.1f}: "
             f"{_format_percentage(row['weighted_rate'])} "
             f"(mean={_format_percentage(row['rate_mean'])}, std={std_pp}, n={int(row['groups'])})"
         )
@@ -514,6 +551,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Optional subset of graph types to include.",
     )
     parser.add_argument(
+        "--detection-metric",
+        type=str,
+        default="deletion_auc",
+        help="Column name to threshold for error detection (default: deletion_auc).",
+    )
+    parser.add_argument(
         "--thresholds",
         nargs="+",
         type=float,
@@ -542,9 +585,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         datasets=options.datasets,
         graph_types=options.graph_types,
     )
+    metric_column = options.detection_metric
+    if metric_column not in data.columns:
+        raise ValueError(
+            f"Requested detection metric '{metric_column}' not present in loaded data."
+        )
+    metric_label = metric_column.replace("_", " ").title()
 
     # 2. Compute metrics.
-    detection_records = compute_detection_records(data, options.thresholds)
+    detection_records = compute_detection_records(data, options.thresholds, metric_column)
     detection_details, detection_summary = summarise_detection(detection_records)
     separation_details, separation_summary = compute_auc_separation(data)
     divergence_summary = compute_divergence_summary(data)
@@ -557,7 +606,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     divergence_summary.to_csv(output_dir / "divergence_summary.csv", index=False)
 
     summary_markdown = build_summary_markdown(
-        detection_summary, separation_summary, divergence_summary
+        detection_summary,
+        separation_summary,
+        divergence_summary,
+        metric_label=metric_label,
     )
     (output_dir / "metrics_summary.md").write_text(summary_markdown, encoding="utf-8")
 
@@ -570,6 +622,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 detection_summary,
                 output_dir,
                 threshold=threshold,
+                metric_label=metric_label,
             )
         )
 
@@ -595,6 +648,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 data,
                 output_dir,
                 threshold=threshold,
+                metric_label=metric_label,
+                metric_column=metric_column,
             )
         )
 

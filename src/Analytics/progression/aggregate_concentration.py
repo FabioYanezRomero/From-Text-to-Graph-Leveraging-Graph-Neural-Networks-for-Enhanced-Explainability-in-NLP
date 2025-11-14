@@ -207,7 +207,7 @@ def compute_normalized_auc(progress: NormalizedProgression) -> Optional[float]:
     steps = progress.cumulative.size
     x = np.linspace(1.0 / steps, 1.0, steps)
     clipped = np.clip(progress.cumulative, 0.0, 1.0)
-    return float(np.trapz(clipped, x=x))
+    return float(np.trapezoid(clipped, x=x))
 
 
 def compute_negative_step_mass(per_step: np.ndarray) -> float:
