@@ -39,6 +39,9 @@ from Analytics.progression.importance_accumulation_plot import (  # noqa: E402
 PROGRESSION_ROOT = Path("outputs/analytics/progression")
 SUMMARY_FILENAME = "concentration_summary.csv"
 DEFAULT_STACK_DATASETS = ["setfit_ag_news", "stanfordnlp_sst2"]
+BARGAP = 0.15
+BARGROUPGAP = 0.05
+BAR_WIDTH = 0.36
 
 
 def _load_field_dataframe(field_dir: Path) -> pd.DataFrame:
@@ -271,9 +274,11 @@ def _add_dataset_row(
                 text=[_format_bar_text(v) for v in correct_vals],
                 textposition="outside",
                 texttemplate="%{text}",
+                width=BAR_WIDTH,
                 cliponaxis=False,
                 offsetgroup=f"correct_{row}_{col}",
                 customdata=hover_correct,
+                offset=-BAR_WIDTH / 2,
                 hovertemplate="%{customdata}<extra></extra>",
                 error_y=dict(
                     type="data",
@@ -302,9 +307,11 @@ def _add_dataset_row(
                 text=[_format_bar_text(v) for v in incorrect_vals],
                 textposition="outside",
                 texttemplate="%{text}",
+                width=BAR_WIDTH,
                 cliponaxis=False,
                 offsetgroup=f"incorrect_{row}_{col}",
                 customdata=hover_incorrect,
+                offset=BAR_WIDTH / 2,
                 hovertemplate="%{customdata}<extra></extra>",
                 error_y=dict(
                     type="data",
@@ -350,8 +357,8 @@ def build_bar_figure(
     fig.update_yaxes(title="<b>Clipped mean concentration</b>", row=1, col=1)
     fig.update_layout(
         barmode="group",
-        bargap=0.25,
-        bargroupgap=0.08,
+        bargap=BARGAP,
+        bargroupgap=BARGROUPGAP,
         title=(
             f"<b>Top-k Concentration — {dataset_label}</b><br>"
             f"<sub>{field_label}</sub>"
@@ -394,8 +401,8 @@ def build_stacked_figure(
         title=f"<b>Top-k Concentration — {field_label}</b>",
         template="plotly_white",
         barmode="group",
-        bargap=0.25,
-        bargroupgap=0.08,
+        bargap=BARGAP,
+        bargroupgap=BARGROUPGAP,
         legend=dict(
             orientation="h",
             x=0.5,
